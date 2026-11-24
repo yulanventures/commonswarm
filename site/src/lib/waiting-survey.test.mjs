@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  createWaitingSurveyState,
   formatSurveyAnswerSummary,
   formatSurveyDestination,
   renderWaitingSurvey,
+  runWaitingSurveyBatch,
   surveyDraftKey,
   surveyReadyEntries,
   surveySubmissionFromDraft,
@@ -583,4 +585,180 @@ test("survey step renders Dismiss alongside Skip and shows in-place Dismissed wi
   render();
   assert.equal(body.querySelector('[data-waiting-dismissed="ask:q1"]'), null);
   assert.ok(body.querySelector('[data-waiting-survey-dismiss="q1"]'));
+});
+
+test("runWaitingSurveyBatch (C3): retired batch settlement never clears a replacement batch's sending state or unlocks its controls, and a still-owned cancelled batch clears its sending indicator with no error", async () => {
+  const outcomes = [
+    { label: "success", result: { ok: true, optionIds: ["opt-a"], otherText: null } },
+    { label: "404", result: { ok: false, status: 404, error: "not_found", message: "Not found." } },
+    { label: "error", result: { ok: false, status: 500, error: "server_error", message: "Stale 500." } },
+    { label: "retired", result: { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." } },
+  ];
+
+  const q1 = makeAsk("q1", { what: "First question?" });
+  const q2 = makeAsk("q2", { what: "Second question?" });
+  const entries = [
+    { item: q1, submission: { optionIds: ["opt-a"], otherText: null } },
+    { item: q2, submission: { optionIds: ["opt-b"], otherText: null } },
+  ];
+
+  for (const outcome of outcomes) {
+    const doc = makeDoc();
+    const body = doc.createElement("div");
+    let attemptSeq = 0;
+    let loginGen = 1;
+    let state = {
+      ...createWaitingSurveyState(),
+      active: true,
+      mode: "review",
+      itemIds: ["q1", "q2"],
+      placeKey: "ws-1:ch-1",
+    };
+    const drafts = new Map([
+      [surveyDraftKey("ws-1", "q1"), { optionIds: ["opt-a"], otherOpen: false, otherText: "" }],
+      [surveyDraftKey("ws-1", "q2"), { optionIds: ["opt-b"], otherOpen: false, otherText: "" }],
+    ]);
+    const skipped = new Set();
+    const errors = new Map();
+    const dispatches = [];
+    const resolvers = [];
+    let renders = 0;
+    let completions = 0;
+
+    const renderReview = () => {
+      renders += 1;
+      renderWaitingSurvey(
+        body,
+        { items: [q1, q2], scope: "channel", mode: state.mode, index: state.index, drafts, skipped, errors, sending: state.sending },
+        { onExit: () => {}, onStep: () => {}, onDraftChange: () => {}, onSkip: () => {}, onReview: () => {}, onEdit: () => {}, onSendAll: () => {} },
+      );
+    };
+
+    const startBatch = () => {
+      const pinnedGen = loginGen;
+      return runWaitingSurveyBatch(entries, {
+        getState: () => state,
+        nextAttemptId: () => (attemptSeq += 1),
+        isAlive: () => loginGen === pinnedGen,
+        hasActiveSession: () => true,
+        sendEntry: (item) => {
+          dispatches.push({ loginGen: pinnedGen, itemId: item.id });
+          return new Promise(resolve => { resolvers.push(resolve); });
+        },
+        onEntrySucceeded: (item) => {
+          drafts.delete(surveyDraftKey(item.workspaceId, item.id));
+          errors.delete(item.id);
+        },
+        onEntryFailed: (item, msg) => {
+          errors.set(item.id, msg);
+        },
+        onRender: renderReview,
+        onComplete: () => {
+          completions += 1;
+          renderReview();
+        },
+        failureMessage: "Could not send.",
+      });
+    };
+
+    // Batch A starts under login 1 and is held on item 1.
+    const batchA = startBatch();
+    assert.equal(state.sending, true);
+    assert.equal(dispatches.length, 1);
+
+    // Same-person login replacement resets survey state synchronously.
+    loginGen += 1;
+    state = {
+      ...createWaitingSurveyState(),
+      active: true,
+      mode: "review",
+      itemIds: ["q1", "q2"],
+      placeKey: "ws-1:ch-1",
+    };
+
+    // Fresh Batch B starts under login 2 and is held on item 1.
+    const batchB = startBatch();
+    const attemptBId = state.sendingAttemptId;
+    assert.equal(state.sending, true);
+    assert.equal(body.querySelector("[data-waiting-survey-send]").textContent, "Sending…");
+    assert.equal(body.querySelector("[data-waiting-survey-send]").getAttribute("aria-disabled"), "true");
+    assert.equal(body.querySelector("[data-waiting-survey-back]").getAttribute("aria-disabled"), "true");
+    assert.equal(dispatches.filter(d => d.loginGen === 2).length, 1, `Survey(${outcome.label}): B dispatched item 1 once`);
+
+    // Release Batch A's held settlement: must do NOTHING to Batch B's sending flag, controls, drafts, or errors.
+    const rendersBeforeA = renders;
+    resolvers[0](outcome.result);
+    await batchA;
+
+    assert.equal(state.sending, true, `Survey(${outcome.label}): B must remain sending`);
+    assert.equal(state.sendingAttemptId, attemptBId, `Survey(${outcome.label}): B must still own sendingAttemptId`);
+    assert.equal(body.querySelector("[data-waiting-survey-send]").textContent, "Sending…");
+    assert.equal(body.querySelector("[data-waiting-survey-send]").getAttribute("aria-disabled"), "true");
+    assert.equal(body.querySelector("[data-waiting-survey-back]").getAttribute("aria-disabled"), "true");
+    assert.equal(renders, rendersBeforeA, `Survey(${outcome.label}): A must not repaint`);
+    assert.equal(completions, 0, `Survey(${outcome.label}): A must not complete`);
+    assert.equal(errors.size, 0, `Survey(${outcome.label}): A must set no error`);
+    assert.equal(drafts.size, 2, `Survey(${outcome.label}): A must not mutate B drafts`);
+    assert.equal(dispatches.filter(d => d.loginGen === 1).length, 1, `Survey(${outcome.label}): A must not send item 2`);
+    assert.equal(dispatches.filter(d => d.loginGen === 2).length, 1, `Survey(${outcome.label}): B still dispatched once`);
+
+    // Finish Batch B cleanly.
+    resolvers[1]({ ok: true, optionIds: ["opt-a"], otherText: null });
+    await Promise.resolve();
+    resolvers[2]({ ok: true, optionIds: ["opt-b"], otherText: null });
+    await batchB;
+    assert.equal(state.sending, false);
+    assert.equal(state.sendingAttemptId, null);
+    assert.equal(completions, 1);
+  }
+
+  // Still-owned cancelled survey batch clears its sending indicator and re-renders controls with no error or completion.
+  {
+    const doc = makeDoc();
+    const body = doc.createElement("div");
+    let attemptSeq = 0;
+    const state = {
+      ...createWaitingSurveyState(),
+      active: true,
+      mode: "review",
+      itemIds: ["q1"],
+      placeKey: "ws-1:ch-1",
+    };
+    const drafts = new Map([
+      [surveyDraftKey("ws-1", "q1"), { optionIds: ["opt-a"], otherOpen: false, otherText: "" }],
+    ]);
+    const errors = new Map();
+    let renders = 0;
+    let completions = 0;
+
+    const renderReview = () => {
+      renders += 1;
+      renderWaitingSurvey(
+        body,
+        { items: [q1], scope: "channel", mode: state.mode, index: state.index, drafts, skipped: new Set(), errors, sending: state.sending },
+        { onExit: () => {}, onStep: () => {}, onDraftChange: () => {}, onSkip: () => {}, onReview: () => {}, onEdit: () => {}, onSendAll: () => {} },
+      );
+    };
+
+    await runWaitingSurveyBatch([entries[0]], {
+      getState: () => state,
+      nextAttemptId: () => (attemptSeq += 1),
+      isAlive: () => true,
+      hasActiveSession: () => true,
+      sendEntry: async () => ({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." }),
+      onEntrySucceeded: () => { throw new Error("must not succeed"); },
+      onEntryFailed: (item, msg) => errors.set(item.id, msg),
+      onRender: renderReview,
+      onComplete: () => { completions += 1; },
+      failureMessage: "Could not send.",
+    });
+
+    assert.equal(state.sending, false);
+    assert.equal(state.sendingAttemptId, null);
+    assert.equal(renders, 2, "Sending… render + cleared indicator render");
+    assert.equal(completions, 0, "no completion or data repaint on cancelled batch");
+    assert.equal(errors.size, 0, "no stale error on cancelled batch");
+    assert.equal(body.querySelector("[data-waiting-survey-send]").textContent, "Send 1 answer");
+    assert.equal(body.querySelector("[data-waiting-survey-send]").getAttribute("aria-disabled"), null);
+  }
 });

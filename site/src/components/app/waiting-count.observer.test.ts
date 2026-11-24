@@ -98,13 +98,17 @@ function installWaitingFixture() {
     user_metadata: {},
     created_at: before,
   };
+  const makeOwnerJwt = (rev: string) => "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+    btoa(JSON.stringify({ sub: owner, session_id: "sess-owner-1", rev })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "") + ".sig";
+  const ownerToken = makeOwnerJwt("initial");
+  const ownerRefreshedToken = makeOwnerJwt("refreshed");
   let releaseFirstAnswer: (() => void) | null = null;
   let releaseIdentityCheck: (() => void) | null = null;
   let releaseRefresh: (() => void) | null = null;
   let releaseWs9ChannelsA: (() => void) | null = null;
   let releaseWs2QueueA: (() => void) | null = null;
   let releaseArchivedHeld: (() => void) | null = null;
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, maya, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, maya, peerUserB, ownerToken, ownerRefreshedToken, ids, ask, askPeerB, askWs2A, ask51, ask101,
     todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, gardenArchivedAskId,
     privLossAskId, unchangedWsAskId, heldPage2AskId,
     todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
@@ -267,7 +271,7 @@ function installWaitingFixture() {
     if (url.origin !== "https://api.test.invalid") { f.unexpected.push(url.href); return Response.json({}, { status: 404 }); }
     if (url.pathname === "/auth/v1/user") {
       const authHeader = request.headers.get("authorization") ?? "";
-      if ((surveyAuthRetireCase || readRetireCase) && authHeader && authHeader !== "Bearer synthetic-human") {
+      if ((surveyAuthRetireCase || readRetireCase) && authHeader && authHeader !== "Bearer " + ownerToken) {
         if (surveyAuthRetireCase) {
           f.identityCheckHeld = true;
           f.log.push("auth-user-peer-b-held");
@@ -290,7 +294,7 @@ function installWaitingFixture() {
         f.log.push("auth-refresh-released");
       }
       return Response.json({
-        access_token: "synthetic-human-refreshed",
+        access_token: ownerRefreshedToken,
         refresh_token: "synthetic-refresh-2",
         token_type: "bearer",
         expires_in: 3600,
@@ -300,10 +304,10 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/rpc/home_overview") {
       const authHeader = request.headers.get("authorization") ?? "";
-      if (surveyAuthRetireCase && authHeader && authHeader !== "Bearer synthetic-human") {
+      if (surveyAuthRetireCase && authHeader && authHeader !== "Bearer " + ownerToken) {
         return Response.json({ viewer_user_id: peerUserB.id, generated_at: new Date().toISOString(), workspaces: [] });
       }
-      if (readRetireCase && authHeader && authHeader !== "Bearer synthetic-human") {
+      if (readRetireCase && authHeader && authHeader !== "Bearer " + ownerToken) {
         f.overviewReads++; f.log.push("overview-b");
         return Response.json({
           viewer_user_id: peerUserB.id,
@@ -360,14 +364,14 @@ function installWaitingFixture() {
     if (url.pathname === "/rest/v1/rpc/decision_queue") {
       const id = body?.p_workspace_id; f.log.push("queue:" + number(id));
       const authHeader = request.headers.get("authorization") ?? "";
-      if (readRetireCase && id === ids[1] && authHeader === "Bearer synthetic-human") {
+      if (readRetireCase && id === ids[1] && authHeader === "Bearer " + ownerToken) {
         f.ws2QueueAHeld = true;
         f.log.push("queue-2-a-held");
         await new Promise<void>(resolve => { releaseWs2QueueA = resolve; });
         f.log.push("queue-2-a-failed");
         return Response.json({ message: "simulated retired failure" }, { status: 500 });
       }
-      if (readRetireCase && id === ids[8] && authHeader && authHeader !== "Bearer synthetic-human") {
+      if (readRetireCase && id === ids[8] && authHeader && authHeader !== "Bearer " + ownerToken) {
         return Response.json({
           workspace_id: id, generated_at: new Date().toISOString(), total: 1, truncated: false,
           asks: [{ signal_id: askPeerB, from: { kind: "agent", id: agent, name: "Scout" }, body: "Peer B question in shared workspace?",
@@ -824,7 +828,7 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[8] && readRetireCase) {
       const authHeader = request.headers.get("authorization") ?? "";
-      if (authHeader === "Bearer synthetic-human") {
+      if (authHeader === "Bearer " + ownerToken) {
         f.ws9ChannelsAHeld = true;
         f.log.push("channels-9-a-held");
         await new Promise<void>(resolve => { releaseWs9ChannelsA = resolve; });
@@ -978,7 +982,7 @@ function installWaitingFixture() {
     f.unexpected.push(request.method + " " + url.pathname);
     return Response.json({ error: "unexpected_fixture_request" }, { status: 404 });
   };
-  localStorage.setItem("sb-api-auth-token", JSON.stringify({ access_token: "synthetic-human",
+  localStorage.setItem("sb-api-auth-token", JSON.stringify({ access_token: ownerToken,
     refresh_token: "synthetic-refresh", token_type: "bearer", expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600, user }));
 }
@@ -1397,7 +1401,7 @@ async function observeWaitingCount() {
       send1.click();
       await wait(() => f.plainReplies.length === 1 && !card1() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent" && count() === "1",
         "unchanged-login 401 token refresh retried and delivered reply");
-      check(f.plainAttempts === 2 && f.plainBearers[1] === "Bearer synthetic-human-refreshed" &&
+      check(f.plainAttempts === 2 && f.plainBearers[1] === "Bearer " + f.ownerRefreshedToken &&
         f.plainCommandIds[0] === f.plainCommandIds[1],
         "expected refreshed bearer retry with same command_id: " + JSON.stringify({ attempts: f.plainAttempts, bearers: f.plainBearers, ids: f.plainCommandIds }));
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });

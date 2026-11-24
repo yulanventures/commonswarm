@@ -1615,6 +1615,7 @@ import "../../styles/kylon-image-viewer.css";
     answerPlainAsk,
     dismissWaitingItem,
     restoreWaitingItem,
+    sessionIdFromAccessToken,
     type WaitingDismissalItemKind,
     type ChannelUnread,
     createChannel,
@@ -1658,6 +1659,11 @@ import "../../styles/kylon-image-viewer.css";
     type WaitingDismissPlacementKind,
     type WaitingDismissTarget,
   } from "../../lib/waiting-dismissal";
+  import {
+    createWaitingSurveyState,
+    runWaitingSurveyBatch,
+    type WaitingSurveyState,
+  } from "../../lib/waiting-survey";
   import { wakePathMark, WAKE_ROSTER_REFRESH_TIMEOUT_MS } from "../../lib/wake-path";
   import {
     agentPresenceLine,
@@ -2373,6 +2379,13 @@ import "../../styles/kylon-image-viewer.css";
     let renderedAuthUserId = "";
     let renderedAuthLoginId = "";
     let renderedAuthViewGen = -1;
+    const authLoginIdFor = (targetSession: Session | null): string => {
+      if (!targetSession) return "";
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()) {
+        return typeof currentActiveLogin === "function" ? (currentActiveLogin()?.loginId ?? "") : "";
+      }
+      return sessionIdFromAccessToken(targetSession.access_token) ?? "";
+    };
     let pendingFallbackNotice: string | null = null;
     let activeImageViewerDialog: HTMLDialogElement | null = null;
     let authReloadQueued = false;
@@ -6594,11 +6607,18 @@ import "../../styles/kylon-image-viewer.css";
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
     let waitingScope: WaitingScope = "channel";
     let waitingPanelViewer = "";
-    const waitingActionGuard = (viewer: string, authGen: number): (() => boolean) =>
+    const waitingActionGuard = (
+      viewer: string,
+      authGen: number,
+      loginId = typeof renderedAuthLoginId !== "undefined" ? renderedAuthLoginId : "",
+    ): (() => boolean) =>
       () => waitingAuthGeneration === authGen &&
         (sampleMode
           ? viewer === "sample-owner"
-          : renderedAuthUserId === viewer && session?.user.id === viewer);
+          : renderedAuthUserId === viewer &&
+            session?.user.id === viewer &&
+            (typeof renderedAuthLoginId === "undefined" || renderedAuthLoginId === loginId) &&
+            (typeof authLoginIdFor !== "function" || authLoginIdFor(session) === loginId));
     let waitingPanelOverviewFailed = false;
     let waitingStatusMessage = "";
     let waitingStatusSeq = 0;
@@ -6650,16 +6670,18 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelFailedWorkspaces = new Set<string>();
     const waitingPanelTruncatedWorkspaces = new Set<string>();
     const waitingWorkspaceChannels = new Map<string, Map<string, string>>();
-    type WaitingChoiceTicket = { viewer: string; workspaceId: string; signalId: string };
+    let nextWaitingAttemptId = 0;
+    const newWaitingAttemptId = (): number => (nextWaitingAttemptId += 1);
+    type WaitingChoiceTicket = { attemptId: number; viewer: string; workspaceId: string; signalId: string };
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
     const waitingPanelErrors = new Map<string, string>();
     const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
-    type WaitingPlainTicket = { viewer: string; workspaceId: string; signalId: string; mode: "answer" | "stale" };
+    type WaitingPlainTicket = { attemptId: number; viewer: string; workspaceId: string; signalId: string; mode: "answer" | "stale" };
     const waitingPlainTickets = new Map<string, WaitingPlainTicket>();
     const waitingPlainDrafts = new Map<string, string>();
     const waitingPlainErrors = new Map<string, string>();
     const waitingPlainLastSubmissions = new Map<string, { bodyText: string; mode: "answer" | "stale"; commandId: string }>();
-    type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
+    type WaitingTodoTicket = { attemptId: number; viewer: string; workspaceId: string; todoId: string };
     const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
     const waitingTodoErrors = new Map<string, string>();
     const waitingArchivedRestoreErrors = new Map<string, string>();
@@ -6667,9 +6689,7 @@ import "../../styles/kylon-image-viewer.css";
     const waitingSurveyDrafts = new Map<string, SurveyDraft>();
     const waitingSurveySkipped = new Set<string>();
     const waitingSurveyErrors = new Map<string, string>();
-    let waitingSurvey: { active: boolean; mode: "step" | "review"; index: number; itemIds: string[]; placeKey: string; sending: boolean } = {
-      active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false,
-    };
+    let waitingSurvey: WaitingSurveyState = createWaitingSurveyState();
 
     const isWaitingChannelView = (): boolean =>
       !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
@@ -7307,7 +7327,8 @@ import "../../styles/kylon-image-viewer.css";
         ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
             .findIndex(el => el.dataset.waitingTodo === item.id)
         : -1;
-      const ticket: WaitingTodoTicket = { viewer, workspaceId: item.workspaceId, todoId: item.id };
+      const ticket: WaitingTodoTicket = { attemptId: newWaitingAttemptId(), viewer, workspaceId: item.workspaceId, todoId: item.id };
+      const ownsTicket = (): boolean => waitingTodoTickets.get(item.id) === ticket;
       waitingTodoTickets.set(item.id, ticket);
       waitingTodoErrors.delete(item.id);
       renderWaitingPanelView();
@@ -7329,7 +7350,11 @@ import "../../styles/kylon-image-viewer.css";
         }
         if (baseVersion === null) {
           const read = await server.readTodo(item.workspaceId, item.id);
-          if (!isAlive()) return;
+          if (!ownsTicket()) return;
+          if (!isAlive()) {
+            waitingTodoTickets.delete(item.id);
+            return;
+          }
           if (read.todo.state === "done" || read.todo.state === "dropped") {
             ok = true;
           } else {
@@ -7337,15 +7362,27 @@ import "../../styles/kylon-image-viewer.css";
           }
         }
         if (!ok && baseVersion !== null) {
-          if (!isAlive()) return;
+          if (!ownsTicket()) return;
+          if (!isAlive()) {
+            waitingTodoTickets.delete(item.id);
+            return;
+          }
           let result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: baseVersion, state: "done" }, uuid());
-          if (!isAlive()) return;
+          if (!ownsTicket()) return;
+          if (!isAlive()) {
+            waitingTodoTickets.delete(item.id);
+            return;
+          }
           if (result.status === "conflict") {
             const current = result.current;
             if (current.state === "done" || current.state === "dropped") {
               ok = true;
             } else {
-              if (!isAlive()) return;
+              if (!ownsTicket()) return;
+              if (!isAlive()) {
+                waitingTodoTickets.delete(item.id);
+                return;
+              }
               result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: current.version, state: "done" }, uuid());
             }
           }
@@ -7364,7 +7401,11 @@ import "../../styles/kylon-image-viewer.css";
             ? homeRefusalCopy(error.reason)
             : TODO_SAVE_FAILED;
       }
-      if (!isAlive() || waitingTodoTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      if (!ownsTicket()) return;
+      if (!isAlive() || homeViewerId() !== ticket.viewer) {
+        waitingTodoTickets.delete(item.id);
+        return;
+      }
       waitingTodoTickets.delete(item.id);
       const canRestoreFocus = (): HTMLElement | null => {
         if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
@@ -7412,24 +7453,19 @@ import "../../styles/kylon-image-viewer.css";
       if (!initialSession || sampleMode || !viewer || !isAlive || !isAlive() || waitingSurvey.sending || entries.length === 0) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
-      waitingSurvey.sending = true;
-      renderWaitingPanelView();
-      let sentCount = 0;
-      let failedCount = 0;
-      const succeededIds = new Set<string>();
-      for (const { item, submission } of entries) {
-        const current = session;
-        if (!current || !isAlive()) break;
-        let result: Awaited<ReturnType<typeof answerChoice>>;
-        try {
-          result = await answerChoice(current, uuid(), item.workspaceId, item.id, item.choices.multi, submission, { isAlive });
-        } catch {
-          result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
-        }
-        if (!isAlive()) break;
-        if (result.ok) {
-          sentCount += 1;
-          succeededIds.add(item.id);
+      await runWaitingSurveyBatch(entries, {
+        getState: () => waitingSurvey,
+        nextAttemptId: newWaitingAttemptId,
+        isAlive,
+        hasActiveSession: () => Boolean(session),
+        sendEntry: async (item, submission, isAttemptAlive) => {
+          const current = session;
+          if (!current || !isAttemptAlive()) {
+            return { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." };
+          }
+          return answerChoice(current, uuid(), item.workspaceId, item.id, item.choices.multi, submission, { isAlive: isAttemptAlive });
+        },
+        onEntrySucceeded: (item, result) => {
           const key = `${item.workspaceId}:${item.id}`;
           waitingSurveyDrafts.delete(key);
           waitingSurveySkipped.delete(item.id);
@@ -7457,37 +7493,40 @@ import "../../styles/kylon-image-viewer.css";
               });
             }
           }
-        } else {
-          failedCount += 1;
-          waitingSurveyErrors.set(item.id, result.message);
-        }
-      }
-      if (!isAlive()) return;
-      waitingSurvey.sending = false;
-      waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => !succeededIds.has(id));
-      if (sentCount > 0) {
-        if (homeRoute.view === "chat" && activeWorkspaceView === "signals") renderFeed();
-        renderHomeRail();
-        invalidateWaitingArchived();
-        scheduleWaitingRefresh(400);
-      }
-      if (failedCount === 0) {
-        waitingSurvey.active = false;
-        showWaitingStatus(sentCount === 1 ? "Sent" : `Sent ${sentCount} answers`);
-      } else {
-        waitingSurvey.mode = "review";
-        if (sentCount > 0) showWaitingStatus(sentCount === 1 ? "Sent 1 answer" : `Sent ${sentCount} answers`);
-      }
-      renderWaitingPanelView();
-      const panelNow = one<HTMLElement>("[data-waiting-panel]");
-      if (hadPanelFocus && panelNow && waitingPanelMod && waitingSurface?.isOpen()
-        && (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
-        if (failedCount === 0) {
-          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "completed-ask", prevIndex: 0 });
-        } else {
-          waitingPanelMod.focusWaitingSurvey(panelNow, "failed-review");
-        }
-      }
+        },
+        onEntryFailed: (item, message) => {
+          waitingSurveyErrors.set(item.id, message);
+        },
+        onRender: () => {
+          renderWaitingPanelView();
+        },
+        onComplete: ({ sentCount, failedCount }) => {
+          if (sentCount > 0) {
+            if (homeRoute.view === "chat" && activeWorkspaceView === "signals") renderFeed();
+            renderHomeRail();
+            invalidateWaitingArchived();
+            scheduleWaitingRefresh(400);
+          }
+          if (failedCount === 0) {
+            waitingSurvey.active = false;
+            showWaitingStatus(sentCount === 1 ? "Sent" : `Sent ${sentCount} answers`);
+          } else {
+            waitingSurvey.mode = "review";
+            if (sentCount > 0) showWaitingStatus(sentCount === 1 ? "Sent 1 answer" : `Sent ${sentCount} answers`);
+          }
+          renderWaitingPanelView();
+          const panelNow = one<HTMLElement>("[data-waiting-panel]");
+          if (hadPanelFocus && panelNow && waitingPanelMod && waitingSurface?.isOpen()
+            && (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+            if (failedCount === 0) {
+              waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "completed-ask", prevIndex: 0 });
+            } else {
+              waitingPanelMod.focusWaitingSurvey(panelNow, "failed-review");
+            }
+          }
+        },
+        failureMessage: CHOICE_ANSWER_FAILED,
+      });
     };
 
     type WaitingPanelModule = typeof import("../../lib/waiting-panel");
@@ -7553,16 +7592,17 @@ import "../../styles/kylon-image-viewer.css";
         ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
             .findIndex(el => el.dataset.waitingCard === item.id)
         : -1;
-      const ticket: WaitingChoiceTicket = { viewer, workspaceId: item.workspaceId, signalId: item.id };
+      const ticket: WaitingChoiceTicket = { attemptId: newWaitingAttemptId(), viewer, workspaceId: item.workspaceId, signalId: item.id };
+      const ownsTicket = (): boolean => waitingPanelTickets.get(item.id) === ticket;
       waitingPanelTickets.set(item.id, ticket);
       waitingPanelErrors.delete(item.id);
       waitingPanelLastSubmissions.set(item.id, submission);
       renderWaitingPanelView();
-      const isAlive = (): boolean =>
+      const scopeAlive = (): boolean =>
         authAlive() &&
-        waitingPanelTickets.get(item.id) === ticket &&
         homeViewerId() === ticket.viewer &&
         (!pinned || pinned.isCurrent());
+      const isAlive = (): boolean => scopeAlive() && ownsTicket();
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
         result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission, {
@@ -7573,7 +7613,12 @@ import "../../styles/kylon-image-viewer.css";
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
-      if (!isAlive()) return;
+      if (!ownsTicket()) return;
+      if (!scopeAlive() || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+        waitingPanelTickets.delete(item.id);
+        if (scopeAlive()) renderWaitingPanelView();
+        return;
+      }
       waitingPanelTickets.delete(item.id);
       if (result.ok) {
         choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
@@ -7634,18 +7679,25 @@ import "../../styles/kylon-image-viewer.css";
         : -1;
       const prev = waitingPlainLastSubmissions.get(item.id);
       const commandId = prev && prev.bodyText === bodyText && prev.mode === mode ? prev.commandId : uuid();
-      const ticket: WaitingPlainTicket = { viewer, workspaceId: item.workspaceId, signalId: item.id, mode };
+      const ticket: WaitingPlainTicket = { attemptId: newWaitingAttemptId(), viewer, workspaceId: item.workspaceId, signalId: item.id, mode };
+      const ownsTicket = (): boolean => waitingPlainTickets.get(item.id) === ticket;
+      const isAttemptAlive = (): boolean => isAlive() && ownsTicket();
       waitingPlainTickets.set(item.id, ticket);
       waitingPlainErrors.delete(item.id);
       waitingPlainLastSubmissions.set(item.id, { bodyText, mode, commandId });
       renderWaitingPanelView();
       let result: Awaited<ReturnType<typeof answerPlainAsk>>;
       try {
-        result = await answerPlainAsk(activeSession, commandId, item.workspaceId, item.id, bodyText, { isAlive });
+        result = await answerPlainAsk(activeSession, commandId, item.workspaceId, item.id, bodyText, { isAlive: isAttemptAlive });
       } catch (error) {
         result = { ok: false, status: 0, error: null, message: readableError(error) };
       }
-      if (!isAlive() || waitingPlainTickets.get(item.id) !== ticket) return;
+      if (!ownsTicket()) return;
+      if (!isAlive() || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+        waitingPlainTickets.delete(item.id);
+        if (isAlive()) renderWaitingPanelView();
+        return;
+      }
       waitingPlainTickets.delete(item.id);
       const canRestoreFocus = (): HTMLElement | null => {
         if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
@@ -8302,6 +8354,7 @@ import "../../styles/kylon-image-viewer.css";
               itemIds: visibleItems.map(item => item.id),
               placeKey,
               sending: false,
+              sendingAttemptId: null,
             };
             renderWaitingPanelView();
             waitingPanelMod?.focusWaitingSurvey(container, "step");
@@ -8458,7 +8511,7 @@ import "../../styles/kylon-image-viewer.css";
       waitingSurveyDrafts.clear();
       waitingSurveySkipped.clear();
       waitingSurveyErrors.clear();
-      waitingSurvey = { active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false };
+      waitingSurvey = createWaitingSurveyState();
       clearWaitingArchivedCache();
       waitingWorkspaceChannels.clear();
       waitingPanelOverviewFailed = false;
@@ -20378,11 +20431,15 @@ import "../../styles/kylon-image-viewer.css";
         const verified = await currentSession();
         if (version !== requestVersion || bootVersion !== bootGeneration) return;
         const previousAuthUserId = renderedAuthUserId;
+        const previousAuthLoginId = renderedAuthLoginId;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
-        renderedAuthLoginId = session && isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "";
+        renderedAuthLoginId = authLoginIdFor(session);
         renderedAuthViewGen = session && isMultiAccountEnabled() ? (accountManager()?.currentViewGeneration() ?? -1) : -1;
-        if (previousAuthUserId && renderedAuthUserId !== previousAuthUserId) {
+        if (
+          (previousAuthUserId && renderedAuthUserId !== previousAuthUserId) ||
+          (previousAuthLoginId && renderedAuthLoginId !== previousAuthLoginId)
+        ) {
           resetWorkspaceSessionState();
         }
         if (isMultiAccountEnabled()) renderAccountSwitcher();
@@ -20500,6 +20557,7 @@ import "../../styles/kylon-image-viewer.css";
           householdDashboard?.clear();
           session = null;
           renderedAuthUserId = "";
+          renderedAuthLoginId = "";
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
@@ -24223,16 +24281,27 @@ import "../../styles/kylon-image-viewer.css";
     const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
       const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
-      const nextLoginId = multi && nextSession && typeof currentActiveLogin === "function"
-        ? (currentActiveLogin()?.loginId ?? "")
-        : "";
+      const currentRenderedLoginId = typeof renderedAuthLoginId !== "undefined" ? renderedAuthLoginId : "";
+      const nextLoginId = typeof authLoginIdFor === "function"
+        ? authLoginIdFor(nextSession)
+        : multi && nextSession && typeof currentActiveLogin === "function"
+          ? (currentActiveLogin()?.loginId ?? "")
+          : "";
       const nextViewGen = multi && nextSession && typeof accountManager === "function"
         ? (accountManager()?.currentViewGeneration() ?? -1)
         : -1;
+      const singleLoginChanged =
+        !multi &&
+        Boolean(renderedAuthUserId) &&
+        Boolean(nextSession) &&
+        nextUserId === renderedAuthUserId &&
+        Boolean(currentRenderedLoginId || nextLoginId) &&
+        nextLoginId !== currentRenderedLoginId;
       const identityChanged =
         signedOut ||
         nextUserId !== renderedAuthUserId ||
-        (multi && (nextLoginId !== renderedAuthLoginId || nextViewGen !== renderedAuthViewGen));
+        singleLoginChanged ||
+        (multi && (nextLoginId !== currentRenderedLoginId || nextViewGen !== renderedAuthViewGen));
       if (!identityChanged && !recovered) return;
       if (identityChanged) {
         if (multi) {
@@ -24240,10 +24309,10 @@ import "../../styles/kylon-image-viewer.css";
           householdDashboard?.clear();
           homeOverviewCounts.clear();
           session = null;
-          renderedAuthLoginId = nextLoginId;
           renderedAuthViewGen = nextViewGen;
         }
         renderedAuthUserId = nextUserId;
+        if (typeof renderedAuthLoginId !== "undefined") renderedAuthLoginId = nextLoginId;
         resetWorkspaceSessionState();
         requestVersion += 1;
         authRecoveryActive = false;
@@ -24263,16 +24332,27 @@ import "../../styles/kylon-image-viewer.css";
     onAuthChange((event, nextSession) => {
       // A sign-out or a different account in any tab ends an open Password dialog.
       if (passwordGuard.observeAuth(event, nextSession?.user.id)) closePasswordDialog();
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const nextLoginId = authLoginIdFor(nextSession);
+      const singleLoginChanged =
+        !multi &&
+        Boolean(renderedAuthUserId) &&
+        Boolean(nextSession) &&
+        nextSession!.user.id === renderedAuthUserId &&
+        Boolean(renderedAuthLoginId || nextLoginId) &&
+        nextLoginId !== renderedAuthLoginId;
       // SDK events can carry saved, unverified identity during initialization.
       // Only update an identity this dashboard has already verified.
-      if (session && nextSession?.user.id === session.user.id) session = nextSession;
+      if (session && nextSession?.user.id === session.user.id && !singleLoginChanged) session = nextSession;
       const recovered = event === "TOKEN_REFRESHED" && !!nextSession &&
         authRecoveryActive && app.dataset.state === "workspace-error" &&
         (!renderedAuthUserId || nextSession.user.id === renderedAuthUserId);
       if (
         event === "INITIAL_SESSION" ||
         event === "SIGNED_IN" ||
-        event === "SIGNED_OUT" || recovered
+        event === "SIGNED_OUT" ||
+        recovered ||
+        singleLoginChanged
       ) {
         queueAuthReload(nextSession, recovered, event === "SIGNED_OUT");
       }

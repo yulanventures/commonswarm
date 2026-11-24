@@ -1351,7 +1351,7 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     return new Response(JSON.stringify(nextBody), { status: nextStatus, headers: { "content-type": "application/json" } });
   };
   const fakeSession = {
-    access_token: "synthetic-a",
+    access_token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${Buffer.from(JSON.stringify({ sub: "u-a", session_id: "sess-a" })).toString("base64url")}.sig`,
     refresh_token: "synthetic-refresh-a",
     token_type: "bearer",
     expires_in: 3600,
@@ -2321,5 +2321,297 @@ test("Waiting Archived decodes and renders auto-clear outcomes (muted, no Restor
     assert.equal(outcome.dataset.outcomeTone, "muted", `${c.outcome_kind} must render with muted tone`);
     assert.equal(outcome.querySelector(".cs-waiting-archived__answer").textContent, c.outcome_text);
     assert.equal(card.querySelector("[data-waiting-archived-restore]"), null, `${c.outcome_kind} must not render Restore`);
+  }
+});
+
+test("waiting-dismissal controller (C3): attempt ownership prevents retired Dismiss, Undo, and Archived Restore from touching fresh overlapping attempts across all settlement forms", async () => {
+  const outcomes = [
+    { label: "success", dismiss: { ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" }, restore: { ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:00:00Z" } },
+    { label: "404", dismiss: { ok: false, status: 404, error: "not_found", message: "Not found." }, restore: { ok: false, status: 404, error: "not_found", message: "Not found." } },
+    { label: "error", dismiss: { ok: false, status: 500, error: "server_error", message: "Stale 500." }, restore: { ok: false, status: 500, error: "server_error", message: "Stale 500." } },
+    { label: "retired", dismiss: { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." }, restore: { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." } },
+  ];
+
+  const makeTarget = () => ({
+    slotKind: "ask",
+    itemKind: "ask",
+    itemId: "ask-1",
+    cardId: "ask-1",
+    workspaceId: "ws-1",
+    channelId: null,
+    conversationId: null,
+    placementKind: "general",
+    position: 0,
+    placeKey: "ws-1:general",
+    scope: "workspace",
+  });
+
+  const makeArchived = () => ({
+    itemKey: "ask:ask-1",
+    kind: "ask",
+    id: "ask-1",
+    todoId: null,
+    askKind: "choice",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    title: "Question?",
+    from: null,
+    outcomeKind: "dismissed",
+    outcomeText: "Dismissed",
+    archivedAt: "2026-11-23T12:00:00Z",
+    when: "now",
+    answeredBy: null,
+    placement: "general",
+    channelId: null,
+    conversationId: null,
+    conversationKind: null,
+    channelLabel: "#general",
+    href: null,
+  });
+
+  // 1. Dismiss overlap for every settlement form (success, 404, error, retired).
+  for (const outcome of outcomes) {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    const dispatches = [];
+    const resolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinnedGen = loginGen;
+        return () => loginGen === pinnedGen;
+      },
+      sendDismiss: (_ws, _kind, itemId) => {
+        dispatches.push({ loginGen, itemId });
+        return new Promise(resolve => { resolvers.push(resolve); });
+      },
+      sendRestore: async () => outcome.restore,
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    const pA = ctrl.dismiss(makeTarget());
+    assert.equal(ctrl.has("ask:ask-1"), true);
+    assert.equal(dispatches.length, 1);
+
+    // Same-person login replacement retires login 1 synchronously.
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.has("ask:ask-1"), false);
+
+    // Fresh Dismiss B for the SAME item starts under login 2.
+    const pB = ctrl.dismiss(makeTarget());
+    assert.equal(ctrl.has("ask:ask-1"), true);
+    assert.equal(ctrl.pendingDismissCardIds("ws-1").has("ask-1"), true);
+    assert.equal(dispatches.filter(d => d.loginGen === 2).length, 1, `Dismiss(${outcome.label}): B dispatched once`);
+
+    const rendersBeforeA = renders;
+    const reloadsBeforeA = reloads;
+    const invalidationsBeforeA = invalidations;
+    resolvers[0](outcome.dismiss);
+    await pA;
+
+    assert.equal(ctrl.has("ask:ask-1"), true, `Dismiss(${outcome.label}): B row must remain`);
+    assert.equal(ctrl.pendingDismissCardIds("ws-1").has("ask-1"), true, `Dismiss(${outcome.label}): B must remain pending`);
+    assert.equal(renders, rendersBeforeA, `Dismiss(${outcome.label}): A must not repaint`);
+    assert.equal(reloads, reloadsBeforeA, `Dismiss(${outcome.label}): A must not reload`);
+    assert.equal(invalidations, invalidationsBeforeA, `Dismiss(${outcome.label}): A must not invalidate`);
+    assert.deepEqual(errors, [], `Dismiss(${outcome.label}): A must set no error`);
+    assert.equal(dispatches.filter(d => d.loginGen === 2).length, 1, `Dismiss(${outcome.label}): B still dispatched exactly once`);
+
+    resolvers[1]({ ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+    await pB;
+    assert.equal(ctrl.has("ask:ask-1"), true);
+    assert.equal(ctrl.pendingDismissCardIds("ws-1").has("ask-1"), false);
+  }
+
+  // 2. Undo overlap for every settlement form (success, 404, error, retired).
+  for (const outcome of outcomes) {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    const restoreDispatches = [];
+    const restoreResolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinnedGen = loginGen;
+        return () => loginGen === pinnedGen;
+      },
+      sendDismiss: async () => ({ ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" }),
+      sendRestore: (_ws, _kind, itemId) => {
+        restoreDispatches.push({ loginGen, itemId });
+        return new Promise(resolve => { restoreResolvers.push(resolve); });
+      },
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    await ctrl.dismiss(makeTarget());
+    const undoA = ctrl.undo("ask:ask-1");
+    await Promise.resolve();
+    assert.equal(restoreDispatches.length, 1);
+
+    // Same-person login replacement retires login 1 synchronously.
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.has("ask:ask-1"), false);
+
+    // Fresh Dismiss + Undo B for the SAME item starts under login 2.
+    await ctrl.dismiss(makeTarget());
+    const undoB = ctrl.undo("ask:ask-1");
+    await Promise.resolve();
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `Undo(${outcome.label}): B dispatched once`);
+    assert.equal(ctrl.placeholdersFor("ws-1:general", "workspace")[0]?.pendingUndo, true);
+
+    const rendersBeforeA = renders;
+    const reloadsBeforeA = reloads;
+    const invalidationsBeforeA = invalidations;
+    restoreResolvers[0](outcome.restore);
+    await undoA;
+
+    assert.equal(ctrl.has("ask:ask-1"), true, `Undo(${outcome.label}): B row must remain`);
+    assert.equal(ctrl.placeholdersFor("ws-1:general", "workspace")[0]?.pendingUndo, true, `Undo(${outcome.label}): B must stay pendingUndo`);
+    assert.equal(renders, rendersBeforeA, `Undo(${outcome.label}): A must not repaint`);
+    assert.equal(reloads, reloadsBeforeA, `Undo(${outcome.label}): A must not reload`);
+    assert.equal(invalidations, invalidationsBeforeA, `Undo(${outcome.label}): A must not invalidate`);
+    assert.deepEqual(errors, [], `Undo(${outcome.label}): A must set no error`);
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `Undo(${outcome.label}): B still dispatched exactly once`);
+
+    restoreResolvers[1]({ ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:01:00Z" });
+    await undoB;
+    assert.equal(ctrl.has("ask:ask-1"), false);
+  }
+
+  // 3. Archived Restore overlap for every settlement form (success, 404, error, retired).
+  for (const outcome of outcomes) {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    const restoreDispatches = [];
+    const restoreResolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinnedGen = loginGen;
+        return () => loginGen === pinnedGen;
+      },
+      sendDismiss: async () => outcome.dismiss,
+      sendRestore: (_ws, _kind, itemId) => {
+        restoreDispatches.push({ loginGen, itemId });
+        return new Promise(resolve => { restoreResolvers.push(resolve); });
+      },
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    const restoreA = ctrl.restoreArchived(makeArchived());
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), true);
+    assert.equal(restoreDispatches.length, 1);
+
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), false);
+
+    const restoreB = ctrl.restoreArchived(makeArchived());
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), true);
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `ArchivedRestore(${outcome.label}): B dispatched once`);
+
+    const rendersBeforeA = renders;
+    const reloadsBeforeA = reloads;
+    const invalidationsBeforeA = invalidations;
+    restoreResolvers[0](outcome.restore);
+    await restoreA;
+
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), true, `ArchivedRestore(${outcome.label}): B marker must remain`);
+    assert.equal(renders, rendersBeforeA, `ArchivedRestore(${outcome.label}): A must not repaint`);
+    assert.equal(reloads, reloadsBeforeA, `ArchivedRestore(${outcome.label}): A must not reload`);
+    assert.equal(invalidations, invalidationsBeforeA, `ArchivedRestore(${outcome.label}): A must not invalidate`);
+    assert.deepEqual(errors, [], `ArchivedRestore(${outcome.label}): A must set no error`);
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `ArchivedRestore(${outcome.label}): B still dispatched exactly once`);
+
+    restoreResolvers[1]({ ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:01:00Z" });
+    await restoreB;
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), false);
+  }
+
+  // 4. Still-owned cancelled attempts (Dismiss, Undo, Archived Restore) clear their own visual pending
+  //    indicator with no stale error and no data reload/invalidation.
+  {
+    const retiredResult = { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." };
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    let nextDismissResult = retiredResult;
+    let nextRestoreResult = retiredResult;
+    const ctrl = createWaitingDismissalController({
+      sendDismiss: async () => nextDismissResult,
+      sendRestore: async () => nextRestoreResult,
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    // Still-owned cancelled Dismiss clears its row + re-renders indicator, zero error/reload.
+    await ctrl.dismiss(makeTarget());
+    assert.equal(ctrl.has("ask:ask-1"), false);
+    assert.equal(renders, 2, "optimistic render + pending-indicator clear render");
+    assert.equal(reloads, 0);
+    assert.equal(invalidations, 0);
+    assert.deepEqual(errors, []);
+
+    // Still-owned cancelled Undo clears its "Undoing…" row + re-renders indicator, zero error/reload.
+    nextDismissResult = { ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" };
+    await ctrl.dismiss(makeTarget());
+    renders = 0;
+    reloads = 0;
+    invalidations = 0;
+    await ctrl.undo("ask:ask-1");
+    assert.equal(ctrl.has("ask:ask-1"), false);
+    assert.equal(renders, 2, "Undoing… render + pending-indicator clear render");
+    assert.equal(reloads, 0);
+    assert.equal(invalidations, 0);
+    assert.deepEqual(errors, []);
+
+    // Still-owned cancelled Archived Restore clears its "Restoring…" marker + re-renders indicator, zero error/reload.
+    renders = 0;
+    await ctrl.restoreArchived(makeArchived());
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), false);
+    assert.equal(renders, 2, "Restoring… render + pending-indicator clear render");
+    assert.equal(reloads, 0);
+    assert.equal(invalidations, 0);
+    assert.deepEqual(errors, []);
   }
 });

@@ -34,6 +34,7 @@ export interface WaitingDismissTarget {
 
 /** Minimal metadata kept for an in-place "Dismissed · Undo" row. Holds NO content from the item. */
 export interface WaitingDismissRow {
+  readonly attemptId: number;
   readonly key: string;
   readonly slotKind: WaitingDismissSlotKind;
   readonly itemKind: WaitingDismissalItemKind;
@@ -48,12 +49,14 @@ export interface WaitingDismissRow {
   readonly scope: WaitingScope;
   readonly accessGen: number;
   pendingUndo: boolean;
+  undoAttemptId: number | null;
   dismissResolved: boolean;
   retired: boolean;
   inFlightDismiss?: Promise<boolean>;
 }
 
 interface ArchivedRestoreEntry {
+  readonly attemptId: number;
   readonly itemKey: string;
   readonly workspaceId: string;
   readonly channelId: string | null;
@@ -127,9 +130,15 @@ function isNotFoundResult(result: WaitingDismissalResult): boolean {
   return !result.ok && (result.status === 404 || result.error === "not_found");
 }
 
+function isRetiredResult(result: WaitingDismissalResult): boolean {
+  return !result.ok && result.status === 0 && result.error === "operation_retired";
+}
+
 export function createWaitingDismissalController(ports: WaitingDismissalPorts): WaitingDismissalController {
   let accessGen = 0;
   let globalGen = 0;
+  let nextAttemptId = 0;
+  const newAttemptId = (): number => (nextAttemptId += 1);
   const workspaceGens = new Map<string, number>();
   const workspaceAnyLossGens = new Map<string, number>();
   const channelGens = new Map<string, number>();
@@ -138,9 +147,27 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
   const archivedRestoring = new Map<string, ArchivedRestoreEntry>();
   let surveyDismissedKey: string | null = null;
 
-  const deleteRow = (key: string): void => {
+  const isRowOwner = (key: string, row: WaitingDismissRow): boolean => {
+    const current = rows.get(key);
+    return current === row && current.attemptId === row.attemptId;
+  };
+
+  const deleteOwnedRow = (key: string, row: WaitingDismissRow): boolean => {
+    if (!isRowOwner(key, row)) return false;
     rows.delete(key);
     if (surveyDismissedKey === key) surveyDismissedKey = null;
+    return true;
+  };
+
+  const isArchivedOwner = (itemKey: string, entry: ArchivedRestoreEntry): boolean => {
+    const current = archivedRestoring.get(itemKey);
+    return current === entry && current.attemptId === entry.attemptId;
+  };
+
+  const deleteOwnedArchived = (itemKey: string, entry: ArchivedRestoreEntry): boolean => {
+    if (!isArchivedOwner(itemKey, entry)) return false;
+    archivedRestoring.delete(itemKey);
+    return true;
   };
 
   const createActionAlive = (
@@ -198,14 +225,14 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     for (const [key, row] of rows.entries()) {
       if (predicate(row)) {
         row.retired = true;
-        deleteRow(key);
+        deleteOwnedRow(key, row);
         changed = true;
       }
     }
     for (const [itemKey, entry] of archivedRestoring.entries()) {
       if (archivedPredicate(entry)) {
         entry.retired = true;
-        archivedRestoring.delete(itemKey);
+        deleteOwnedArchived(itemKey, entry);
         changed = true;
       }
     }
@@ -265,7 +292,9 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       const key = `${target.slotKind}:${target.cardId}`;
       if (rows.has(key)) return;
 
+      const attemptId = newAttemptId();
       const row: WaitingDismissRow = {
+        attemptId,
         key,
         slotKind: target.slotKind,
         itemKind: target.itemKind,
@@ -280,6 +309,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         scope: target.scope,
         accessGen,
         pendingUndo: false,
+        undoAttemptId: null,
         dismissResolved: false,
         retired: false,
       };
@@ -290,29 +320,39 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       ports.render();
       ports.onDismissedRendered?.(key);
 
+      const ownsRow = (): boolean => isRowOwner(key, row);
       const alive = createActionAlive(
         target.workspaceId,
         target.channelId,
         target.conversationId,
         target.placementKind === "unknown",
-        () => !row.retired,
+        () => !row.retired && ownsRow(),
       );
+      const settleCancelledIfOwned = (): false => {
+        if (!ownsRow()) return false;
+        row.retired = true;
+        deleteOwnedRow(key, row);
+        if (ports.isAlive()) ports.render();
+        return false;
+      };
 
       const runDismiss = async (): Promise<boolean> => {
         let resolvedItemId = row.itemId;
         if (target.itemKind === "review" && !resolvedItemId) {
           if (!ports.resolveReviewOfferId) {
-            if (!alive()) return false;
-            deleteRow(key);
+            if (!ownsRow()) return false;
+            if (!alive()) return settleCancelledIfOwned();
+            deleteOwnedRow(key, row);
             ports.render();
             await ports.reloadWaiting(target.workspaceId);
             return false;
           }
           try {
             const offerId = await ports.resolveReviewOfferId(target.workspaceId, target.cardId, alive);
-            if (!alive()) return false;
+            if (!ownsRow()) return false;
+            if (!alive()) return settleCancelledIfOwned();
             if (!offerId) {
-              deleteRow(key);
+              deleteOwnedRow(key, row);
               ports.invalidateArchived(target.workspaceId);
               ports.render();
               await ports.reloadWaiting(target.workspaceId);
@@ -320,8 +360,9 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
             }
             resolvedItemId = offerId;
           } catch {
-            if (!alive()) return false;
-            deleteRow(key);
+            if (!ownsRow()) return false;
+            if (!alive()) return settleCancelledIfOwned();
+            deleteOwnedRow(key, row);
             ports.setCardError(target.slotKind, target.cardId, "Could not dismiss. Try again.");
             ports.render();
             await ports.reloadWaiting(target.workspaceId);
@@ -330,14 +371,18 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           row.itemId = resolvedItemId;
         }
 
-        if (!alive()) return false;
+        if (!ownsRow()) return false;
+        if (!alive()) return settleCancelledIfOwned();
         let result: WaitingDismissalResult;
         try {
           result = await ports.sendDismiss(target.workspaceId, target.itemKind, resolvedItemId, alive);
         } catch {
           result = { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
         }
-        if (!alive()) return false;
+        if (!ownsRow()) return false;
+        if (!alive() || isRetiredResult(result)) {
+          return settleCancelledIfOwned();
+        }
 
         if (result.ok) {
           row.dismissResolved = true;
@@ -348,7 +393,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           return true;
         }
 
-        deleteRow(key);
+        deleteOwnedRow(key, row);
         if (!isNotFoundResult(result)) {
           ports.setCardError(target.slotKind, target.cardId, result.message);
         }
@@ -366,19 +411,34 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       const row = rows.get(key);
       if (!row || row.retired || row.pendingUndo || !ports.isAlive()) return;
 
+      const undoAttemptId = newAttemptId();
       row.pendingUndo = true;
+      row.undoAttemptId = undoAttemptId;
       ports.render();
 
-      const alive = createActionAlive(
+      const ownsUndo = (): boolean => isRowOwner(key, row) && row.undoAttemptId === undoAttemptId;
+      const scopeAlive = createActionAlive(
         row.workspaceId,
         row.channelId,
         row.conversationId,
         row.placementKind === "unknown",
         () => !row.retired,
       );
+      const alive = (): boolean => scopeAlive() && ownsUndo();
+      const settleCancelledIfOwned = (): void => {
+        if (!ownsUndo()) return;
+        row.retired = true;
+        deleteOwnedRow(key, row);
+        if (ports.isAlive()) ports.render();
+      };
 
       const dismissSucceeded = row.inFlightDismiss ? await row.inFlightDismiss : row.dismissResolved;
-      if (!alive() || !dismissSucceeded || !row.itemId) return;
+      if (!ownsUndo()) return;
+      if (!alive()) {
+        settleCancelledIfOwned();
+        return;
+      }
+      if (!dismissSucceeded || !row.itemId) return;
 
       let result: WaitingDismissalResult;
       try {
@@ -386,16 +446,20 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       } catch {
         result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
       }
-      if (!alive()) return;
+      if (!ownsUndo()) return;
+      if (!alive() || isRetiredResult(result)) {
+        settleCancelledIfOwned();
+        return;
+      }
 
-      deleteRow(key);
+      deleteOwnedRow(key, row);
       if (!result.ok && !isNotFoundResult(result)) {
         ports.setStatusError(result.message);
       }
       ports.invalidateArchived(row.workspaceId);
       ports.render();
       await ports.reloadWaiting(row.workspaceId);
-      if (result.ok && alive()) {
+      if (result.ok && scopeAlive()) {
         ports.onRestoredReloaded?.(row.slotKind, row.cardId);
       }
     },
@@ -403,7 +467,9 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     async restoreArchived(item: WaitingArchivedItem): Promise<void> {
       if (item.outcomeKind !== "dismissed" || archivedRestoring.has(item.itemKey) || !ports.isAlive()) return;
 
+      const attemptId = newAttemptId();
       const entry: ArchivedRestoreEntry = {
+        attemptId,
         itemKey: item.itemKey,
         workspaceId: item.workspaceId,
         channelId: item.channelId ?? null,
@@ -415,12 +481,13 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       ports.clearArchivedError(item.itemKey);
       ports.render();
 
+      const ownsEntry = (): boolean => isArchivedOwner(item.itemKey, entry);
       const alive = createActionAlive(
         item.workspaceId,
         item.channelId ?? null,
         item.conversationId ?? null,
         item.placement === "redacted",
-        () => !entry.retired,
+        () => !entry.retired && ownsEntry(),
       );
 
       let result: WaitingDismissalResult;
@@ -429,9 +496,15 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       } catch {
         result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
       }
-      if (!alive()) return;
+      if (!ownsEntry()) return;
+      if (!alive() || isRetiredResult(result)) {
+        entry.retired = true;
+        deleteOwnedArchived(item.itemKey, entry);
+        if (ports.isAlive()) ports.render();
+        return;
+      }
 
-      archivedRestoring.delete(item.itemKey);
+      deleteOwnedArchived(item.itemKey, entry);
       if (!result.ok && !isNotFoundResult(result)) {
         ports.setArchivedError(item.itemKey, result.message);
       }

@@ -1736,6 +1736,60 @@
             "reason": "No isolated lease-status operation exists in the timeout-table harness."
           }
         },
+        "shared/browser-session/index.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "shared/browser-session/index.ts:444,474-477",
+          "detail": "Four-second fetch abort for browser refresh-token POST and user verification GET; composed with the caller signal.",
+          "operation": {
+            "name": "browser-auth-fetch",
+            "class": "not-run",
+            "writes": [
+              "refresh-token POST may rotate session credentials"
+            ],
+            "removes": [],
+            "reason": "Browser SDK authentication adapter; a CLI profile does not exercise this fetch path, and the tool does not refresh browser credentials."
+          }
+        },
+        "shared/browser-session/index.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "shared/browser-session/index.ts:188-195,579-581",
+          "detail": "Four-second boundedAuth caller deadline for session verification and recovery. Rejects to show recovery UI while SDK retries may continue under their lock; does not abort the SDK operation.",
+          "operation": {
+            "name": "browser-auth-recovery",
+            "class": "not-run",
+            "writes": [
+              "underlying refresh may rotate session credentials"
+            ],
+            "removes": [],
+            "reason": "Browser session and recovery lifecycle; a CLI profile cannot exercise that client code or its SDK lock."
+          }
+        },
+        "shared/browser-session/index.ts:setTimeout#2": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "shared/browser-session/index.ts:262,329,334-340,399",
+          "detail": "Browser localStorage write retry backoff: 1000ms initial, doubled to a 30000ms ceiling after each failed retry, reset after ownership changes; unref'd so a denied Node localStorage cannot keep Node alive.",
+          "operation": {
+            "name": "browser-storage-retry",
+            "class": "not-run",
+            "writes": [
+              "pending localStorage keys"
+            ],
+            "removes": [],
+            "reason": "Local bounded backoff for browser storage writes; not a network request timeout."
+          }
+        },
         "site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS": {
           "class": "network-api",
           "scope": "per-request",
@@ -1816,7 +1870,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:75,803-810",
+          "citation": "site/src/lib/commonswarm.ts:187,1181-1188",
           "detail": "Shared browser request deadline used by reads and commands.",
           "operation": {
             "name": "browser-shared-request",
@@ -1828,41 +1882,6 @@
           }
         },
         "site/src/lib/commonswarm.ts:setTimeout": {
-          "class": "local",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "site/src/lib/commonswarm.ts:161,218,223-229,283",
-          "detail": "Browser localStorage write retry backoff: 1000ms initial, doubled to a 30000ms ceiling after each failed retry, reset after ownership changes; unref'd so a denied Node localStorage cannot keep Node alive.",
-          "operation": {
-            "name": "browser-storage-retry",
-            "class": "not-run",
-            "writes": [
-              "pending localStorage keys"
-            ],
-            "removes": [],
-            "reason": "Local bounded backoff for browser storage writes; not a network request timeout."
-          }
-        },
-        "site/src/lib/commonswarm.ts:setTimeout#2": {
-          "class": "network-api",
-          "scope": "whole-operation",
-          "endpoints": [
-            "/auth/v1/token",
-            "/auth/v1/user"
-          ],
-          "citation": "site/src/lib/commonswarm.ts:387-393,451,882,897",
-          "detail": "Four-second boundedAuth caller deadline for session verification and recovery. Rejects to show recovery UI while SDK retries may continue under their lock; does not abort the SDK operation.",
-          "operation": {
-            "name": "browser-auth-recovery",
-            "class": "not-run",
-            "writes": [
-              "underlying refresh may rotate session credentials"
-            ],
-            "removes": [],
-            "reason": "Browser session and recovery lifecycle; a CLI profile cannot exercise that client code or its SDK lock."
-          }
-        },
-        "site/src/lib/commonswarm.ts:setTimeout#3": {
           "class": "network-api",
           "scope": "per-request",
           "endpoints": [
@@ -1872,7 +1891,7 @@
             "/storage/v1/...",
             "/auth/v1/..."
           ],
-          "citation": "site/src/lib/commonswarm.ts:75,803-810",
+          "citation": "site/src/lib/commonswarm.ts:187,1181-1188",
           "detail": "Browser requestDeadline timer for BROWSER_REQUEST_TIMEOUT_MS.",
           "operation": {
             "name": "browser-shared-request-site",
@@ -1880,25 +1899,6 @@
             "writes": [],
             "removes": [],
             "reason": "Use of BROWSER_REQUEST_TIMEOUT_MS. A CLI profile cannot exercise that client code."
-          }
-        },
-        "site/src/lib/commonswarm.ts:AbortSignal.timeout": {
-          "class": "network-api",
-          "scope": "per-request",
-          "endpoints": [
-            "/auth/v1/token",
-            "/auth/v1/user"
-          ],
-          "citation": "site/src/lib/commonswarm.ts:315,341-343",
-          "detail": "Four-second fetch abort for browser refresh-token POST and user verification GET; composed with the caller signal.",
-          "operation": {
-            "name": "browser-auth-fetch",
-            "class": "not-run",
-            "writes": [
-              "refresh-token POST may rotate session credentials"
-            ],
-            "removes": [],
-            "reason": "Browser SDK authentication adapter; a CLI profile does not exercise this fetch path, and the tool does not refresh browser credentials."
           }
         },
         "src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS": {

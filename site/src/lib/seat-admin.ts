@@ -9,6 +9,8 @@
 import { parseWorkspaceAdminGrants, workspaceAdminGrantsNotDeployed, workspaceAdminGrantsRefused, WorkspaceAdminGrantsRefused, type PeopleAdminGrant } from "./people/admins";
 import type { Session } from "@supabase/supabase-js";
 import { deployment, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from "./commonswarm";
+import { decodeJwtClaims } from "./jwt-claims";
+export { decodeJwtClaims };
 import { buildSeatAdminEndConfirmation } from "./seat-admin-view";
 import type {
   SeatAdminAccess,
@@ -352,22 +354,6 @@ export function newestInteractiveAmrSeconds(claims: unknown): number | null {
     newest = newest === null ? ts : Math.max(newest, ts);
   }
   return newest;
-}
-
-export function decodeJwtClaims(accessToken: string): Record<string, unknown> | null {
-  const parts = accessToken.split(".");
-  if (parts.length !== 3 || !parts[1]) return null;
-  try {
-    const padded = parts[1].replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(parts[1].length / 4) * 4, "=");
-    const json =
-      typeof globalThis.atob === "function"
-        ? globalThis.atob(padded)
-        : Buffer.from(padded, "base64").toString("utf8");
-    const parsed: unknown = JSON.parse(json);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
 }
 
 export function hasFreshInteractiveSession(accessToken: string, nowMs = Date.now()): boolean {

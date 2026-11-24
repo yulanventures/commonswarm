@@ -39,6 +39,17 @@ import {
   type User,
 } from "@supabase/supabase-js";
 import { authProvider } from "./auth-providers.js";
+import {
+  accountsStorageKey,
+  activeAccountStorageKey,
+  attemptStorageKey,
+  attemptStoragePrefix,
+  deploymentOriginHash,
+  sessionStorageKeyForDeployment as legacyStorageKey,
+  slotStorageKey,
+  slotStoragePrefix,
+  tabAccountStorageKey,
+} from "../../../shared/browser-session/index.js";
 
 /** Dormant feature gate until PR 2 passes HezSec, Designer, and Lead reviews. */
 export const MULTI_ACCOUNT_ENABLED = false;
@@ -286,47 +297,17 @@ export type CallbackBootstrapResult =
       message: string;
     };
 
-/** Deterministic 12-hex origin hash (dual FNV-1a 32-bit) for synchronous storage key scoping. */
-export function deploymentOriginHash(url: string): string {
-  const normalized = new URL(url).origin.toLowerCase();
-  let h1 = 0x811c9dc5;
-  let h2 = 0x811c9dc5 ^ 0x9e3779b9;
-  for (let i = 0; i < normalized.length; i += 1) {
-    const c = normalized.charCodeAt(i);
-    h1 ^= c;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 ^= c + i;
-    h2 = Math.imul(h2, 0x01000193) >>> 0;
-  }
-  return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0").slice(0, 4)}`;
-}
-
-/** Exact Supabase JS v2.111.0 default storage key (`SupabaseClient.ts:327`). */
-export function legacyStorageKey(url: string): string {
-  const baseUrl = new URL(url);
-  return `sb-${baseUrl.hostname.split(".")[0]}-auth-token`;
-}
-
-export const slotStorageKey = (originHash: string, loginId: string): string =>
-  `commonswarm:auth:v1:${originHash}:login:${loginId}`;
-
-export const slotStoragePrefix = (originHash: string): string =>
-  `commonswarm:auth:v1:${originHash}:login:`;
-
-export const accountsStorageKey = (originHash: string): string =>
-  `commonswarm:accounts:v1:${originHash}`;
-
-export const activeAccountStorageKey = (originHash: string): string =>
-  `commonswarm:active-account:v1:${originHash}`;
-
-export const tabAccountStorageKey = (originHash: string): string =>
-  `commonswarm:tab-account:v1:${originHash}`;
-
-export const attemptStorageKey = (originHash: string, attemptId: string): string =>
-  `commonswarm:auth:v1:${originHash}:attempt:${attemptId}`;
-
-export const attemptStoragePrefix = (originHash: string): string =>
-  `commonswarm:auth:v1:${originHash}:attempt:`;
+export {
+  accountsStorageKey,
+  activeAccountStorageKey,
+  attemptStorageKey,
+  attemptStoragePrefix,
+  deploymentOriginHash,
+  legacyStorageKey,
+  slotStorageKey,
+  slotStoragePrefix,
+  tabAccountStorageKey,
+};
 
 export const crossTabChannelName = (originHash: string): string =>
   `commonswarm:accounts:v1:${originHash}`;

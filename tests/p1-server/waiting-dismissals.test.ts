@@ -199,6 +199,52 @@ async function readAllFiveAs(conn: postgres.Sql | postgres.TransactionSql, wsId:
   return res;
 }
 
+async function cleanupWorkspaceFixture(
+  wsId: string,
+  userIds: string[],
+  deleteAuthViaAdmin: boolean,
+): Promise<void> {
+  await sql.begin(async (txClean) => {
+    await txClean`SET LOCAL session_replication_role = replica`;
+    await txClean`DELETE FROM swarm.waiting_dismissals WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.audit_log WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.idempotency_keys WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_todo_receipts WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_todo_events WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_comments WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_todos WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_todo_streams WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_member_content_roles WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.signal_deliveries WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.signal_recipients WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.conversation_signals WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.conversation_reads WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.conversation_members WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.signals WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.conversations WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.channel_members WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.channels WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.agent_tokens WHERE principal_id IN (SELECT principal_id FROM swarm.agent_principals WHERE workspace_id = ${wsId}::uuid)`;
+    await txClean`DELETE FROM swarm.agent_runs WHERE principal_id IN (SELECT principal_id FROM swarm.agent_principals WHERE workspace_id = ${wsId}::uuid)`;
+    await txClean`DELETE FROM swarm.agent_workspace_memberships WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.agent_principals WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.devices WHERE user_id = ANY(${userIds}::uuid[])`;
+    await txClean`DELETE FROM swarm.memberships WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.users WHERE user_id = ANY(${userIds}::uuid[])`;
+    if (!deleteAuthViaAdmin) {
+      await txClean`DELETE FROM auth.users WHERE id = ANY(${userIds}::uuid[])`;
+    }
+    await txClean`SET LOCAL session_replication_role = origin`;
+  });
+  if (deleteAuthViaAdmin) {
+    for (const userId of userIds) {
+      await admin.auth.admin.deleteUser(userId);
+    }
+  }
+}
+
 before(async () => {
   local = localEnvironment();
   envDir = mkdtempSync(join(tmpdir(), "cs-waiting-dismissals-"));
@@ -259,8 +305,6 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
   const wsId = randomUUID();
   const scoutId = randomUUID();
   const privChId = randomUUID();
-  const privConvId = randomUUID();
-  const dmConvId = randomUUID();
   const generalAskId = randomUUID();
   const privAskId = randomUUID();
   const dmAskId = randomUUID();
@@ -290,8 +334,9 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
       VALUES (${scoutId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'ParityScout')
     `;
     await tx`
-      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
-      VALUES (${wsId}::uuid, ${scoutId}::uuid, ${aliceId}::uuid)
+      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id, added_by)
+      VALUES (${wsId}::uuid, ${scoutId}::uuid, ${aliceId}::uuid, ${aliceId}::uuid)
+      ON CONFLICT (principal_id, workspace_id) DO NOTHING
     `;
     await tx`INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose) VALUES (${wsId}::uuid, 'shared')`;
     await tx`
@@ -308,18 +353,8 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
       INSERT INTO swarm.channel_members (channel_id, workspace_id, member_kind, user_id, added_by_principal, added_by_kind)
       VALUES (${privChId}::uuid, ${wsId}::uuid, 'user', ${aliceId}::uuid, ${aliceId}::uuid, 'user')
     `;
-    await tx`
-      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, channel_id, created_by_kind, created_by_principal)
-      VALUES
-        (${privConvId}::uuid, ${wsId}::uuid, 'private_channel', ${privChId}::uuid, 'user', ${aliceId}::uuid),
-        (${dmConvId}::uuid, ${wsId}::uuid, 'dm', NULL, 'user', ${aliceId}::uuid)
-    `;
-    await tx`
-      INSERT INTO swarm.conversation_members (workspace_id, conversation_id, member_kind, member_user_id)
-      VALUES
-        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${aliceId}::uuid),
-        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${bobId}::uuid)
-    `;
+    // Triggers create the private_channel conversation (id = privChId) and file each signal
+    // into its canonical conversation (including creating the DM and its members for dmAskId).
     await tx`
       INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
       VALUES
@@ -327,12 +362,6 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
         (${privAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Parity private ask?', ${privChId}::uuid, '9999-12-31T23:59:59Z'),
         (${dmAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'Parity DM ask?', NULL, '9999-12-31T23:59:59Z'),
         (${answeredAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Parity answered ask?', NULL, '9999-12-31T23:59:59Z')
-    `;
-    await tx`
-      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience)
-      VALUES
-        (${wsId}::uuid, ${privConvId}::uuid, ${privAskId}::uuid, 'conversation'),
-        (${wsId}::uuid, ${dmConvId}::uuid, ${dmAskId}::uuid, 'conversation')
     `;
     await tx`
       INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until)
@@ -377,9 +406,7 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
     assert.deepEqual(afterAlice2, beforeAlice);
     assert.deepEqual(afterBob2, beforeBob);
   } finally {
-    await sql`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
-    await sql`DELETE FROM swarm.users WHERE user_id IN (${aliceId}::uuid, ${bobId}::uuid)`;
-    await sql`DELETE FROM auth.users WHERE id IN (${aliceId}::uuid, ${bobId}::uuid)`;
+    await cleanupWorkspaceFixture(wsId, [aliceId, bobId], false);
   }
 });
 
@@ -433,8 +460,9 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         VALUES (${scoutId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'Scout')
       `;
       await tx`
-        INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
-        VALUES (${wsId}::uuid, ${scoutId}::uuid, ${aliceId}::uuid)
+        INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id, added_by)
+        VALUES (${wsId}::uuid, ${scoutId}::uuid, ${aliceId}::uuid, ${aliceId}::uuid)
+        ON CONFLICT (principal_id, workspace_id) DO NOTHING
       `;
       await tx`
         INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
@@ -471,6 +499,9 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
         VALUES (${privAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Private question', ${privChannelId}::uuid, '9999-12-31T23:59:59Z')
       `;
+      // Settle deferred conversation filing triggers so read models see canonical conversation_signals rows.
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+      await tx`SET CONSTRAINTS ALL DEFERRED`;
 
       await tx`SET LOCAL ROLE swarm_command`;
       const aliceTodo = committedTodo(await store.write(tx, wsId, aliceIdentity, `req-${randomUUID()}`, {
@@ -667,6 +698,8 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until)
         VALUES (${randomUUID()}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${sharedAskId}::uuid, 'note', 'Yes, ship it!', '9999-12-31T23:59:59Z')
       `;
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+      await tx`SET CONSTRAINTS ALL DEFERRED`;
       const aliceAfterRealAnswer = await readAllFiveAs(tx, wsId, aliceId);
       const sharedMatches = (aliceAfterRealAnswer.wa as { items: Array<Row> }).items.filter(
         (i) => i.item_key === `ask:${sharedAskId}`,
@@ -689,8 +722,6 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
   const peer = await createUser("wd-peer");
   const wsId = randomUUID();
   const privChId = randomUUID();
-  const privConvId = randomUUID();
-  const dmConvId = randomUUID();
   const privAskId = randomUUID();
   const dmAskId = randomUUID();
   const lockRaceAskId = randomUUID();
@@ -723,8 +754,9 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
       VALUES (${agentPrincipalId}::uuid, ${wsId}::uuid, ${member.id}::uuid, 'MemberBot')
     `;
     await tx`
-      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
-      VALUES (${wsId}::uuid, ${agentPrincipalId}::uuid, ${member.id}::uuid)
+      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id, added_by)
+      VALUES (${wsId}::uuid, ${agentPrincipalId}::uuid, ${member.id}::uuid, ${member.id}::uuid)
+      ON CONFLICT (principal_id, workspace_id) DO NOTHING
     `;
     await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${runId}::uuid, ${agentPrincipalId}::uuid, ${deviceId}::uuid)`;
     await tx`
@@ -746,18 +778,8 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
         (${privChId}::uuid, ${wsId}::uuid, 'user', ${member.id}::uuid, ${member.id}::uuid, 'user'),
         (${privChId}::uuid, ${wsId}::uuid, 'user', ${peer.id}::uuid, ${member.id}::uuid, 'user')
     `;
-    await tx`
-      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, channel_id, created_by_kind, created_by_principal)
-      VALUES
-        (${privConvId}::uuid, ${wsId}::uuid, 'private_channel', ${privChId}::uuid, 'user', ${member.id}::uuid),
-        (${dmConvId}::uuid, ${wsId}::uuid, 'dm', NULL, 'user', ${peer.id}::uuid)
-    `;
-    await tx`
-      INSERT INTO swarm.conversation_members (workspace_id, conversation_id, member_kind, member_user_id)
-      VALUES
-        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${member.id}::uuid),
-        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${peer.id}::uuid)
-    `;
+    // Triggers create the private_channel conversation (id = privChId) and file each signal
+    // into its canonical conversation (including creating the DM and its members for dmAskId).
     await tx`
       INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
       VALUES
@@ -765,14 +787,12 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
         (${lockRaceAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Lock race question?', ${privChId}::uuid, '9999-12-31T23:59:59Z'),
         (${dmAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'DM question?', NULL, '9999-12-31T23:59:59Z')
     `;
-    await tx`
-      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience)
-      VALUES
-        (${wsId}::uuid, ${privConvId}::uuid, ${privAskId}::uuid, 'conversation'),
-        (${wsId}::uuid, ${privConvId}::uuid, ${lockRaceAskId}::uuid, 'conversation'),
-        (${wsId}::uuid, ${dmConvId}::uuid, ${dmAskId}::uuid, 'conversation')
-    `;
   });
+  const [dmFiled] = await sql<{ conversation_id: string }[]>`
+    SELECT conversation_id FROM swarm.conversation_signals WHERE signal_id = ${dmAskId}::uuid
+  `;
+  assert.ok(dmFiled?.conversation_id, "dmAskId must be filed into its canonical DM conversation");
+  const dmConvId = dmFiled.conversation_id;
 
   try {
     // 1. Local agent token is refused 403 by the early HUMAN_ONLY_COMMANDS gate before the dismissal branch or its audit.
@@ -974,7 +994,7 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
     // 7. After leaving DM: dismiss, restore, and exact replay all return uniform 404.
     await sql`
       UPDATE swarm.conversation_members
-      SET left_at = now()
+      SET left_at = greatest(clock_timestamp(), joined_at)
       WHERE workspace_id = ${wsId}::uuid AND conversation_id = ${dmConvId}::uuid AND member_user_id = ${member.id}::uuid
     `;
     const postLeaveDmReplay = await sendCommand(
@@ -1029,14 +1049,7 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
       assert.equal(visible.length, 0, `auditor ${auditor.id} must see zero waiting dismissal/restore rows in swarm_read.audit_log`);
     }
   } finally {
-    await sql`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
-    await sql`
-      DELETE FROM swarm.users
-      WHERE user_id IN (${outsideOwner.id}::uuid, ${outsideAdmin.id}::uuid, ${member.id}::uuid, ${peer.id}::uuid)
-    `;
-    for (const u of [outsideOwner, outsideAdmin, member, peer]) {
-      await admin.auth.admin.deleteUser(u.id);
-    }
+    await cleanupWorkspaceFixture(wsId, [outsideOwner.id, outsideAdmin.id, member.id, peer.id], true);
   }
 });
 
@@ -1047,10 +1060,7 @@ test("served command edge: C1 audit-insert wait revocation rolls back dismissal/
   const peer = await createUser("wd-audit-peer");
   const wsId = randomUUID();
   const privChDismissId = randomUUID();
-  const privConvDismissId = randomUUID();
   const privChRestoreId = randomUUID();
-  const privConvRestoreId = randomUUID();
-  const dmConvId = randomUUID();
   const privDismissAskId = randomUUID();
   const dmDismissAskId = randomUUID();
   const privRestoreAskId = randomUUID();
@@ -1087,19 +1097,8 @@ test("served command edge: C1 audit-insert wait revocation rolls back dismissal/
         (${privChRestoreId}::uuid, ${wsId}::uuid, 'user', ${member.id}::uuid, ${member.id}::uuid, 'user'),
         (${privChRestoreId}::uuid, ${wsId}::uuid, 'user', ${peer.id}::uuid, ${member.id}::uuid, 'user')
     `;
-    await tx`
-      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, channel_id, created_by_kind, created_by_principal)
-      VALUES
-        (${privConvDismissId}::uuid, ${wsId}::uuid, 'private_channel', ${privChDismissId}::uuid, 'user', ${member.id}::uuid),
-        (${privConvRestoreId}::uuid, ${wsId}::uuid, 'private_channel', ${privChRestoreId}::uuid, 'user', ${member.id}::uuid),
-        (${dmConvId}::uuid, ${wsId}::uuid, 'dm', NULL, 'user', ${peer.id}::uuid)
-    `;
-    await tx`
-      INSERT INTO swarm.conversation_members (workspace_id, conversation_id, member_kind, member_user_id)
-      VALUES
-        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${member.id}::uuid),
-        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${peer.id}::uuid)
-    `;
+    // Triggers create the private_channel conversations (id = channel_id) and file each signal
+    // into its canonical conversation (including creating the DM and its members for dmDismissAskId).
     await tx`
       INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
       VALUES
@@ -1107,14 +1106,12 @@ test("served command edge: C1 audit-insert wait revocation rolls back dismissal/
         (${privRestoreAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Audit-wait private restore ask?', ${privChRestoreId}::uuid, '9999-12-31T23:59:59Z'),
         (${dmDismissAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Audit-wait DM dismiss ask?', NULL, '9999-12-31T23:59:59Z')
     `;
-    await tx`
-      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience)
-      VALUES
-        (${wsId}::uuid, ${privConvDismissId}::uuid, ${privDismissAskId}::uuid, 'conversation'),
-        (${wsId}::uuid, ${privConvRestoreId}::uuid, ${privRestoreAskId}::uuid, 'conversation'),
-        (${wsId}::uuid, ${dmConvId}::uuid, ${dmDismissAskId}::uuid, 'conversation')
-    `;
   });
+  const [dmFiled] = await sql<{ conversation_id: string }[]>`
+    SELECT conversation_id FROM swarm.conversation_signals WHERE signal_id = ${dmDismissAskId}::uuid
+  `;
+  assert.ok(dmFiled?.conversation_id, "dmDismissAskId must be filed into its canonical DM conversation");
+  const dmConvId = dmFiled.conversation_id;
 
   const runHeldAtAuditInsert = async (
     command: Row,
@@ -1208,7 +1205,7 @@ test("served command edge: C1 audit-insert wait revocation rolls back dismissal/
       async () => {
         await sql`
           UPDATE swarm.conversation_members
-          SET left_at = now()
+          SET left_at = greatest(clock_timestamp(), joined_at)
           WHERE workspace_id = ${wsId}::uuid AND conversation_id = ${dmConvId}::uuid AND member_user_id = ${member.id}::uuid
         `;
       },
@@ -1307,13 +1304,6 @@ test("served command edge: C1 audit-insert wait revocation rolls back dismissal/
       assert.equal(visible.length, 0, "rolled-back dismissal refusals must remain out of swarm_read.audit_log");
     }
   } finally {
-    await sql`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
-    await sql`
-      DELETE FROM swarm.users
-      WHERE user_id IN (${outsideOwner.id}::uuid, ${outsideAdmin.id}::uuid, ${member.id}::uuid, ${peer.id}::uuid)
-    `;
-    for (const u of [outsideOwner, outsideAdmin, member, peer]) {
-      await admin.auth.admin.deleteUser(u.id);
-    }
+    await cleanupWorkspaceFixture(wsId, [outsideOwner.id, outsideAdmin.id, member.id, peer.id], true);
   }
 });
