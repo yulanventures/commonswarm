@@ -1,5 +1,6 @@
 import { humanInvitationClient } from '../../../src/cloud/human-invitation-transport.js';
 import {
+  AuthRecoveryRequired,
   currentSession,
   deployment,
   isMultiAccountEnabled,
@@ -25,7 +26,15 @@ export function browserHumanInvitations(options: { pinned?: PinnedAccountContext
         if (!bound || !bound.isCurrent()) {
           throw new Error('Your active account changed. Confirm again as the account you want to use.');
         }
-        const session = await bound.runtime.verifySession();
+        let session;
+        try {
+          session = await bound.runtime.verifySession();
+        } catch (error) {
+          if (error instanceof Error && error.name === 'MultiAccountAuthRecoveryRequired') {
+            throw new AuthRecoveryRequired();
+          }
+          throw error;
+        }
         if (!session || !bound.isCurrent() || session.user.id !== bound.userId) {
           throw new Error('Sign in as yourself to review invitations.');
         }

@@ -11,12 +11,20 @@ import {
 import {
   AuthRecoveryRequired,
   MULTI_ACCOUNT_STORAGE_KEY_PREFIXES,
+  PINNED_SUPABASE_JS_VERSION,
+  REFRESH_BACKOFF_BASE_MS,
+  REFRESH_BACKOFF_CAP_MS,
+  REFRESH_BACKOFF_FLOOR_MS,
+  SessionExpired,
   createBrowserSession,
+  credentialGenerationKey,
   deploymentOriginHash,
   isRestSessionEnded,
   multiAccountInUse,
   multiAccountStorageKeyPrefixesForDeployment,
+  refreshBackoffStorageKeyForDeployment,
   resolveDeployment,
+  sessionIdFromAccessToken,
   sessionStorageKeyForDeployment,
 } from "../../../shared/browser-session/index.js";
 import {
@@ -141,6 +149,8 @@ test("allowProcessLockFallback: false refuses when navigator.locks is absent wit
 
 test("allowProcessLockFallback: false creates client with navigatorLock and detectSessionInUrl: false when navigator.locks exists", async () => {
   let capturedOptions;
+  let navigatorLockCalls = 0;
+  let processLockCalls = 0;
   const fakeLocks = { request: async (name, _opts, cb) => cb({ name }) };
 
   await withNavigatorLocks(fakeLocks, async () => {
@@ -154,8 +164,14 @@ test("allowProcessLockFallback: false creates client with navigatorLock and dete
           capturedOptions = opts;
           return createClient(url, key, opts);
         },
-        navigatorLock,
-        processLock,
+        navigatorLock: (...args) => {
+          navigatorLockCalls += 1;
+          return navigatorLock(...args);
+        },
+        processLock: (...args) => {
+          processLockCalls += 1;
+          return processLock(...args);
+        },
         isAuthSessionMissingError,
         AuthRetryableFetchError,
       },
@@ -167,16 +183,20 @@ test("allowProcessLockFallback: false creates client with navigatorLock and dete
     assert.equal(capturedOptions?.auth?.autoRefreshToken, true);
     assert.equal(capturedOptions?.auth?.detectSessionInUrl, false);
     assert.equal(capturedOptions?.auth?.lockAcquireTimeout, -1);
-    assert.equal(capturedOptions?.auth?.lock, navigatorLock);
+    assert.equal(typeof capturedOptions?.auth?.lock, "function");
     assert.equal(result.client.rest?.retry, false);
     assert.equal("dispose" in result, false, "dispose is deferred until a product caller exists");
     await result.client.auth.getSession();
+    assert.ok(navigatorLockCalls > 0, "delegated lock acquisitions to navigatorLock");
+    assert.equal(processLockCalls, 0, "did not fall back to processLock");
     await result.client.auth.dispose();
   });
 });
 
 test("allowProcessLockFallback: true falls back to processLock when navigator.locks is absent", async () => {
   let capturedOptions;
+  let navigatorLockCalls = 0;
+  let processLockCalls = 0;
   await withNavigatorLocks(undefined, async () => {
     const result = createBrowserSession({
       url: "https://api.commonswarm.com",
@@ -188,8 +208,14 @@ test("allowProcessLockFallback: true falls back to processLock when navigator.lo
           capturedOptions = opts;
           return createClient(url, key, opts);
         },
-        navigatorLock,
-        processLock,
+        navigatorLock: (...args) => {
+          navigatorLockCalls += 1;
+          return navigatorLock(...args);
+        },
+        processLock: (...args) => {
+          processLockCalls += 1;
+          return processLock(...args);
+        },
         isAuthSessionMissingError,
         AuthRetryableFetchError,
       },
@@ -197,9 +223,11 @@ test("allowProcessLockFallback: true falls back to processLock when navigator.lo
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.equal(capturedOptions?.auth?.detectSessionInUrl, true);
-    assert.equal(capturedOptions?.auth?.lock, processLock);
+    assert.equal(typeof capturedOptions?.auth?.lock, "function");
     assert.equal("dispose" in result, false);
     await result.client.auth.getSession();
+    assert.ok(processLockCalls > 0, "delegated lock acquisitions to processLock");
+    assert.equal(navigatorLockCalls, 0, "did not call navigatorLock when navigator.locks is absent");
     await result.client.auth.dispose();
   });
 });
@@ -701,8 +729,7 @@ function raceDeadline(promise, ms, describe) {
   ]).finally(() => clearTimeout(timer));
 }
 
-test("Order A: rotation in storage before 400 refresh_token_already_used settles both sessions within 500 ms [fails until the refresh-stall fix]", async () => {
-  // Uses a bounded real wait of 500 ms after the 400 answer (and quiesce() in finally so the 30s sleep does not hang the runner).
+test("Order A: rotation in storage before 400 refresh_token_already_used settles both sessions within 500 ms", async () => {
   const initialStored = makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: true });
   const rotatedStored = makeStoredSession({ accessToken: "at-2", refreshToken: "rt-2", expired: false });
   const storage = memoryStorage({ [TEST_STORAGE_KEY]: initialStored });
@@ -779,9 +806,8 @@ test("Order A: rotation in storage before 400 refresh_token_already_used settles
   });
 });
 
-test("Order B: rotation in storage with storage event 200 ms after 400 refresh_token_already_used wakes cooldown and settles both sessions within 500 ms [fails until the refresh-stall fix]", async () => {
-  // Uses a bounded real wait: 200 ms after the 400 arrives, storage rotates with a storage event,
-  // then asserts full recovery within 500 ms of the rotation.
+test("Order B: rotation in storage with storage event 200 ms after 400 refresh_token_already_used clears backoff and settles both sessions within 500 ms", async () => {
+  const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
   const initialStored = makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: true });
   const rotatedStored = makeStoredSession({ accessToken: "at-2", refreshToken: "rt-2", expired: false });
   const storage = memoryStorage({ [TEST_STORAGE_KEY]: initialStored });
@@ -819,32 +845,59 @@ test("Order B: rotation in storage with storage event 200 ms after 400 refresh_t
     const sessionA = makeBrowserSession();
     let sessionB;
     try {
-      const pendingA = sessionA.currentSession();
+      const pendingA = sessionA.currentSession().then(
+        (v) => ({ ok: true, value: v }),
+        (e) => ({ ok: false, error: e }),
+      );
       await refreshStarted;
       assert.equal(locks.isHeld(TEST_LOCK_NAME), true, "A holds the shared lock during refresh");
 
       sessionB = makeBrowserSession();
-      const pendingB = sessionB.currentSession();
+      const pendingB = sessionB.currentSession().then(
+        (v) => ({ ok: true, value: v }),
+        (e) => ({ ok: false, error: e }),
+      );
 
-      // 400 arrives FIRST while storage still holds rt-1, starting the 30s cooldown.
+      // 400 arrives FIRST while storage still holds rt-1. Backoff is recorded OUTSIDE the lock
+      // and both sessions report AuthRecoveryRequired promptly without holding the lock.
+      const refusedAt = Date.now();
       releaseRefresh();
-      // Let authFetch process the 400 and GoTrue arm its 200 ms retry timer, then wait 200 ms
-      // so the rotation lands during the active cooldown.
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setTimeout(r, 200));
 
-      assert.equal(locks.isHeld(TEST_LOCK_NAME), true, "A still holds the lock in cooldown before rotation");
+      const [initialA, initialB] = await raceDeadline(
+        Promise.all([pendingA, pendingB]),
+        250,
+        () => `Order B initial refusal stalled: lockHeld=${locks.isHeld(TEST_LOCK_NAME)} refreshRequests=${refreshRequests}`,
+      );
+      assert.ok(Date.now() - refusedAt < 250, "both sessions reported promptly without waiting for 4s deadline");
+      assert.equal(initialA.ok, false);
+      assert.ok(initialA.error instanceof AuthRecoveryRequired);
+      assert.ok(typeof initialA.error.retryAfter === "number" && initialA.error.retryAfter > refusedAt, "A carries retryAfter");
+      assert.equal(initialB.ok, false);
+      assert.ok(initialB.error instanceof AuthRecoveryRequired);
+      assert.equal(initialB.error.retryAfter, initialA.error.retryAfter, "B shares cross-tab retryAfter");
+      assert.equal(locks.isHeld(TEST_LOCK_NAME), false, "shared Web Lock is released outside backoff");
+      assert.equal(refreshRequests, 1, "B sent zero extra wire refreshes during shared backoff");
+      assert.ok(storage.entries.has(backoffKey), "cross-tab backoff entry recorded for rt-1");
+
+      // Wait 200 ms inside the active backoff window before the peer rotation arrives.
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(locks.isHeld(TEST_LOCK_NAME), false, "lock stays free during backoff");
+      assert.equal(refreshRequests, 1, "still zero extra refresh attempts during backoff");
 
       // Peer writes the rotated valid session and both sessions receive the storage event.
       storage.entries.set(TEST_STORAGE_KEY, rotatedStored);
-      const writesAtRotation = storage.ops.filter((op) => op.startsWith("set:") || op.startsWith("remove:")).length;
+      const sessionWritesAtRotation = storage.ops.filter(
+        (op) => op === `set:${TEST_STORAGE_KEY}` || op === `remove:${TEST_STORAGE_KEY}`,
+      ).length;
       const rotatedAt = Date.now();
       dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: initialStored, newValue: rotatedStored });
 
+      assert.equal(storage.entries.has(backoffKey), false, "storage event with different credential clears old backoff immediately");
+
       const [resA, resB] = await raceDeadline(
-        Promise.all([pendingA, pendingB]),
+        Promise.all([sessionA.currentSession(), sessionB.currentSession()]),
         500,
-        () => `Order B stalled: lockHeld=${locks.isHeld(TEST_LOCK_NAME)} refreshRequests=${refreshRequests} userChecks=${userCheckTokens.length}`,
+        () => `Order B recovery stalled: lockHeld=${locks.isHeld(TEST_LOCK_NAME)} refreshRequests=${refreshRequests} userChecks=${userCheckTokens.length}`,
       );
       const elapsedMs = Date.now() - rotatedAt;
 
@@ -857,31 +910,38 @@ test("Order B: rotation in storage with storage event 200 ms after 400 refresh_t
       assert.equal(resB?.access_token, "at-2");
       assert.deepEqual(userCheckTokens, ["Bearer at-2", "Bearer at-2"], "a single user check each for A and B");
       assert.equal(storage.entries.get(TEST_STORAGE_KEY), rotatedStored, "storage still holds exactly the peer's session");
-      const writesAfterRotation = storage.ops.filter((op) => op.startsWith("set:") || op.startsWith("remove:")).length;
-      assert.equal(writesAfterRotation, writesAtRotation, "no session wrote over the peer's rotated session");
+      const sessionWritesAfterRotation = storage.ops.filter(
+        (op) => op === `set:${TEST_STORAGE_KEY}` || op === `remove:${TEST_STORAGE_KEY}`,
+      ).length;
+      assert.equal(sessionWritesAfterRotation, sessionWritesAtRotation, "no session wrote over the peer's rotated session");
     } finally {
       await Promise.all([sessionA.quiesce(), sessionB?.quiesce()]);
     }
   });
 });
 
-// Characterisation test: records current behaviour for genuine refresh failures (429 and network error)
-// with NO rotation in storage. The security reviewer is deciding whether a genuine failure should keep
-// holding the cross-tab lock for the 30-second cooldown.
-test("genuine refresh failure (429 and network error) without storage rotation holds cross-tab lock for 30s and times out peer with AuthRecoveryRequired (characterisation)", async (t) => {
-  async function runGenuineFailureCase(st, mode) {
-    st.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-    const flushAsync = async () => {
-      for (let i = 0; i < 60; i += 1) {
-        await Promise.resolve();
-      }
-    };
+// Reviewer requirement: genuine refresh failure (429 with Retry-After and network error) with NO rotation:
+// - Backoff lives outside the Web Lock; peer gets through and reports within 250 ms.
+// - No further refresh is sent during the backoff window across both sessions sharing storage.
+// - Total requests across tabs are bounded as designed (1 per window: Retry-After window or 2s/4s/8s/16s/32s/60s cap).
+// - When the window ends, the next attempt is made and recovery works.
+test("genuine refresh failure (429 with Retry-After and network error) without rotation releases lock, bounds cross-tab attempts, and recovers after backoff window", async (t) => {
+  async function flushMacro() {
+    for (let i = 0; i < 6; i += 1) {
+      await new Promise((r) => setImmediate(r));
+    }
+  }
 
+  async function runGenuineFailureCase(st, mode) {
+    st.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_700_000_000_000 });
+    const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
     const initialStored = makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: true });
     const storage = memoryStorage({ [TEST_STORAGE_KEY]: initialStored });
     const locks = createFifoLocks();
 
     let refreshRequests = 0;
+    let userChecks = 0;
+    let allowRecover = false;
     let firstRefreshStartedResolve;
     const firstRefreshStarted = new Promise((r) => { firstRefreshStartedResolve = r; });
     let releaseFirstRefresh;
@@ -895,6 +955,18 @@ test("genuine refresh failure (429 and network error) without storage rotation h
           firstRefreshStartedResolve();
           await firstRefreshHeld;
         }
+        if (allowRecover) {
+          return new Response(
+            JSON.stringify({
+              access_token: "at-recovered",
+              refresh_token: "rt-recovered",
+              expires_in: 3600,
+              token_type: "bearer",
+              user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
         if (mode === "429") {
           return new Response(
             JSON.stringify({ code: "over_request_rate_limit", message: "Too Many Requests" }),
@@ -903,11 +975,19 @@ test("genuine refresh failure (429 and network error) without storage rotation h
               headers: {
                 "content-type": "application/json",
                 "x-supabase-api-version": "2024-01-01",
+                "retry-after": "15",
               },
             },
           );
         }
         throw new TypeError("Failed to fetch");
+      }
+      if (url.includes("/auth/v1/user")) {
+        userChecks += 1;
+        return new Response(
+          JSON.stringify({ id: "user-1", aud: "authenticated", email: "owner@example.test" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
       }
       throw new Error(`Unexpected fetch URL: ${url}`);
     };
@@ -922,60 +1002,89 @@ test("genuine refresh failure (429 and network error) without storage rotation h
             (e) => ({ ok: false, error: e, at: Date.now() }),
           );
           await firstRefreshStarted;
-          const failureStartedAt = Date.now();
+          const failureAt = Date.now();
+          assert.equal(locks.isHeld(TEST_LOCK_NAME), true, `${mode}: A holds lock during wire fetch`);
 
           sessionB = makeBrowserSession();
           const pendingB = sessionB.currentSession().then(
             (v) => ({ ok: true, value: v, at: Date.now() }),
             (e) => ({ ok: false, error: e, at: Date.now() }),
           );
-          await flushAsync();
 
-          // Release A's first refresh with 429 or network error; storage never rotates.
+          // Release A's first refresh failure; storage never rotates.
+          const realStart = performance.now();
           releaseFirstRefresh();
-          await flushAsync();
+          await flushMacro();
 
-          // At +200 ms GoTrue's attempt 1 re-enters authFetch and sleeps through the 30s cooldown while holding the lock.
-          st.mock.timers.tick(200);
-          await flushAsync();
-          assert.equal(locks.isHeld(TEST_LOCK_NAME), true, `${mode}: lock stays held entering cooldown`);
-          assert.equal(refreshRequests, 1, `${mode}: cooldown blocks second network request at +200 ms`);
+          const [outcomeA, outcomeB] = await Promise.all([pendingA, pendingB]);
+          const realElapsedMs = performance.now() - realStart;
 
-          // At +4_000 ms boundedAuth rejects BOTH A and B with AuthRecoveryRequired while A still holds the lock.
-          st.mock.timers.tick(3_800);
-          await flushAsync();
-          const outcomeA = await pendingA;
-          const outcomeB = await pendingB;
-          assert.equal(outcomeA.ok, false, `${mode}: A rejects at 4s deadline`);
-          assert.ok(outcomeA.error instanceof AuthRecoveryRequired, `${mode}: A rejects with AuthRecoveryRequired`);
-          assert.equal(outcomeB.ok, false, `${mode}: B rejects at 4s deadline`);
-          assert.ok(outcomeB.error instanceof AuthRecoveryRequired, `${mode}: B rejects with AuthRecoveryRequired`);
-          assert.equal(outcomeB.at - failureStartedAt, 4_000, `${mode}: B times out at exactly 4000 ms`);
-          assert.equal(locks.isHeld(TEST_LOCK_NAME), true, `${mode}: lock is still held after B times out`);
+          const expectedWindowMs = mode === "429" ? 15_000 : REFRESH_BACKOFF_BASE_MS;
+          assert.ok(realElapsedMs < 250, `${mode}: peer and first settled within 250 ms (actual ${realElapsedMs.toFixed(1)} ms)`);
+          assert.equal(locks.isHeld(TEST_LOCK_NAME), false, `${mode}: lock is released immediately after failure`);
+          assert.equal(outcomeA.ok, false);
+          assert.ok(outcomeA.error instanceof AuthRecoveryRequired);
+          assert.equal(outcomeA.error.retryAfter, failureAt + expectedWindowMs, `${mode}: A carries expected retryAfter`);
+          assert.equal(outcomeB.ok, false);
+          assert.ok(outcomeB.error instanceof AuthRecoveryRequired);
+          assert.equal(outcomeB.error.retryAfter, failureAt + expectedWindowMs, `${mode}: peer B shares expected retryAfter`);
+          assert.equal(outcomeB.at - failureAt, 0, `${mode}: peer B did not wait for 4s deadline`);
+          assert.equal(refreshRequests, 1, `${mode}: exactly 1 wire refresh across A and B`);
+          assert.equal(storage.entries.get(TEST_STORAGE_KEY), initialStored, `${mode}: stored session preserved`);
 
-          // Still held just before the 30s cooldown expires.
-          st.mock.timers.tick(25_900);
-          await flushAsync();
-          assert.equal(locks.isHeld(TEST_LOCK_NAME), true, `${mode}: lock is still held at 29.9s`);
+          // Repeated calls from BOTH tabs during the backoff window send ZERO additional refresh requests.
+          st.mock.timers.tick(expectedWindowMs - 100);
+          await flushMacro();
+          for (const tab of [sessionA, sessionB, sessionA, sessionB]) {
+            const t0 = performance.now();
+            await assert.rejects(() => tab.currentSession(), (err) => {
+              assert.ok(err instanceof AuthRecoveryRequired);
+              assert.equal(err.retryAfter, failureAt + expectedWindowMs);
+              return true;
+            });
+            assert.ok(performance.now() - t0 < 250, `${mode}: backoff rejection stayed under 250 ms`);
+          }
+          assert.equal(refreshRequests, 1, `${mode}: zero further wire refreshes during backoff window`);
+          assert.equal(locks.isHeld(TEST_LOCK_NAME), false, `${mode}: lock remains free`);
 
-          // At 30_000 ms the cooldown ends, attempt 1 sends a second refresh which also fails,
-          // GoTrue stops retrying (30_000 + 400 >= AUTO_REFRESH_TICK_DURATION_MS), and A releases the lock.
-          // B's queued initialize() then acquires the lock and fires a third refresh request.
-          st.mock.timers.tick(100);
-          await flushAsync();
+          // For network error, also verify exponential escalation on a second consecutive failure (2s -> 4s)
+          // so across two tabs total wire attempts are strictly bounded (1 per window).
+          if (mode === "network") {
+            st.mock.timers.tick(100); // now at +2_000 ms (window 1 ended)
+            await flushMacro();
+            await assert.rejects(() => sessionB.currentSession(), (err) => {
+              assert.ok(err instanceof AuthRecoveryRequired);
+              assert.equal(err.retryAfter, failureAt + 2_000 + 4_000, "second failure doubles backoff to 4_000 ms");
+              return true;
+            });
+            assert.equal(refreshRequests, 2, "second wire attempt permitted when window 1 ended");
+            // Tab A tries during window 2 (+3_900 ms into the 4 s window): 0 extra wire requests.
+            st.mock.timers.tick(3_900);
+            await flushMacro();
+            await assert.rejects(() => sessionA.currentSession(), AuthRecoveryRequired);
+            assert.equal(refreshRequests, 2, "tab A sent zero extra requests during window 2");
+            // Advance to end of window 2 (+100 ms -> +6_000 ms total).
+            st.mock.timers.tick(100);
+          } else {
+            // Advance past end of 15 s Retry-After window.
+            st.mock.timers.tick(100);
+          }
+          await flushMacro();
 
-          const firstHold = locks.holds[0];
-          assert.ok(firstHold, `${mode}: A's lock hold was recorded`);
-          assert.equal(firstHold.durationMs, 30_000, `${mode}: A held the cross-tab lock for 30000 ms`);
-          assert.equal(refreshRequests, 3, `${mode}: A made 2 attempts (0ms, 30000ms) and B immediately started its own refresh after A released at 30s`);
-          assert.equal(locks.isHeld(TEST_LOCK_NAME), true, `${mode}: B now holds the cross-tab lock in its own refresh/cooldown`);
-          assert.equal(storage.entries.get(TEST_STORAGE_KEY), initialStored, `${mode}: stored session remains intact`);
+          // Now the server recovers: next attempt succeeds and BOTH sessions verify cleanly.
+          allowRecover = true;
+          const recoveredA = await sessionA.currentSession();
+          assert.equal(recoveredA?.refresh_token, "rt-recovered", `${mode}: A recovered after backoff window`);
+          assert.equal(recoveredA?.access_token, "at-recovered");
+          assert.equal(storage.entries.has(backoffKey), false, `${mode}: backoff entry cleared on recovery`);
+
+          const verifiedB = await sessionB.currentSession();
+          assert.equal(verifiedB?.refresh_token, "rt-recovered", `${mode}: peer B verified recovered session`);
+          assert.equal(locks.isHeld(TEST_LOCK_NAME), false, `${mode}: lock free after recovery`);
+          assert.equal(refreshRequests, mode === "network" ? 3 : 2, `${mode}: total refresh count matched strict cross-tab bound`);
+          assert.equal(userChecks, 2, `${mode}: one getUser verification per tab after recovery`);
         } finally {
-          const quiesceDone = Promise.all([sessionA.quiesce(), sessionB?.quiesce()]);
-          // Advance mocked timers past GoTrue's 200 ms retry sleep so B's initializePromise
-          // re-enters authFetch while quiesced and settles immediately.
-          st.mock.timers.tick(500);
-          await quiesceDone;
+          await Promise.all([sessionA.quiesce(), sessionB?.quiesce()]);
         }
       });
     } finally {
@@ -983,12 +1092,12 @@ test("genuine refresh failure (429 and network error) without storage rotation h
     }
   }
 
-  await t.test("HTTP 429 without rotation", (st) => runGenuineFailureCase(st, "429"));
+  await t.test("HTTP 429 with Retry-After without rotation", (st) => runGenuineFailureCase(st, "429"));
   await t.test("network error without rotation", (st) => runGenuineFailureCase(st, "network"));
 });
 
-test("no fabricated session can be stored: quiescedRefreshResponse is discarded by SDK guard and unchanged storage never produces a synthetic response", async (t) => {
-  await t.test("quiescedRefreshResponse is discarded by SDK commit guard (AuthRefreshDiscardedError) with zero storage writes", async () => {
+test("no fabricated session can be stored: sentinel discard guard, independent setItem write fence, and terminal refusal contract", async (t) => {
+  await t.test("quiesced refresh response carries a per-attempt sentinel and is discarded by SDK commit guard with zero storage writes", async () => {
     const initialStored = makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: false });
     const storage = memoryStorage({ [TEST_STORAGE_KEY]: initialStored });
     const locks = createFifoLocks();
@@ -1057,24 +1166,28 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
       });
 
       try {
-        // Wait for initial load of the valid stored session, then trigger an explicit refresh.
         const initial = await session.client.auth.getSession();
         assert.equal(initial.data.session?.refresh_token, "rt-1");
 
         const pendingRefresh = session.client.auth.refreshSession();
         await refreshStarted;
 
-        // Quiesce while refresh is in flight, then release the underlying fetch so authFetch returns quiescedRefreshResponse().
         const quiesceDone = session.quiesce();
         releaseRefresh();
         const [refreshResult] = await Promise.all([pendingRefresh, quiesceDone]);
 
-        assert.equal(observedAuthFetchResponses.length, 1, "authFetch returned the synthetic quiesced response");
+        assert.equal(observedAuthFetchResponses.length, 1, "authFetch returned the synthetic discard response");
         assert.equal(observedAuthFetchResponses[0].status, 200);
-        assert.equal(observedAuthFetchResponses[0].body?.access_token, "quiesced");
-        assert.equal(observedAuthFetchResponses[0].body?.refresh_token, "quiesced");
+        assert.match(
+          observedAuthFetchResponses[0].body?.access_token ?? "",
+          /^__cs_discard_v1_[0-9a-f]{32}_[0-9a-f]{32}$/,
+          "quiesced discard uses per-attempt unguessable sentinel",
+        );
+        assert.equal(
+          observedAuthFetchResponses[0].body?.refresh_token,
+          observedAuthFetchResponses[0].body?.access_token,
+        );
 
-        // GoTrue's own commit guard (storageChangedUnderUs) discards the synthetic payload before calling _saveSession.
         assert.equal(refreshResult.data.session, null, "SDK returned no session");
         assert.equal(refreshResult.error?.name, "AuthRefreshDiscardedError", "SDK commit guard discarded the synthetic response");
         assert.deepEqual(authStorageSetCalls, [], "SDK never attempted to write the synthetic session to authStorage");
@@ -1090,18 +1203,88 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
     });
   });
 
-  await t.test("if storage did NOT change, authFetch never produces a synthetic 200 response across refused/failed refreshes (including empty storage)", async () => {
+  await t.test("independent write fence: direct authStorage.setItem with any sentinel payload is refused before touching memory or localStorage", async () => {
+    const initialStored = makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: false });
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: initialStored });
+    const locks = createFifoLocks();
+    let capturedAuthFetch;
+    let capturedStorage;
+
+    const fetchImpl = async () => alreadyUsedResponse();
+
+    await withSharedBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeBrowserSession({
+        createClient(url, key, opts) {
+          capturedAuthFetch = opts.global.fetch;
+          capturedStorage = opts.auth.storage;
+          return createClient(url, key, opts);
+        },
+      });
+
+      try {
+        await session.client.auth.getSession();
+
+        // Trigger two discard responses directly via authFetch (outside a locked _callRefreshToken
+        // attempt) and verify each gets a distinct unguessable sentinel while authStorage.getItem
+        // NEVER reports false absence outside an armed locked commit-guard read.
+        const r1 = await capturedAuthFetch(`${TEST_API_URL}/auth/v1/token?grant_type=refresh_token`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ refresh_token: "rt-1" }),
+        });
+        const body1 = await r1.json();
+        assert.equal(capturedStorage.getItem(TEST_STORAGE_KEY), initialStored, "out-of-attempt authFetch must not arm commit-guard read");
+
+        const r2 = await capturedAuthFetch(`${TEST_API_URL}/auth/v1/token?grant_type=refresh_token`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ refresh_token: "rt-1" }),
+        });
+        const body2 = await r2.json();
+        assert.equal(capturedStorage.getItem(TEST_STORAGE_KEY), initialStored, "storage adapter still returns real slot");
+
+        assert.match(body1.access_token, /^__cs_discard_v1_[0-9a-f]{32}_[0-9a-f]{32}$/);
+        assert.match(body2.access_token, /^__cs_discard_v1_[0-9a-f]{32}_[0-9a-f]{32}$/);
+        assert.notEqual(body1.access_token, body2.access_token, "sentinels are unique per attempt");
+
+        const sessionWritesBefore = storage.ops.filter((op) => op === `set:${TEST_STORAGE_KEY}`).length;
+
+        // Direct setItem with raw sentinel JSON must throw before touching memory or localStorage.
+        assert.throws(
+          () => capturedStorage.setItem(TEST_STORAGE_KEY, JSON.stringify(body1)),
+          AuthRetryableFetchError,
+        );
+        // Unicode-escaped sentinel JSON must ALSO be caught by the fence.
+        const unicodeEscaped = JSON.stringify(body2).replace("__cs_", "\\u005f\\u005fcs_");
+        assert.throws(
+          () => capturedStorage.setItem(TEST_STORAGE_KEY, unicodeEscaped),
+          AuthRetryableFetchError,
+        );
+
+        const sessionWritesAfter = storage.ops.filter((op) => op === `set:${TEST_STORAGE_KEY}`).length;
+        assert.equal(sessionWritesAfter, sessionWritesBefore, "zero session writes reached localStorage");
+        assert.equal(storage.entries.get(TEST_STORAGE_KEY), initialStored, "localStorage still holds the original session");
+        assert.equal(capturedStorage.getItem(TEST_STORAGE_KEY), initialStored, "in-memory adapter cache was not poisoned");
+      } finally {
+        await session.quiesce();
+      }
+    });
+  });
+
+  await t.test("refused/failed refreshes never store fabricated data; matching terminal refusal returns the real error response", async () => {
     const scenarios = [
       {
         name: "unchanged rt-1 + 400 refresh_token_already_used",
         initialStorage: { [TEST_STORAGE_KEY]: makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: false }) },
         refreshArg: undefined,
+        expectTerminalPassThrough: false,
         response: () => alreadyUsedResponse(),
       },
       {
         name: "unchanged rt-1 + terminal 400 refresh_token_not_found",
         initialStorage: { [TEST_STORAGE_KEY]: makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: false }) },
         refreshArg: undefined,
+        expectTerminalPassThrough: true,
         response: () =>
           new Response(
             JSON.stringify({ code: "refresh_token_not_found", error_code: "refresh_token_not_found" }),
@@ -1115,6 +1298,7 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
         name: "unchanged rt-1 + 429 rate limit",
         initialStorage: { [TEST_STORAGE_KEY]: makeStoredSession({ accessToken: "at-1", refreshToken: "rt-1", expired: false }) },
         refreshArg: undefined,
+        expectTerminalPassThrough: false,
         response: () =>
           new Response(
             JSON.stringify({ code: "over_request_rate_limit" }),
@@ -1128,6 +1312,7 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
         name: "empty storage (storedAtStart === null) + explicit refreshSession 400 refresh_token_already_used",
         initialStorage: {},
         refreshArg: { refresh_token: "rt-orphan" },
+        expectTerminalPassThrough: false,
         response: () => alreadyUsedResponse(),
       },
     ];
@@ -1135,8 +1320,7 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
     for (const scenario of scenarios) {
       const storage = memoryStorage(scenario.initialStorage);
       const locks = createFifoLocks();
-      let capturedAuthFetch;
-      const authStorageWrites = [];
+      const observedEvents = [];
 
       const fetchImpl = async (input) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -1147,52 +1331,22 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
       };
 
       await withSharedBrowserEnv({ storage, locks, fetchImpl }, async () => {
-        const session = makeBrowserSession({
-          createClient(url, key, opts) {
-            capturedAuthFetch = opts.global.fetch;
-            const origStorage = opts.auth.storage;
-            return createClient(url, key, {
-              ...opts,
-              auth: {
-                ...opts.auth,
-                storage: {
-                  getItem: (k) => origStorage.getItem(k),
-                  removeItem: (k) => origStorage.removeItem(k),
-                  setItem: (k, v) => {
-                    authStorageWrites.push(v);
-                    return origStorage.setItem(k, v);
-                  },
-                },
-              },
-            });
-          },
-        });
-
+        const session = makeBrowserSession();
+        session.client.auth.onAuthStateChange((event, sess) => observedEvents.push({ event, sess }));
         try {
-          // Ensure initial session key discovery has run before exercising authFetch directly.
           await session.client.auth.getSession();
+          observedEvents.length = 0;
 
-          // Exercise authFetch directly for a single refresh attempt while storage is UNCHANGED.
-          let outcome;
-          try {
-            const res = await capturedAuthFetch(`${TEST_API_URL}/auth/v1/token?grant_type=refresh_token`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ refresh_token: scenario.refreshArg?.refresh_token ?? "rt-1" }),
-            });
-            outcome = { returned: true, status: res.status, ok: res.ok, body: await res.clone().json().catch(() => null) };
-          } catch (error) {
-            outcome = { returned: false, error };
-          }
-
-          if (outcome.returned) {
-            assert.equal(outcome.ok, false, `${scenario.name}: must never return a synthetic 2xx response when storage did not change`);
-            assert.notEqual(outcome.body?.access_token, "quiesced", `${scenario.name}: must never return quiesced payload`);
+          const res = await session.client.auth.refreshSession(scenario.refreshArg);
+          assert.equal(res.data.session, null, `${scenario.name}: must not return a fabricated session`);
+          if (scenario.expectTerminalPassThrough) {
+            assert.equal(res.error?.code, "refresh_token_not_found", `${scenario.name}: terminal error preserved`);
+          } else if (Object.keys(scenario.initialStorage).length === 0) {
+            assert.equal(res.error?.name, "AuthRetryableFetchError", `${scenario.name}: empty slot blocked by write fence`);
           } else {
-            assert.ok(outcome.error instanceof Error, `${scenario.name}: threw error instead of synthetic response`);
+            assert.equal(res.error?.name, "AuthRefreshDiscardedError", `${scenario.name}: non-terminal failure exited via discard`);
           }
 
-          assert.deepEqual(authStorageWrites, [], `${scenario.name}: nothing fabricated written to authStorage`);
           const storedNow = storage.entries.get(TEST_STORAGE_KEY) ?? null;
           assert.equal(
             storedNow,
@@ -1200,12 +1354,407 @@ test("no fabricated session can be stored: quiescedRefreshResponse is discarded 
             `${scenario.name}: localStorage was not overwritten with any fabricated payload`,
           );
           if (storedNow) {
-            assert.equal(storedNow.includes("quiesced"), false, `${scenario.name}: storage contains no quiesced token`);
+            assert.equal(storedNow.includes("__cs_discard_"), false, `${scenario.name}: storage contains no sentinel`);
           }
+          assert.deepEqual(observedEvents, [], `${scenario.name}: zero false auth events emitted`);
         } finally {
           await session.quiesce();
         }
       });
     }
   });
+});
+
+function makeJwt({ sub = "user-1", sessionId = "sid-login-1", sig = "sig-secret-token-part" } = {}) {
+  const b64 = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
+  const payload = sessionId !== null ? { sub, session_id: sessionId } : { sub };
+  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64(payload)}.${sig}`;
+}
+
+test("cross-tab backoff generation key (Item 15): uses non-secret session_id + user.id + expires_at (fallback without session_id), never stores token material, and invalidates on rotation or new login", async (t) => {
+  await t.test("credentialGenerationKey distinguishes rotation (new expires_at) and new login (new session_id) and falls back when session_id is absent", () => {
+    const jwtLogin1A = makeJwt({ sub: "user-1", sessionId: "sid-1", sig: "sig-secret-aaa" });
+    const jwtLogin1B = makeJwt({ sub: "user-1", sessionId: "sid-1", sig: "sig-secret-bbb" });
+    const jwtLogin2 = makeJwt({ sub: "user-1", sessionId: "sid-2", sig: "sig-secret-ccc" });
+
+    assert.equal(sessionIdFromAccessToken(jwtLogin1A), "sid-1");
+    assert.equal(sessionIdFromAccessToken("opaque-non-jwt"), null);
+
+    const k1 = credentialGenerationKey({ access_token: jwtLogin1A, expires_at: 1_700_000_100, user: { id: "user-1" } });
+    const k1Rotated = credentialGenerationKey({ access_token: jwtLogin1B, expires_at: 1_700_003_700, user: { id: "user-1" } });
+    const k2NewLogin = credentialGenerationKey({ access_token: jwtLogin2, expires_at: 1_700_000_100, user: { id: "user-1" } });
+    const kFallbackA = credentialGenerationKey({ access_token: "opaque-token-secret-1", expires_at: 1_700_000_100, user: { id: "user-1" } });
+    const kFallbackB = credentialGenerationKey({ access_token: "opaque-token-secret-2", expires_at: 1_700_000_200, user: { id: "user-1" } });
+
+    assert.ok(k1 && k1Rotated && k2NewLogin && kFallbackA && kFallbackB);
+    assert.notEqual(k1, k1Rotated, "token rotation (same login, new expires_at) produces a different generation key");
+    assert.notEqual(k1, k2NewLogin, "new login (new session_id, even same expires_at) produces a different generation key");
+    assert.notEqual(kFallbackA, kFallbackB, "fallback without session_id still separates distinct expires_at");
+    for (const key of [k1, k1Rotated, k2NewLogin, kFallbackA, kFallbackB]) {
+      assert.equal(key.includes("sig-secret"), false, "generation key never contains JWT signature");
+      assert.equal(key.includes("opaque-token-secret"), false, "generation key never contains raw access token");
+    }
+  });
+
+  await t.test("rotation (same login, new expiry) and new login (new session_id) each ignore and clear prior backoff immediately", async () => {
+    const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const rt1 = "rt-secret-token-alpha-987654321";
+    const at1 = makeJwt({ sub: "user-1", sessionId: "sid-login-A", sig: "sig-alpha-987654321" });
+    const rtRot = "rt-secret-token-rot-123456789";
+    const atRot = makeJwt({ sub: "user-1", sessionId: "sid-login-A", sig: "sig-rot-123456789" });
+    const rtNewLogin = "rt-secret-token-loginB-555555";
+    const atNewLogin = makeJwt({ sub: "user-1", sessionId: "sid-login-B", sig: "sig-loginB-555555" });
+
+    const makeSessionJson = (accessToken, refreshToken, expiresAtSec) => JSON.stringify({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_in: 3600,
+      expires_at: expiresAtSec,
+      token_type: "bearer",
+      user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+    });
+
+    const stored1 = makeSessionJson(at1, rt1, nowSec - 120);
+    // Rotation: same login (sid-login-A), new expiry (nowSec - 30, still expired so refresh runs).
+    const storedRotatedExpired = makeSessionJson(atRot, rtRot, nowSec - 30);
+    // New login: new session_id (sid-login-B), even with identical expiry (nowSec - 120)!
+    const storedNewLoginExpired = makeSessionJson(atNewLogin, rtNewLogin, nowSec - 120);
+
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: stored1 });
+    const locks = createFifoLocks();
+    const seenRefreshTokens = [];
+
+    const fetchImpl = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/token")) {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        seenRefreshTokens.push(body.refresh_token);
+        if (body.refresh_token === rt1) {
+          return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "x-supabase-api-version": "2024-01-01",
+              "retry-after": "86400",
+            },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            access_token: makeJwt({ sub: "user-1", sessionId: body.refresh_token === rtNewLogin ? "sid-login-B" : "sid-login-A", sig: `sig-ok-${seenRefreshTokens.length}` }),
+            refresh_token: `rt-ok-${seenRefreshTokens.length}`,
+            expires_in: 3600,
+            token_type: "bearer",
+            user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/auth/v1/user")) {
+        return new Response(
+          JSON.stringify({ id: "user-1", aud: "authenticated", email: "owner@example.test" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withSharedBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeBrowserSession();
+      try {
+        const beforeFailure = Date.now();
+        await assert.rejects(() => session.currentSession(), (err) => {
+          assert.ok(err instanceof AuthRecoveryRequired);
+          assert.ok(typeof err.retryAfter === "number");
+          assert.ok(err.retryAfter <= beforeFailure + REFRESH_BACKOFF_CAP_MS + 1_000);
+          assert.ok(err.retryAfter >= beforeFailure + REFRESH_BACKOFF_FLOOR_MS);
+          return true;
+        });
+
+        const rawBackoff = storage.entries.get(backoffKey);
+        assert.ok(typeof rawBackoff === "string" && rawBackoff.length > 0);
+        assert.equal(rawBackoff.includes(rt1), false, "backoff entry never contains refresh token");
+        assert.equal(rawBackoff.includes(at1), false, "backoff entry never contains access token");
+        assert.equal(rawBackoff.includes("sig-alpha"), false, "backoff entry never contains JWT signature");
+        const parsedBackoff = JSON.parse(rawBackoff);
+        assert.deepEqual(Object.keys(parsedBackoff).sort(), ["attempts", "gen", "nextAttemptAt"]);
+        assert.equal(parsedBackoff.gen, credentialGenerationKey(JSON.parse(stored1)));
+        assert.equal(parsedBackoff.attempts, 1);
+
+        // 1) Rotation (same login, new expires_at) replaces storage without a storage event:
+        //    old backoff is ignored and cleared, refreshing rtRot immediately.
+        storage.entries.set(TEST_STORAGE_KEY, storedRotatedExpired);
+        const verifiedRot = await session.currentSession();
+        assert.equal(verifiedRot?.refresh_token, "rt-ok-2");
+        assert.equal(storage.entries.has(backoffKey), false, "old backoff cleared after rotation");
+
+        // Re-seed backoff for stored1, then replace with new login (new session_id, SAME expires_at):
+        storage.entries.set(TEST_STORAGE_KEY, stored1);
+        await assert.rejects(() => session.currentSession(), AuthRecoveryRequired);
+        assert.ok(storage.entries.has(backoffKey));
+
+        // 2) New login (new session_id, identical expires_at) ignores and clears prior backoff immediately.
+        storage.entries.set(TEST_STORAGE_KEY, storedNewLoginExpired);
+        const verifiedNewLogin = await session.currentSession();
+        assert.equal(verifiedNewLogin?.refresh_token, "rt-ok-4");
+        assert.equal(storage.entries.has(backoffKey), false, "old backoff cleared after new login");
+        assert.deepEqual(seenRefreshTokens, [rt1, rtRot, rt1, rtNewLogin]);
+      } finally {
+        await session.quiesce();
+      }
+    });
+  });
+});
+
+test("cross-tab backoff across two independent module instances (Items 12 & 13): shares ONLY storage and fake lock; no retry during backoff, storage event triggers fresh verified read, and new credential/login proceeds immediately while predecessor stays fenced", async () => {
+  const modA = await import("../../../shared/browser-session/index.ts?tab=backoff-a");
+  const modB = await import("../../../shared/browser-session/index.ts?tab=backoff-b");
+  assert.notEqual(modA, modB, "Tab A and Tab B loaded as separate ES module instances");
+  assert.notEqual(modA.createBrowserSession, modB.createBrowserSession, "no shared JS module closure");
+
+  const backoffKey = modA.refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const makeSessionJson = (accessToken, refreshToken, expiresAtSec, userId = "user-1") => JSON.stringify({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_in: 3600,
+    expires_at: expiresAtSec,
+    token_type: "bearer",
+    user: { id: userId, aud: "authenticated", email: "owner@example.test" },
+  });
+
+  const s1Expired = makeSessionJson(makeJwt({ sub: "user-1", sessionId: "sid-1", sig: "sig-s1" }), "rt-s1", nowSec - 120);
+  const s1RotatedValid = makeSessionJson(makeJwt({ sub: "user-1", sessionId: "sid-1", sig: "sig-s1-rot" }), "rt-s1-rot", nowSec + 3600);
+  const s2NewLoginExpired = makeSessionJson(makeJwt({ sub: "user-2", sessionId: "sid-2", sig: "sig-s2" }), "rt-s2", nowSec - 120, "user-2");
+
+  const storage = memoryStorage({ [TEST_STORAGE_KEY]: s1Expired });
+  const locks = createFifoLocks();
+  const refreshTokensSent = [];
+  const userAuthHeaders = [];
+  let holdPredecessor = false;
+  let predecessorStartedResolve;
+  const predecessorStarted = new Promise((r) => { predecessorStartedResolve = r; });
+  let releasePredecessor;
+  const predecessorHeld = new Promise((r) => { releasePredecessor = r; });
+
+  const fetchImpl = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/auth/v1/token")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      refreshTokensSent.push(body.refresh_token);
+      if (body.refresh_token === "rt-s1") {
+        if (holdPredecessor) {
+          predecessorStartedResolve();
+          await predecessorHeld;
+        }
+        return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "x-supabase-api-version": "2024-01-01",
+            "retry-after": "20",
+          },
+        });
+      }
+      if (body.refresh_token === "rt-s2") {
+        return new Response(
+          JSON.stringify({
+            access_token: makeJwt({ sub: "user-2", sessionId: "sid-2", sig: "sig-s2-fresh" }),
+            refresh_token: "rt-s2-fresh",
+            expires_in: 3600,
+            token_type: "bearer",
+            user: { id: "user-2", aud: "authenticated", email: "two@example.test" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected refresh token: ${body.refresh_token}`);
+    }
+    if (url.includes("/auth/v1/user")) {
+      const auth = new Headers(init?.headers).get("authorization");
+      userAuthHeaders.push(auth);
+      const isUser2 = auth?.includes("sig-s2-fresh");
+      return new Response(
+        JSON.stringify({ id: isUser2 ? "user-2" : "user-1", aud: "authenticated" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  await withSharedBrowserEnv({ storage, locks, fetchImpl }, async ({ dispatchStorageEvent }) => {
+    const sdk = { createClient, navigatorLock, processLock, isAuthSessionMissingError, AuthRetryableFetchError };
+    const tabA = modA.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+    const tabB = modB.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+    assert.equal(tabA.ok, true);
+    assert.equal(tabB.ok, true);
+    if (!tabA.ok || !tabB.ok) return;
+
+    try {
+      // 1) Tab A fails with 429; backoff is written ONLY to storage.
+      let errA;
+      try { await tabA.currentSession(); } catch (e) { errA = e; }
+      assert.equal(errA?.name, "AuthRecoveryRequired");
+      assert.ok(typeof errA?.retryAfter === "number");
+      assert.equal(refreshTokensSent.length, 1);
+      assert.ok(storage.entries.has(backoffKey), "backoff persisted in shared storage");
+
+      // Tab B (distinct module instance) observes the storage backoff entry and sends ZERO wire retries.
+      let errB;
+      try { await tabB.currentSession(); } catch (e) { errB = e; }
+      assert.equal(errB?.name, "AuthRecoveryRequired");
+      assert.equal(errB?.retryAfter, errA.retryAfter, "Tab B read exact retryAfter from storage");
+      // Repeated call on Tab A also sends zero retries.
+      await assert.rejects(() => tabA.currentSession(), (e) => e?.name === "AuthRecoveryRequired");
+      assert.deepEqual(refreshTokensSent, ["rt-s1"], "zero network retries by either instance during genuine backoff");
+
+      // 2) Storage change prompts a fresh verified read on both instances with zero extra refreshes.
+      storage.entries.set(TEST_STORAGE_KEY, s1RotatedValid);
+      dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: s1Expired, newValue: s1RotatedValid });
+      assert.equal(storage.entries.has(backoffKey), false, "storage event cleared old backoff");
+
+      const [verA, verB] = await Promise.all([tabA.verifiedSession(), tabB.verifiedSession()]);
+      assert.equal(verA?.refresh_token, "rt-s1-rot");
+      assert.equal(verB?.refresh_token, "rt-s1-rot");
+      assert.deepEqual(refreshTokensSent, ["rt-s1"], "still zero extra refreshes after rotation");
+      assert.equal(userAuthHeaders.length, 2, "fresh verified getUser() ran on both instances");
+
+      // 3) New login proceeds immediately while an in-flight predecessor refresh stays fenced.
+      storage.entries.set(TEST_STORAGE_KEY, s1Expired);
+      dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: s1RotatedValid, newValue: s1Expired });
+      holdPredecessor = true;
+      const pendingPredecessor = tabA.verifiedSession();
+      await predecessorStarted;
+
+      // Replacement new login lands in storage while Tab A's predecessor rt-s1 is in flight.
+      storage.entries.set(TEST_STORAGE_KEY, s2NewLoginExpired);
+      dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: s1Expired, newValue: s2NewLoginExpired });
+      const pendingNewLoginB = tabB.verifiedSession();
+      releasePredecessor();
+
+      const [resA, resB] = await Promise.all([pendingPredecessor, pendingNewLoginB]);
+      assert.equal(resB?.refresh_token, "rt-s2-fresh", "Tab B refreshed & verified new login immediately");
+      assert.equal(resB?.user.id, "user-2");
+      assert.equal(resA?.user.id, "user-2", "Tab A fenced predecessor and adopted verified new login");
+      assert.equal(storage.entries.has(backoffKey), false, "predecessor left no backoff over new login");
+      assert.equal(JSON.parse(storage.entries.get(TEST_STORAGE_KEY)).refresh_token, "rt-s2-fresh");
+    } finally {
+      await Promise.all([tabA.quiesce(), tabB.quiesce()]);
+    }
+  });
+});
+
+test("Item 14: no raw refresh token, access token, or session payload appears in backoff entry, thrown errors, or console logs", async () => {
+  const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+  const secretRt = "rt_SUPER_SECRET_REFRESH_CREDENTIAL_XYZ987";
+  const secretSig = "SIG_SUPER_SECRET_ACCESS_PART_ABC123";
+  const secretAt = makeJwt({ sub: "user-1", sessionId: "sid-scan-1", sig: secretSig });
+  const nowSec = Math.floor(Date.now() / 1000);
+  const storedJson = JSON.stringify({
+    access_token: secretAt,
+    refresh_token: secretRt,
+    expires_in: 3600,
+    expires_at: nowSec - 120,
+    token_type: "bearer",
+    user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+  });
+
+  const secrets = [secretRt, secretAt, secretSig, storedJson];
+  const assertNoSecretLeak = (label, text) => {
+    for (const secret of secrets) {
+      assert.equal(text.includes(secret), false, `secret leaked in ${label}`);
+    }
+  };
+
+  const consoleMessages = [];
+  const origConsole = { log: console.log, warn: console.warn, error: console.error, debug: console.debug };
+  for (const level of Object.keys(origConsole)) {
+    console[level] = (...args) => {
+      consoleMessages.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    };
+  }
+
+  const collectedErrors = [];
+  let mode = "429";
+  const storage = memoryStorage({ [TEST_STORAGE_KEY]: storedJson });
+  const locks = createFifoLocks();
+  let capturedStorage;
+
+  const fetchImpl = async (input) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/auth/v1/token")) {
+      if (mode === "429") {
+        return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+          status: 429,
+          headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01", "retry-after": "10" },
+        });
+      }
+      if (mode === "terminal") {
+        return new Response(JSON.stringify({ code: "refresh_token_not_found", error_code: "refresh_token_not_found" }), {
+          status: 400,
+          headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01" },
+        });
+      }
+      throw new TypeError("Failed to fetch");
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    await withSharedBrowserEnv({ storage, locks, fetchImpl }, async ({ dispatchStorageEvent }) => {
+      const session = makeBrowserSession({
+        createClient(url, key, opts) {
+          capturedStorage = opts.auth.storage;
+          return createClient(url, key, opts);
+        },
+      });
+
+      try {
+        // 1) Genuine 429 -> AuthRecoveryRequired + backoff entry
+        try { await session.currentSession(); } catch (err) { collectedErrors.push({ path: "429-backoff", err }); }
+        const rawBackoff = storage.entries.get(backoffKey);
+        assert.ok(typeof rawBackoff === "string" && rawBackoff.length > 0);
+        assertNoSecretLeak("backoff storage entry", rawBackoff);
+
+        // 2) Active backoff hit -> AuthRecoveryRequired
+        try { await session.verifiedSession(); } catch (err) { collectedErrors.push({ path: "active-backoff", err }); }
+
+        // 3) Terminal refusal -> SessionExpired
+        storage.entries.delete(backoffKey);
+        mode = "terminal";
+        try { await session.verifiedSession(); } catch (err) { collectedErrors.push({ path: "terminal-refusal", err }); }
+
+        // 4) Empty-slot orphan fence -> AuthRetryableFetchError
+        mode = "network";
+        const orphanRes = await session.client.auth.refreshSession({ refresh_token: secretRt });
+        if (orphanRes.error) collectedErrors.push({ path: "orphan-fence", err: orphanRes.error });
+
+        // 5) Quiesced storage write/remove -> AuthRetryableFetchError
+        await session.quiesce();
+        try { capturedStorage.setItem(TEST_STORAGE_KEY, storedJson); } catch (err) { collectedErrors.push({ path: "quiesced-setItem", err }); }
+        try { capturedStorage.removeItem(TEST_STORAGE_KEY); } catch (err) { collectedErrors.push({ path: "quiesced-removeItem", err }); }
+
+        assert.ok(collectedErrors.length >= 6, "collected errors from all paths");
+        for (const { path: label, err } of collectedErrors) {
+          const serialized = [
+            String(err),
+            err?.name ?? "",
+            err?.message ?? "",
+            err?.stack ?? "",
+            JSON.stringify(err, Object.getOwnPropertyNames(err ?? {})),
+          ].join("\n");
+          assertNoSecretLeak(`error(${label})`, serialized);
+        }
+        for (const line of consoleMessages) {
+          assertNoSecretLeak("console output", line);
+        }
+        void dispatchStorageEvent;
+      } finally {
+        await session.quiesce();
+      }
+    });
+  } finally {
+    Object.assign(console, origConsole);
+  }
 });

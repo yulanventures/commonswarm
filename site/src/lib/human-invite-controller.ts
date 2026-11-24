@@ -1,16 +1,21 @@
 import { HumanInviteRefused, type HumanInvitePreview, humanInvitationClient } from '../../../src/cloud/human-invitation-transport.js';
+import { AuthRecoveryRequired } from '../../../shared/browser-session/index.js';
 type Client = ReturnType<typeof humanInvitationClient>;
 export interface HumanInviteView { account: string | null; invitations: Awaited<ReturnType<Client['inbox']>>;
   preview: HumanInvitePreview | null; joined: boolean; message: string; busy: boolean; confirmed_role: 'reader' | 'editor' | null;
   /** The last read or join failed; `message` says how. Set explicitly, never inferred from text. */
-  failed: boolean }
+  failed: boolean;
+  /** Session verification could not complete; current content is preserved for a retry on the next notification. */
+  recoveryPending?: boolean }
+const isAuthRecoveryError = (error: unknown): boolean =>
+  error instanceof AuthRecoveryRequired || (error instanceof Error && error.name === 'AuthRecoveryRequired');
 /** Owns asynchronous recipient state. Every account transition discards private
  * rows, previews and pending requests before starting another read. */
 export function createHumanInviteController(api: Client, render: (view: HumanInviteView) => void) {
   let generation = 0, selectedId = '', request: ReturnType<Client['prepareAcceptance']> | null = null;
   // One decline request per invitation while its result is unknown: a retry repeats it, never sends a second.
   let declining: { id: string; request: ReturnType<Client['prepareDecline']> } | null = null;
-  let view: HumanInviteView = { account:null,invitations:[],preview:null,joined:false,message:'',busy:false,confirmed_role:null,failed:false };
+  let view: HumanInviteView = { account:null,invitations:[],preview:null,joined:false,message:'',busy:false,confirmed_role:null,failed:false,recoveryPending:false };
   const publish = () => render({ ...view, invitations: [...view.invitations] });
   const current = (version: number) => version === generation && view.account !== null;
   const failure = (error: unknown) => error instanceof HumanInviteRefused ? error.reason === 'review_changed'
@@ -19,13 +24,21 @@ export function createHumanInviteController(api: Client, render: (view: HumanInv
   return {
     setAccount(account: string | null) {
       ++generation; selectedId='';request=null;declining=null;
-      view={account,invitations:[],preview:null,joined:false,message:'',busy:false,confirmed_role:null,failed:false}; publish();
+      view={account,invitations:[],preview:null,joined:false,message:'',busy:false,confirmed_role:null,failed:false,recoveryPending:false}; publish();
     },
     async load() {
       if (!view.account) return;
-      const version = ++generation; request=null;view.confirmed_role=null;view.preview=null;view.joined=false;view.busy=true;view.failed=false;publish();
+      const version = ++generation; request=null;view.confirmed_role=null;view.preview=null;view.joined=false;view.busy=true;view.failed=false;view.recoveryPending=false;publish();
       try { const rows=await api.inbox(); if (current(version)) { view.invitations=rows;view.message=rows.length ? 'Choose an invitation to review.' : 'No pending invitations.'; } }
-      catch(error) { if(current(version)) { view.invitations=[];view.message=failure(error);view.failed=true; } }
+      catch(error) {
+        if (current(version)) {
+          if (isAuthRecoveryError(error)) {
+            view.recoveryPending = true;
+          } else {
+            view.invitations=[];view.message=failure(error);view.failed=true;
+          }
+        }
+      }
       finally { if(current(version)){view.busy=false;publish();} }
     },
     async review(id: string) {

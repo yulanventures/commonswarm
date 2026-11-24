@@ -4,6 +4,7 @@ import {build} from 'esbuild';
 import {fileURLToPath} from 'node:url';
 import {createHumanInviteController} from './human-invite-controller.ts';
 import {HumanInviteRefused} from '../../../src/cloud/human-invitations.ts';
+import {AuthRecoveryRequired} from '../../../shared/browser-session/index.ts';
 const preview={status:'preview',workspace_name:'Household',preview_digest:'a'.repeat(64),audience:[],disclosure:'Shared history'};
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve};};
 test('sign-out and a different human clear invitation rows and suppress a late private inbox result',async()=>{
@@ -76,4 +77,33 @@ test('a decline that settles after sign-out changes nothing for the next person'
   controller.setAccount('person-a');await controller.load();const declined=controller.decline('drop');
   controller.setAccount('person-b');gate.resolve();await declined;
   assert.equal(views.at(-1).account,'person-b');assert.deepEqual(views.at(-1).invitations,[]);assert.equal(views.at(-1).message,'');
+});
+
+test('AuthRecoveryRequired on inbox refresh does not throw, keeps existing invitations, and recovers on retry',async()=>{
+  let mode='initial';
+  const views=[];
+  const controller=createHumanInviteController({
+    inbox:async()=>{
+      if(mode==='recovery')throw new AuthRecoveryRequired(Date.now()+2000);
+      if(mode==='recovered')return [{invitation_id:'fresh',workspace_name:'Next Studio',inviter_display_name:'Pat'}];
+      return rows();
+    },
+  },v=>views.push(v));
+  controller.setAccount('recipient');
+  await controller.load();
+  assert.deepEqual(views.at(-1).invitations.map(r=>r.invitation_id),['keep','drop']);
+  assert.equal(views.at(-1).failed,false);
+
+  mode='recovery';
+  await controller.load();
+  assert.deepEqual(views.at(-1).invitations.map(r=>r.invitation_id),['keep','drop'],'existing inbox content is preserved');
+  assert.equal(views.at(-1).failed,false,'AuthRecoveryRequired does not replace content with a failure state');
+  assert.equal(views.at(-1).recoveryPending,true,'controller flags recoveryPending for the next notification or retry');
+  assert.equal(views.at(-1).busy,false);
+
+  mode='recovered';
+  await controller.load();
+  assert.deepEqual(views.at(-1).invitations.map(r=>r.invitation_id),['fresh']);
+  assert.equal(views.at(-1).recoveryPending,false);
+  assert.equal(views.at(-1).failed,false);
 });
