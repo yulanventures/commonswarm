@@ -79,6 +79,9 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn> | undefined;
 let functionLogs = "";
+const EDGE_LOG_RING_LIMIT = 80;
+const edgeLogRing: string[] = [];
+let edgeLogPartial = "";
 let envDir: string | undefined;
 const activeConnections = new Set<postgres.Sql>();
 
@@ -101,10 +104,45 @@ function openBoundedConnection(applicationName: string, forLockHolder = false): 
   return conn;
 }
 
+const UUID_TOKEN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IDENTIFIER_TOKEN_RE = /^[a-z][a-z0-9_-]*$/;
+
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\b(Bearer|DPoP)\s+\S+/gi, "$1 ***")
+    .replace(/\bswm_[A-Za-z0-9_-]+/g, "***")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "***")
+    .replace(/\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g, "***")
+    .replace(
+      /\b(authorization|apikey|api[_-]?key|service_role_key|anon_key|access_token|refresh_token|token|secret|password)(\s*[:=]\s*["']?)[^\s"',}]+/gi,
+      "$1$2***",
+    )
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, (match) =>
+      UUID_TOKEN_RE.test(match) || IDENTIFIER_TOKEN_RE.test(match) ? match : "***",
+    );
+}
+
+function appendEdgeLogChunk(text: string): void {
+  const combined = edgeLogPartial + text;
+  const parts = combined.split(/\r?\n/);
+  edgeLogPartial = parts.pop() ?? "";
+  for (const line of parts) {
+    if (line.length === 0) continue;
+    edgeLogRing.push(line);
+  }
+  if (edgeLogRing.length > EDGE_LOG_RING_LIMIT) {
+    edgeLogRing.splice(0, edgeLogRing.length - EDGE_LOG_RING_LIMIT);
+  }
+}
+
+function recentRedactedEdgeLogs(): string[] {
+  const lines = edgeLogPartial.length > 0 ? [...edgeLogRing, edgeLogPartial] : [...edgeLogRing];
+  return lines.slice(-EDGE_LOG_RING_LIMIT).map(redactSensitiveText);
+}
+
 function redactQueryPrefix(query: string | null): string {
   if (!query) return "";
-  return query
-    .replace(/\b(?:swm_agt_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
+  return redactSensitiveText(query)
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
@@ -415,7 +453,14 @@ function localEnvironment(): Local {
 }
 
 function respDiag(label: string, resp: { status: number; body: Row }): string {
-  return `${label}: status=${resp.status} body=${JSON.stringify(resp.body)}`;
+  const base = `${label}: status=${resp.status} body=${JSON.stringify(resp.body)}`;
+  if (resp.status >= 500) {
+    const recent = recentRedactedEdgeLogs();
+    return `${base}\n--- edge output (last ${recent.length} lines, redacted) ---\n${
+      recent.length > 0 ? recent.join("\n") : "(no edge output captured)"
+    }`;
+  }
+  return base;
 }
 
 function postedSignalId(label: string, resp: { status: number; body: Row }): string {
@@ -676,9 +721,13 @@ before(async () => {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const cliState = observeFunctionCli(functionProcess);
+  edgeLogRing.length = 0;
+  edgeLogPartial = "";
   let startupSeen = false;
   const observe = (chunk: Buffer) => {
-    functionLogs = (functionLogs + chunk.toString("utf8")).slice(-30_000);
+    const text = chunk.toString("utf8");
+    functionLogs = (functionLogs + text).slice(-30_000);
+    appendEdgeLogChunk(text);
     startupSeen ||= functionLogs.includes("Serving functions on");
   };
   functionProcess.stdout?.on("data", observe);
@@ -721,11 +770,14 @@ after(async () => {
 });
 
 test(
-  "20261125000001 passes catalog + functional proofs, rolls back cleanly, re-applies, and denies direct table access",
+  "20261125000001 passes catalog + functional proofs, rolls back cleanly, re-applies, and denies direct table and ungranted function access",
   { timeout: TEST_TIMEOUT_MS },
   () => {
     step("T1: catalog + functional + direct-deny + rollback + reapply proofs");
-    const directDenyCheck = ["anon", "authenticated", "swarm_read", "swarm_command"]
+    const denyMemberId = randomUUID();
+    const denyWsId = randomUUID();
+    const denySigId = randomUUID();
+    const directTableDenyCheck = ["anon", "authenticated", "swarm_read", "swarm_command"]
       .map((role) => `
         DO $deny$
         BEGIN
@@ -740,6 +792,48 @@ test(
         END $deny$;
       `)
       .join("\n");
+    const directFunctionDenyCheck = `
+      SAVEPOINT direct_fn_deny;
+      INSERT INTO auth.users(id, aud, role, email)
+      VALUES ('${denyMemberId}'::uuid, 'authenticated', 'authenticated', 'deny-${denyMemberId}@example.test');
+      INSERT INTO swarm.users(user_id, display_name)
+      VALUES ('${denyMemberId}'::uuid, 'DenyMember');
+      INSERT INTO swarm.workspaces(workspace_id, name, created_by)
+      VALUES ('${denyWsId}'::uuid, 'DenyWS', '${denyMemberId}'::uuid);
+      INSERT INTO swarm.memberships(workspace_id, user_id, role)
+      VALUES ('${denyWsId}'::uuid, '${denyMemberId}'::uuid, 'member');
+
+      DO $deny_my_open_asks$
+      BEGIN
+        PERFORM set_config(
+          'request.jwt.claims',
+          '${JSON.stringify({ role: "authenticated", sub: denyMemberId })}',
+          true
+        );
+        EXECUTE 'SET LOCAL ROLE authenticated';
+        BEGIN
+          EXECUTE $q$SELECT swarm_read.my_open_asks('${denyWsId}'::uuid, 50, NULL::timestamptz, NULL::uuid, NULL::bytea)$q$;
+          RAISE EXCEPTION 'role authenticated must not execute swarm_read.my_open_asks directly';
+        EXCEPTION WHEN insufficient_privilege THEN
+          NULL;
+        END;
+        RESET ROLE;
+      END $deny_my_open_asks$;
+
+      DO $deny_ask_complete$
+      BEGIN
+        EXECUTE 'SET LOCAL ROLE swarm_command';
+        BEGIN
+          EXECUTE $q$SELECT swarm.ask_complete_for_withdrawal('${denyWsId}'::uuid, '${denySigId}'::uuid)$q$;
+          RAISE EXCEPTION 'role swarm_command must not execute swarm.ask_complete_for_withdrawal directly';
+        EXCEPTION WHEN insufficient_privilege THEN
+          NULL;
+        END;
+        RESET ROLE;
+      END $deny_ask_complete$;
+      ROLLBACK TO SAVEPOINT direct_fn_deny;
+    `;
+    const directDenyCheck = directTableDenyCheck + "\n" + directFunctionDenyCheck;
 
     runSql(
       sqlPhase("ask-withdraw-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +
@@ -2232,6 +2326,7 @@ test(
         { slug: "c3-replay-2", visibility: "private", createdByUserId: peer1.id, userMemberIds: [sender.id, peer1.id] },
         { slug: "c3-replay-dest", visibility: "private", createdByUserId: peer1.id, userMemberIds: [sender.id, peer1.id] },
         { slug: "c3-replay-3", visibility: "private", createdByUserId: peer1.id, userMemberIds: [sender.id, peer1.id] },
+        { slug: "c3-replay-strip-dest", visibility: "private", createdByUserId: peer1.id, userMemberIds: [sender.id, peer1.id] },
       ],
     });
     const wsId = fx.wsId;
@@ -2239,6 +2334,7 @@ test(
     const privChReplay2 = fx.channelsBySlug["c3-replay-2"]!;
     const privChReplayDest = fx.channelsBySlug["c3-replay-dest"]!;
     const privChReplay3 = fx.channelsBySlug["c3-replay-3"]!;
+    const privChReplayStripDest = fx.channelsBySlug["c3-replay-strip-dest"]!;
 
     try {
       const unknownWithdraw = await sendCommand(sender.jwt, wsId, {
@@ -2512,6 +2608,155 @@ test(
         respDiag("dlReplayChoiceAfter", dlReplayChoiceAfter),
       );
       assert.equal(dlReplayChoiceAfter.body.superseded_signal_id, dlReplayChoiceOldId, respDiag("dlReplayChoiceAfter", dlReplayChoiceAfter));
+
+      step("C3g: standalone withdraw_ask on replaced ask never returns replacement id after destination access loss");
+      const stripOldPost = await sendCommand(sender.jwt, wsId, {
+        kind: "post_signal",
+        signal_kind: "ask",
+        channel: "c3-rep-pub",
+        to_user_id: peer1.id,
+        to_agent_principal_id: null,
+        in_reply_to: null,
+        about: null,
+        body: "C3g old ask in public channel that sender keeps",
+      });
+      assert.equal(stripOldPost.status, 200, respDiag("stripOldPost", stripOldPost));
+      const stripOldId = postedSignalId("stripOldPost", stripOldPost);
+
+      const stripRepPost = await sendCommand(sender.jwt, wsId, {
+        kind: "post_signal",
+        signal_kind: "ask",
+        channel: "c3-replay-strip-dest",
+        to_user_id: peer1.id,
+        to_agent_principal_id: null,
+        in_reply_to: null,
+        about: null,
+        body: "C3g replacement in private channel sender will lose",
+        supersedes: stripOldId,
+      });
+      assert.equal(stripRepPost.status, 200, respDiag("stripRepPost", stripRepPost));
+      const stripRepId = postedSignalId("stripRepPost", stripRepPost);
+      assert.equal(stripRepPost.body.superseded_signal_id, stripOldId, respDiag("stripRepPost", stripRepPost));
+
+      // Sender loses access to the replacement's private destination channel while keeping access to the old ask.
+      await sql`
+        DELETE FROM swarm.channel_members
+        WHERE workspace_id = ${wsId}::uuid AND channel_id = ${privChReplayStripDest}::uuid AND user_id = ${sender.id}::uuid
+      `;
+
+      const standaloneAfterRepCmdId = randomUUID();
+      const standaloneFresh = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: stripOldId },
+        standaloneAfterRepCmdId,
+      );
+      assert.equal(standaloneFresh.status, 200, respDiag("standaloneFresh", standaloneFresh));
+      assert.equal(standaloneFresh.body.signal_id, stripOldId, respDiag("standaloneFresh", standaloneFresh));
+      assert.equal(standaloneFresh.body.withdrawn, true, respDiag("standaloneFresh", standaloneFresh));
+      assert.equal(standaloneFresh.body.created, false, respDiag("standaloneFresh", standaloneFresh));
+      assert.equal(typeof standaloneFresh.body.withdrawn_at, "string", respDiag("standaloneFresh", standaloneFresh));
+      assert.equal(
+        Object.hasOwn(standaloneFresh.body, "replaced_by_signal_id"),
+        false,
+        `standalone withdraw_ask fresh response must never include replaced_by_signal_id: ${respDiag("standaloneFresh", standaloneFresh)}`,
+      );
+      assert.deepEqual(
+        Object.keys(standaloneFresh.body).sort(),
+        ["created", "event_ids", "events", "min_client_version", "ok", "signal_id", "status", "withdrawn", "withdrawn_at"],
+        respDiag("standaloneFresh", standaloneFresh),
+      );
+      assert.equal(
+        JSON.stringify(standaloneFresh.body).includes(stripRepId),
+        false,
+        `standalone withdraw_ask fresh response must not leak replacement id: ${respDiag("standaloneFresh", standaloneFresh)}`,
+      );
+
+      // Retrying the same standalone command id (replay) returns the same documented keys and no replacement id.
+      const standaloneReplay = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: stripOldId },
+        standaloneAfterRepCmdId,
+      );
+      assert.equal(standaloneReplay.status, 200, respDiag("standaloneReplay", standaloneReplay));
+      assert.equal(standaloneReplay.body.signal_id, stripOldId, respDiag("standaloneReplay", standaloneReplay));
+      assert.equal(standaloneReplay.body.withdrawn, true, respDiag("standaloneReplay", standaloneReplay));
+      assert.equal(standaloneReplay.body.created, false, respDiag("standaloneReplay", standaloneReplay));
+      assert.equal(standaloneReplay.body.withdrawn_at, standaloneFresh.body.withdrawn_at, respDiag("standaloneReplay", standaloneReplay));
+      assert.equal(
+        Object.hasOwn(standaloneReplay.body, "replaced_by_signal_id"),
+        false,
+        `standalone withdraw_ask replay must never include replaced_by_signal_id: ${respDiag("standaloneReplay", standaloneReplay)}`,
+      );
+      assert.deepEqual(
+        Object.keys(standaloneReplay.body).sort(),
+        ["created", "event_ids", "ok", "signal_id", "status", "withdrawn", "withdrawn_at"],
+        respDiag("standaloneReplay", standaloneReplay),
+      );
+      assert.equal(
+        JSON.stringify(standaloneReplay.body).includes(stripRepId),
+        false,
+        `standalone withdraw_ask replay must not leak replacement id: ${respDiag("standaloneReplay", standaloneReplay)}`,
+      );
+
+      // Service-role check: the stored receipt holds no replacement id.
+      const [storedReceipt] = await sql<{ response: Record<string, unknown> }[]>`
+        SELECT response
+        FROM swarm.idempotency_keys
+        WHERE workspace_id = ${wsId}::uuid
+          AND command_id = ${standaloneAfterRepCmdId}
+        LIMIT 1
+      `;
+      assert.ok(storedReceipt, "expected stored receipt row for standaloneAfterRepCmdId");
+      assert.equal(
+        Object.hasOwn(storedReceipt.response, "replaced_by_signal_id"),
+        false,
+        `stored standalone withdraw_ask receipt must hold no replaced_by_signal_id: ${JSON.stringify(storedReceipt.response)}`,
+      );
+      assert.deepEqual(
+        Object.keys(storedReceipt.response).sort(),
+        ["created", "event_ids", "ok", "signal_id", "withdrawn", "withdrawn_at"],
+        JSON.stringify(storedReceipt.response),
+      );
+      assert.equal(
+        JSON.stringify(storedReceipt.response).includes(stripRepId),
+        false,
+        `stored standalone withdraw_ask receipt must not contain replacement id: ${JSON.stringify(storedReceipt.response)}`,
+      );
+
+      // Simulate a pre-C3 receipt that had replaced_by_signal_id persisted and confirm standalone replay strips it.
+      const legacyReceiptCmdId = randomUUID();
+      const legacySeedFresh = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: stripOldId },
+        legacyReceiptCmdId,
+      );
+      assert.equal(legacySeedFresh.status, 200, respDiag("legacySeedFresh", legacySeedFresh));
+      await sql`
+        UPDATE swarm.idempotency_keys
+        SET response = response || jsonb_build_object('replaced_by_signal_id', ${stripRepId}::text)
+        WHERE workspace_id = ${wsId}::uuid
+          AND command_id = ${legacyReceiptCmdId}
+      `;
+      const legacyReplayStripped = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: stripOldId },
+        legacyReceiptCmdId,
+      );
+      assert.equal(legacyReplayStripped.status, 200, respDiag("legacyReplayStripped", legacyReplayStripped));
+      assert.equal(
+        Object.hasOwn(legacyReplayStripped.body, "replaced_by_signal_id"),
+        false,
+        `standalone replay must strip replaced_by_signal_id from pre-existing stored receipts: ${respDiag("legacyReplayStripped", legacyReplayStripped)}`,
+      );
+      assert.deepEqual(
+        Object.keys(legacyReplayStripped.body).sort(),
+        ["created", "event_ids", "ok", "signal_id", "status", "withdrawn", "withdrawn_at"],
+        respDiag("legacyReplayStripped", legacyReplayStripped),
+      );
       step("C3replay: done");
     } finally {
       await fx.cleanup();
@@ -2775,6 +3020,261 @@ test(
         assert.ok(
           visibleBothSet.has(expectedId),
           `bothChAdmin (member of both channels with admin role) must see audit_id=${expectedId}; saw=${JSON.stringify([...visibleBothSet])}`,
+        );
+      }
+
+      step("C4a-legacy-replace: legacy thread-reply ask (NULL scalar channel_id, canonical private channel) preserves exact tags on fresh, replay, and conflict");
+      const privRootPost = await sendCommand(sender.jwt, wsId, {
+        kind: "post_signal",
+        signal_kind: "note",
+        channel: "c4-priv-rep",
+        to_user_id: null,
+        to_agent_principal_id: null,
+        in_reply_to: null,
+        about: null,
+        body: "C4 legacy-placement private thread root",
+      });
+      assert.equal(privRootPost.status, 200, respDiag("privRootPost", privRootPost));
+      const privRootId = postedSignalId("privRootPost", privRootPost);
+
+      // No served command writes a channel thread reply with scalar channel_id = NULL (post_signal
+      // always copies rootChannelId into signals.channel_id); seed the historical backfill / filer
+      // shape directly as service role so signals_settle_conversation files it into privChReplaceAudit.
+      const seedLegacyPrivateThreadAsk = async (body: string): Promise<string> => {
+        const legacyId = randomUUID();
+        await sql`
+          INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id,
+            kind, body, channel_id, thread_root_id, created_at, until
+          ) VALUES (
+            ${legacyId}::uuid,
+            ${wsId}::uuid,
+            ${sender.id}::uuid,
+            'user',
+            ${peer1.id}::uuid,
+            'ask',
+            ${body},
+            NULL,
+            ${privRootId}::uuid,
+            statement_timestamp(),
+            statement_timestamp() + interval '7 days'
+          )
+        `;
+        const [shape] = await sql<{
+          scalar_channel_id: string | null;
+          conv_channel_id: string | null;
+          conv_kind: string | null;
+        }[]>`
+          SELECT
+            s.channel_id::text AS scalar_channel_id,
+            c.channel_id::text AS conv_channel_id,
+            c.kind AS conv_kind
+          FROM swarm.signals AS s
+          JOIN swarm.conversation_signals AS cs
+            ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+          JOIN swarm.conversations AS c
+            ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
+          WHERE s.workspace_id = ${wsId}::uuid
+            AND s.id = ${legacyId}::uuid
+        `;
+        assert.equal(shape?.scalar_channel_id, null, `legacy ask must have NULL scalar channel_id: ${JSON.stringify(shape)}`);
+        assert.equal(shape?.conv_channel_id, privChReplaceAudit, `legacy ask canonical conversation must be private channel: ${JSON.stringify(shape)}`);
+        assert.equal(shape?.conv_kind, "private_channel", `legacy ask canonical conversation kind must be private_channel: ${JSON.stringify(shape)}`);
+        return legacyId;
+      };
+
+      const legacyOldPostAskId = await seedLegacyPrivateThreadAsk("C4 legacy thread-reply ask replaced by public post_signal");
+      const legacyOldChoiceAskId = await seedLegacyPrivateThreadAsk("C4 legacy thread-reply ask replaced by public ask_choice");
+      const legacyOldStandaloneAskId = await seedLegacyPrivateThreadAsk("C4 legacy thread-reply ask withdrawn standalone");
+
+      const priorLegacyAuditRows = await sql<{ audit_id: string }[]>`
+        SELECT audit_id::text AS audit_id
+        FROM swarm.audit_log
+        WHERE workspace_id = ${wsId}::uuid
+      `;
+      const beforeLegacyAuditIds = new Set(priorLegacyAuditRows.map((r) => r.audit_id));
+
+      // 1. Public post_signal replacement of legacy private-channel thread-reply ask: fresh, replay, conflict.
+      const legacyPostCmdId = randomUUID();
+      const legacyPostCmd = {
+        kind: "post_signal",
+        signal_kind: "ask",
+        channel: "c4-pub",
+        to_user_id: peer1.id,
+        to_agent_principal_id: null,
+        in_reply_to: null,
+        about: null,
+        body: "C4 public post_signal replacing legacy private thread-reply ask",
+        supersedes: legacyOldPostAskId,
+      };
+      const legacyPostFresh = await sendCommand(sender.jwt, wsId, legacyPostCmd, legacyPostCmdId);
+      assert.equal(legacyPostFresh.status, 200, respDiag("legacyPostFresh", legacyPostFresh));
+      const legacyPostReplay = await sendCommand(sender.jwt, wsId, legacyPostCmd, legacyPostCmdId);
+      assert.equal(legacyPostReplay.status, 200, respDiag("legacyPostReplay", legacyPostReplay));
+      const legacyPostConflict = await sendCommand(
+        sender.jwt,
+        wsId,
+        { ...legacyPostCmd, body: "C4 conflicting post_signal body under same command id" },
+        legacyPostCmdId,
+      );
+      assert.equal(legacyPostConflict.status, 409, respDiag("legacyPostConflict", legacyPostConflict));
+      assert.equal(legacyPostConflict.body.error, "command_id_conflict", respDiag("legacyPostConflict", legacyPostConflict));
+
+      // 2. Public ask_choice replacement of legacy private-channel thread-reply ask: fresh, replay, conflict.
+      const legacyChoiceCmdId = randomUUID();
+      const legacyChoiceCmd = {
+        kind: "ask_choice",
+        channel: "c4-pub",
+        to_user_id: peer1.id,
+        about: null,
+        body: "C4 public ask_choice replacing legacy private thread-reply ask",
+        options: [
+          { id: "lc1", label: "LC1" },
+          { id: "lc2", label: "LC2" },
+        ],
+        supersedes: legacyOldChoiceAskId,
+      };
+      const legacyChoiceFresh = await sendCommand(sender.jwt, wsId, legacyChoiceCmd, legacyChoiceCmdId);
+      assert.equal(legacyChoiceFresh.status, 200, respDiag("legacyChoiceFresh", legacyChoiceFresh));
+      const legacyChoiceReplay = await sendCommand(sender.jwt, wsId, legacyChoiceCmd, legacyChoiceCmdId);
+      assert.equal(legacyChoiceReplay.status, 200, respDiag("legacyChoiceReplay", legacyChoiceReplay));
+      const legacyChoiceConflict = await sendCommand(
+        sender.jwt,
+        wsId,
+        { ...legacyChoiceCmd, body: "C4 conflicting ask_choice body under same command id" },
+        legacyChoiceCmdId,
+      );
+      assert.equal(legacyChoiceConflict.status, 409, respDiag("legacyChoiceConflict", legacyChoiceConflict));
+      assert.equal(legacyChoiceConflict.body.error, "command_id_conflict", respDiag("legacyChoiceConflict", legacyChoiceConflict));
+
+      // 3. Standalone withdraw_ask of legacy private-channel thread-reply ask: fresh, replay, conflict.
+      const legacyWdCmdId = randomUUID();
+      const legacyWdFresh = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: legacyOldStandaloneAskId },
+        legacyWdCmdId,
+      );
+      assert.equal(legacyWdFresh.status, 200, respDiag("legacyWdFresh", legacyWdFresh));
+      const legacyWdReplay = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: legacyOldStandaloneAskId },
+        legacyWdCmdId,
+      );
+      assert.equal(legacyWdReplay.status, 200, respDiag("legacyWdReplay", legacyWdReplay));
+      const legacyWdConflict = await sendCommand(
+        sender.jwt,
+        wsId,
+        { kind: "withdraw_ask", signal_id: randomUUID() },
+        legacyWdCmdId,
+      );
+      assert.equal(legacyWdConflict.status, 409, respDiag("legacyWdConflict", legacyWdConflict));
+      assert.equal(legacyWdConflict.body.error, "command_id_conflict", respDiag("legacyWdConflict", legacyWdConflict));
+
+      // 4. Even after sender loses access to the private channel, a conflict still preserves {private, public}.
+      await sql`
+        DELETE FROM swarm.channel_members
+        WHERE workspace_id = ${wsId}::uuid AND channel_id = ${privChReplaceAudit}::uuid AND user_id = ${sender.id}::uuid
+      `;
+      const legacyPostConflictAfterLoss = await sendCommand(
+        sender.jwt,
+        wsId,
+        { ...legacyPostCmd, body: "C4 conflicting post_signal body after private channel removal" },
+        legacyPostCmdId,
+      );
+      assert.equal(legacyPostConflictAfterLoss.status, 409, respDiag("legacyPostConflictAfterLoss", legacyPostConflictAfterLoss));
+      assert.equal(legacyPostConflictAfterLoss.body.error, "command_id_conflict", respDiag("legacyPostConflictAfterLoss", legacyPostConflictAfterLoss));
+
+      const legacyNewAudits = (await sql<{
+        audit_id: string;
+        command_kind: string;
+        outcome: string;
+        reason: string | null;
+        channel_ids: string[];
+      }[]>`
+        SELECT
+          audit_id::text AS audit_id,
+          command_kind,
+          outcome,
+          reason,
+          coalesce(to_jsonb(channel_ids), '[]'::jsonb) AS channel_ids
+        FROM swarm.audit_log
+        WHERE workspace_id = ${wsId}::uuid
+          AND command_kind IN ('post_signal', 'ask_choice', 'withdraw_ask')
+        ORDER BY occurred_at ASC, audit_id ASC
+      `).filter((row) => !beforeLegacyAuditIds.has(row.audit_id));
+
+      const expectedPair = [privChReplaceAudit, pubChId].sort();
+      const postFreshRows = legacyNewAudits.filter((r) => r.command_kind === "post_signal" && r.outcome === "accepted");
+      const postReplayRows = legacyNewAudits.filter((r) => r.command_kind === "post_signal" && r.outcome === "replayed");
+      const postConflictRows = legacyNewAudits.filter((r) => r.command_kind === "post_signal" && r.outcome === "conflict" && r.reason === "command_id_conflict");
+      const choiceFreshRows = legacyNewAudits.filter((r) => r.command_kind === "ask_choice" && r.outcome === "accepted");
+      const choiceReplayRows = legacyNewAudits.filter((r) => r.command_kind === "ask_choice" && r.outcome === "replayed");
+      const choiceConflictRows = legacyNewAudits.filter((r) => r.command_kind === "ask_choice" && r.outcome === "conflict" && r.reason === "command_id_conflict");
+      const wdFreshRows = legacyNewAudits.filter((r) => r.command_kind === "withdraw_ask" && r.outcome === "accepted");
+      const wdReplayRows = legacyNewAudits.filter((r) => r.command_kind === "withdraw_ask" && r.outcome === "replayed");
+      const wdConflictRows = legacyNewAudits.filter((r) => r.command_kind === "withdraw_ask" && r.outcome === "conflict" && r.reason === "command_id_conflict");
+
+      assert.equal(postFreshRows.length, 1, `expected 1 legacy post_signal accepted row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(postReplayRows.length, 1, `expected 1 legacy post_signal replayed row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(postConflictRows.length, 2, `expected 2 legacy post_signal conflict rows (before + after access loss): ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(choiceFreshRows.length, 1, `expected 1 legacy ask_choice accepted row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(choiceReplayRows.length, 1, `expected 1 legacy ask_choice replayed row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(choiceConflictRows.length, 1, `expected 1 legacy ask_choice conflict row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(wdFreshRows.length, 1, `expected 1 legacy withdraw_ask accepted row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(wdReplayRows.length, 1, `expected 1 legacy withdraw_ask replayed row: ${JSON.stringify(legacyNewAudits)}`);
+      assert.equal(wdConflictRows.length, 1, `expected 1 legacy withdraw_ask conflict row: ${JSON.stringify(legacyNewAudits)}`);
+
+      for (const row of [...postFreshRows, ...postReplayRows, ...postConflictRows, ...choiceFreshRows, ...choiceReplayRows, ...choiceConflictRows]) {
+        assert.deepEqual(
+          [...row.channel_ids].sort(),
+          expectedPair,
+          `legacy replacement audit row (${row.command_kind}/${row.outcome}) must carry exact {private, public} tags: ${JSON.stringify(row)}`,
+        );
+      }
+      for (const row of [...wdFreshRows, ...wdReplayRows, ...wdConflictRows]) {
+        assert.deepEqual(
+          [...row.channel_ids].sort(),
+          [privChReplaceAudit],
+          `legacy standalone withdraw_ask audit row (${row.outcome}) must carry exact {private} tag: ${JSON.stringify(row)}`,
+        );
+      }
+
+      const legacyAuditIdSet = new Set(legacyNewAudits.map((r) => r.audit_id));
+      for (const [label, auditor] of [["outsideOwner", outsideOwner], ["outsideAdmin", outsideAdmin]] as const) {
+        const visible = await sql.begin(async (tx) => {
+          await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: auditor.id })}, true)`;
+          await tx`SET LOCAL ROLE authenticated`;
+          return tx<{ audit_id: string }[]>`
+            SELECT audit_id::text AS audit_id
+            FROM swarm_read.audit_log
+            WHERE workspace_id = ${wsId}::uuid
+              AND command_kind IN ('post_signal', 'ask_choice', 'withdraw_ask')
+          `;
+        });
+        const leaked = visible.filter((r) => legacyAuditIdSet.has(r.audit_id));
+        assert.equal(
+          leaked.length,
+          0,
+          `${label} outside private channel must see zero legacy-placement withdrawal/replacement audit rows: leaked=${JSON.stringify(leaked)}`,
+        );
+      }
+      const visibleLegacyToBothChAdmin = await sql.begin(async (tx) => {
+        await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: bothChAdmin.id })}, true)`;
+        await tx`SET LOCAL ROLE authenticated`;
+        return tx<{ audit_id: string }[]>`
+          SELECT audit_id::text AS audit_id
+          FROM swarm_read.audit_log
+          WHERE workspace_id = ${wsId}::uuid
+            AND command_kind IN ('post_signal', 'ask_choice', 'withdraw_ask')
+        `;
+      });
+      const visibleLegacyBothSet = new Set(visibleLegacyToBothChAdmin.map((r) => r.audit_id));
+      for (const expectedId of legacyAuditIdSet) {
+        assert.ok(
+          visibleLegacyBothSet.has(expectedId),
+          `bothChAdmin (member of both channels with admin role) must see legacy audit_id=${expectedId}; saw=${JSON.stringify([...visibleLegacyBothSet])}`,
         );
       }
 

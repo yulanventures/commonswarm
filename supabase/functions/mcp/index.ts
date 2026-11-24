@@ -717,7 +717,6 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       signal_id: out.signal_id ?? String(args.signal_id).toLowerCase(),
       withdrawn: out.withdrawn === true,
       ...(typeof out.withdrawn_at === "string" ? { withdrawn_at: out.withdrawn_at } : {}),
-      ...(typeof out.replaced_by_signal_id === "string" ? { replaced_by_signal_id: out.replaced_by_signal_id } : {}),
     };
   }
   if (call.name === "asks_open") {
