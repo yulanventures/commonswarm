@@ -50,6 +50,9 @@ interface Fixture {
   calls: string[][];
   copied: string[];
   signIn(userId: string | null): void;
+  failSessionWith(error: Error | null): void;
+  AuthRecoveryRequired: new (retryAfter?: number) => Error;
+  SessionExpired: new () => Error;
   hold: { roster: boolean; device: boolean; mint: boolean; rosterFails: boolean };
   release(): Promise<void>;
   settle(): Promise<void>;
@@ -61,6 +64,21 @@ function fixture(): Fixture {
   const held: Array<() => void> = [];
   const hold = { roster: false, device: false, mint: false, rosterFails: false };
   let user: string | null = "A";
+  let sessionError: Error | null = null;
+  class FakeAuthRecoveryRequired extends Error {
+    override name = "AuthRecoveryRequired";
+    readonly retryAfter?: number;
+    constructor(retryAfter?: number) {
+      super("CommonSwarm could not check your sign-in. Try again when the connection recovers.");
+      this.retryAfter = retryAfter;
+    }
+  }
+  class FakeSessionExpired extends Error {
+    override name = "SessionExpired";
+    constructor() {
+      super("Your session expired — sign in again.");
+    }
+  }
   const wait = <T>(when: boolean, value: () => T): Promise<T> => new Promise<T>((resolve, reject) => {
     const answer = () => { try { resolve(value()); } catch (error) { reject(error); } };
     if (when) held.push(answer); else answer();
@@ -97,7 +115,12 @@ function fixture(): Fixture {
     AGENT_TOKEN_MAX_TTL_MS: 1,
     AgentConnectRefused: Refusal, AgentNameTaken: Refusal, ClientTooOld: Refusal, CredentialNotShown: Refusal, MintOutcomeUnknown: Refusal,
     NoDeployment: Refusal,
-    currentSession: async () => (user ? { user: { id: user }, access_token: `jwt-${user}` } : null),
+    AuthRecoveryRequired: FakeAuthRecoveryRequired,
+    SessionExpired: FakeSessionExpired,
+    currentSession: async () => {
+      if (sessionError) throw sessionError;
+      return user ? { user: { id: user }, access_token: `jwt-${user}` } : null;
+    },
     myAgents: (session: { user: { id: string } }) => {
       calls.push(["read-roster", session.user.id]);
       const fails = hold.rosterFails;
@@ -133,6 +156,9 @@ function fixture(): Fixture {
   return {
     element, calls, copied, hold,
     signIn: (next) => { user = next; },
+    failSessionWith: (error) => { sessionError = error; },
+    AuthRecoveryRequired: FakeAuthRecoveryRequired,
+    SessionExpired: FakeSessionExpired,
     release: async () => { while (held.length) held.shift()!(); await settle(); },
     settle,
     shown: () => element.querySelector('[data-slot="prompt"]').textContent,
@@ -510,4 +536,52 @@ test("C1: Back (the real closeConnect) while the frame is held retires the click
     await k.f.settle();
     assert.deepEqual(writes(k.f.calls), [["mint", "A", "W1", "P"]], `${back}: a fresh click mints once`);
   }
+});
+
+test("AgentConnect handles AuthRecoveryRequired vs SessionExpired in #load and #mintGuarded without unhandled rejections", async () => {
+  // #load: AuthRecoveryRequired offers retry and drops any queued request without minting.
+  const loadRecovery = fixture();
+  loadRecovery.failSessionWith(new loadRecovery.AuthRecoveryRequired(Date.now() + 2_000));
+  loadRecovery.element.connectedCallback();
+  loadRecovery.element.requestPromptNamed("Scout", "A", "W", loadRecovery.element.intentTicket);
+  await loadRecovery.settle();
+  assert.equal(loadRecovery.element.dataset.state, "blocked");
+  assert.equal(loadRecovery.element.querySelector('[data-slot="state-title"]').textContent, "Couldn't check your sign-in");
+  assert.match(loadRecovery.element.querySelector('[data-slot="state-body"]').textContent, /could not check your sign-in/i);
+  assert.equal(loadRecovery.element.querySelector('[data-action="retry"]').hidden, false);
+  assert.deepEqual(writes(loadRecovery.calls), []);
+
+  // #load: SessionExpired prompts sign-in without a retry button.
+  const loadExpired = fixture();
+  loadExpired.failSessionWith(new loadExpired.SessionExpired());
+  loadExpired.element.connectedCallback();
+  await loadExpired.settle();
+  assert.equal(loadExpired.element.dataset.state, "blocked");
+  assert.equal(loadExpired.element.querySelector('[data-slot="state-title"]').textContent, "Sign in first");
+  assert.equal(loadExpired.element.querySelector('[data-action="retry"]').hidden, true);
+
+  // #mintGuarded: AuthRecoveryRequired keeps the element ready and reports the recovery message.
+  const mintRecovery = fixture();
+  mintRecovery.element.connectedCallback();
+  await mintRecovery.settle();
+  assert.equal(mintRecovery.element.dataset.state, "ready");
+  mintRecovery.failSessionWith(new mintRecovery.AuthRecoveryRequired(Date.now() + 2_000));
+  mintRecovery.element.requestPromptNamed("Scout", "A", "W", mintRecovery.element.intentTicket);
+  await mintRecovery.settle();
+  assert.equal(mintRecovery.element.dataset.state, "ready");
+  assert.deepEqual(writes(mintRecovery.calls), []);
+  const failedRecovery = mintRecovery.element.events.find((event) => event.type === "commonswarm:agent-prompt-failed");
+  assert.ok(failedRecovery);
+  assert.match((failedRecovery.detail as { message: string }).message, /could not check your sign-in/i);
+
+  // #mintGuarded: SessionExpired blocks with expired copy and creates nothing.
+  const mintExpired = fixture();
+  mintExpired.element.connectedCallback();
+  await mintExpired.settle();
+  mintExpired.failSessionWith(new mintExpired.SessionExpired());
+  mintExpired.element.requestPromptNamed("Scout", "A", "W", mintExpired.element.intentTicket);
+  await mintExpired.settle();
+  assert.equal(mintExpired.element.dataset.state, "blocked");
+  assert.equal(mintExpired.element.querySelector('[data-slot="state-title"]').textContent, "Your sign-in expired");
+  assert.deepEqual(writes(mintExpired.calls), []);
 });

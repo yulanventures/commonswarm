@@ -3761,16 +3761,64 @@ test(
         if (Date.now() < windowEnd) {
           await new Promise((r) => setTimeout(r, windowEnd - Date.now()));
         }
+        // Product behaviour: Tab B (/next) schedules its own recovery timer at retryAfter + 50ms,
+        // and when it refreshes the token GoTrue broadcasts TOKEN_REFRESHED, which moves Tab A (/app)
+        // out of workspace-error -> loading -> signed-in automatically (LiveDashboard.astro:24567).
+        // Therefore, in the Try-again variant we must accept either path without racing a 30s click:
+        // click [data-retry-workspaces] if Tab A is still on workspace-error, or observe that Tab A
+        // already left workspace-error via peer TOKEN_REFRESHED and follow it to signed-in.
+        let recoveryPath = "auto-retry-timer";
         if (variant.triggerViaTryAgain) {
-          const retryBtnVisible = await tabA.locator("[data-retry-workspaces]").isVisible().catch(() => false);
-          if (retryBtnVisible) {
-            await tabA.click("[data-retry-workspaces]");
+          const recoveryDeadline = Date.now() + 10_000;
+          let settledPath: string | null = null;
+          while (Date.now() < recoveryDeadline && !settledPath) {
+            const appState = await tabA.evaluate(() => {
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const btn = document.querySelector<HTMLElement>("[data-retry-workspaces]");
+              const errorPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+              return {
+                state: dash?.dataset.state ?? "",
+                errorVisible: Boolean(errorPanel && !errorPanel.hidden),
+                retryVisible: Boolean(btn && !btn.hidden && btn.offsetParent !== null),
+              };
+            });
+            if (appState.state === "channel" || appState.state === "create") {
+              settledPath = "auto-recovered-before-click";
+              break;
+            }
+            if (appState.state === "loading") {
+              await new Promise((r) => setTimeout(r, 50));
+              continue;
+            }
+            if (appState.state === "workspace-error" && appState.errorVisible && appState.retryVisible) {
+              try {
+                await tabA.locator("[data-retry-workspaces]").click({ timeout: 1_000 });
+                settledPath = "clicked-try-again";
+                break;
+              } catch {
+                // /app may have transitioned to loading/signed-in mid-click via Tab B's TOKEN_REFRESHED.
+                const afterState = await tabA
+                  .evaluate(() => document.querySelector<HTMLElement>("live-dashboard")?.dataset.state ?? "")
+                  .catch(() => "");
+                if (afterState === "loading" || afterState === "channel" || afterState === "create") {
+                  settledPath = "auto-recovered-during-click";
+                  break;
+                }
+              }
+            }
+            await new Promise((r) => setTimeout(r, 50));
           }
+          assert.ok(
+            settledPath,
+            `Tab A neither exposed a clickable [data-retry-workspaces] nor auto-recovered within 10s:\n${await ctx.dumpDiagnostics(pages)}`,
+          );
+          recoveryPath = settledPath;
         }
 
         await ctx.waitForAppSignedIn(tabA, pages);
         await ctx.waitForNextSignedIn(tabB, "Alpha Vault", pages);
 
+        t.diagnostic(`[${variant.id}] recoveryPath=${recoveryPath}`);
         ctx.emitRefreshDiagnostics(variant.id);
 
         const stored = await ctx.readStorage(tabA);

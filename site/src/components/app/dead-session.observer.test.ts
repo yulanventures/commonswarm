@@ -153,8 +153,8 @@ for (const recover of [true, false]) {
 
 test("QA-010 invite email validation distinguishes input errors from auth", () => {
   assert.equal(typeof commonswarm.inviteEmailValidationMessage, "function");
-  assert.match(commonswarm.inviteEmailValidationMessage(""), /email/i);
-  assert.match(commonswarm.inviteEmailValidationMessage("not-an-email"), /valid email/i);
+  assert.match(commonswarm.inviteEmailValidationMessage("") ?? "", /email/i);
+  assert.match(commonswarm.inviteEmailValidationMessage("not-an-email") ?? "", /valid email/i);
   assert.equal(commonswarm.inviteEmailValidationMessage("teammate@example.com"), null);
   assert.notEqual(
     commonswarm.inviteEmailValidationMessage(""),
@@ -217,11 +217,11 @@ test("saved web sessions survive transient verification/refresh and reload; term
     const mode = url.searchParams.get("mode") ?? "healthy";
     const counts = observed.get(mode) ?? { users: 0, refreshes: 0 };
     observed.set(mode, counts);
-    const json = (status: number, body: unknown) => {
+    const json = (status: number, body: unknown, extraHeaders: Record<string, string> = {}) => {
       const modern = mode.endsWith("modern");
       const payload = body && typeof body === "object" && "error_code" in body && modern
         ? { code: (body as { error_code: string }).error_code, msg: "Fixture auth refusal" } : body;
-      res.writeHead(status, { "content-type": "application/json", ...(modern ? { "x-supabase-api-version": "2024-01-01" } : {}) });
+      res.writeHead(status, { "content-type": "application/json", ...(modern ? { "x-supabase-api-version": "2024-01-01" } : {}), ...extraHeaders });
       res.end(JSON.stringify(payload));
     };
     if (url.pathname === "/probe") { json(200, { ...counts, membershipPending: heldMembership.has(mode), refreshPending: releaseRefresh.has(mode) }); return; }
@@ -293,7 +293,8 @@ test("saved web sessions survive transient verification/refresh and reload; term
           req.socket.destroy(); return;
         }
         if (mode === "user503" && !refresh) { json(503, { error_code: "unexpected_failure" }); return; }
-        if (["refresh429", "race-refresh429"].includes(mode) && refresh) { json(429, { error_code: "over_request_rate_limit" }); return; }
+        if (mode === "refresh429" && refresh) { json(429, { error_code: "over_request_rate_limit" }); return; }
+        if (mode === "race-refresh429" && refresh) { json(429, { error_code: "over_request_rate_limit" }, { "retry-after": "3" }); return; }
         if (["terminal-user", "terminal-user-modern", "terminal-proactive"].includes(mode) && !refresh) { json(403, { error_code: "session_not_found" }); return; }
         if (mode === "refresh-already-used" && refresh) { json(400, { error_code: "refresh_token_already_used" }); return; }
         if (["terminal-refresh", "terminal-refresh-modern", "terminal-proactive"].includes(mode) && refresh) { json(400, { error_code: "refresh_token_not_found" }); return; }
@@ -538,20 +539,43 @@ test("saved web sessions survive transient verification/refresh and reload; term
             await fetch('/recover?mode='+mode);
             const successor={...${JSON.stringify(seed)},access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'peer-successor',expires_at:Math.floor(Date.now()/1000)+3600};
             localStorage.setItem('sb-127-auth-token',JSON.stringify(successor));
-            await new Promise(r=>setTimeout(r,32000));
+            const adoptStart=performance.now();
+            check((await cs.currentSession())?.refresh_token==='peer-successor'&&performance.now()-adoptStart<1000,'successor adopted promptly without in-lock cooldown stall');
+            await new Promise(r=>setTimeout(r,2500));
             check((await cs.currentSession())?.refresh_token==='peer-successor','ambiguous old failure cannot revoke successor');
+            check(JSON.parse(localStorage.getItem('sb-127-auth-token')||'null')?.refresh_token==='peer-successor','successor remains persisted in storage');
+            const probe=await(await fetch('/probe?mode='+mode)).json();
+            check(probe.refreshes===1,'ambiguous old failure must not send a stale retry after successor');
             document.body.dataset.result='passed';return;
           }
           if(mode==='race-refresh429'){
-            const started=performance.now();let error;try{await cs.currentSession();}catch(e){error=e;}
-            check(error?.name==='AuthRecoveryRequired'&&performance.now()-started<6000,'bounded retry panel');
             const peer=document.createElement('iframe');peer.src='/peer?mode='+mode;document.body.append(peer);await wait(()=>peer.contentWindow.cs);
-            let done=false;
-            const successor=peer.contentWindow.cs.client().auth.setSession({access_token:${JSON.stringify(rotatedAccessToken)},refresh_token:'peer-successor'}).then(r=>{done=true;return r;});
-            await new Promise(r=>setTimeout(r,5500));check(!done,'peer must not steal a lock after five seconds');
-            const probe=await(await fetch('/probe?mode='+mode)).json();check(probe.refreshes===1,'429 must not hammer auth');
-            await fetch('/recover?mode='+mode);check(!(await successor).error,'queued peer recovers');
-            check((await cs.currentSession())?.refresh_token==='peer-successor','peer successor retained');
+            let mainSignedOut=false,peerSignedOut=false;
+            cs.client().auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')mainSignedOut=true;});
+            const started=performance.now();let error;try{await cs.currentSession();}catch(e){error=e;}
+            check(error?.name==='AuthRecoveryRequired'&&performance.now()-started<2000,'first tab enters could-not-check promptly');
+            check(typeof error?.retryAfter==='number'&&error.retryAfter>Date.now(),'first tab reports active backoff window');
+            const lockStart=performance.now();let peerGotLock=false;
+            await peer.contentWindow.navigator.locks.request('lock:sb-127-auth-token',()=>{peerGotLock=true;});
+            check(peerGotLock&&performance.now()-lockStart<1000,'peer must acquire cross-tab lock promptly while first tab is in backoff');
+            peer.contentWindow.cs.client().auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')peerSignedOut=true;});
+            const peerStart=performance.now();let peerError;try{await peer.contentWindow.cs.currentSession();}catch(e){peerError=e;}
+            check(peerError?.name==='AuthRecoveryRequired'&&performance.now()-peerStart<1000,'peer must settle promptly to could-not-check during shared backoff');
+            const quietUntil=Math.min(error.retryAfter-300,Date.now()+800);
+            if(Date.now()<quietUntil)await new Promise(r=>setTimeout(r,quietUntil-Date.now()));
+            const probe=await(await fetch('/probe?mode='+mode)).json();
+            check(probe.refreshes===1,'shared backoff must prevent peer from sending a refresh during the window');
+            check(!mainSignedOut&&!peerSignedOut,'neither tab may sign out during backoff');
+            check(JSON.parse(localStorage.getItem('sb-127-auth-token')||'null')?.refresh_token==='browser-refresh','backoff must not remove stored credentials');
+            await fetch('/recover?mode='+mode);
+            const waitAfterWindow=error.retryAfter-Date.now()+150;
+            if(waitAfterWindow>0)await new Promise(r=>setTimeout(r,waitAfterWindow));
+            check((await peer.contentWindow.cs.currentSession())?.refresh_token==='browser-rotated','one refresh is permitted after the backoff window and recovers peer');
+            check((await cs.currentSession())?.refresh_token==='browser-rotated','first tab adopts recovered credential without another refresh');
+            check(JSON.parse(localStorage.getItem('sb-127-auth-token')||'null')?.refresh_token==='browser-rotated','recovered credential persisted in storage');
+            const afterProbe=await(await fetch('/probe?mode='+mode)).json();
+            check(afterProbe.refreshes===2,'exactly one recovery refresh after the backoff window');
+            check(!mainSignedOut&&!peerSignedOut,'neither tab signed out across backoff and recovery');
             document.body.dataset.result='passed';return;
           }
           if(${JSON.stringify(mode)}.startsWith('command')){
@@ -603,8 +627,8 @@ test("saved web sessions survive transient verification/refresh and reload; term
             await wait(()=>state()==='workspace-error','auth or membership recovery panel');
             const before=frame.contentDocument.querySelector('[data-workspace-error]').textContent;
             await fetch('/recover?mode='+mode);
-            // Expired/hanging cases finish the dashboard's own pending SDK
-            // refresh. Other cases get a real peer TOKEN_REFRESHED broadcast.
+            // Expired/hanging cases recover on the dashboard's own next auto-refresh
+            // tick after external backoff ends. Other cases get a real peer TOKEN_REFRESHED broadcast.
             if(peer)check(!(await peer.contentWindow.cs.client().auth.refreshSession()).error,'SDK same-user refresh succeeds');
             if(mode.startsWith('recovery-late-')){
               for(let i=0;i<200;i++){
@@ -655,7 +679,11 @@ test("saved web sessions survive transient verification/refresh and reload; term
             await wait(()=>frame.contentDocument?.querySelector('live-dashboard')?.dataset.state==='workspace-error','reloaded recovery panel');
             check(stored()?.refresh_token==='browser-refresh','reload must retain refresh credentials');
             await fetch('/recover?mode=${mode}');
-            if(mode.startsWith('refresh'))await new Promise(r=>setTimeout(r,32000));
+            if(mode.startsWith('refresh')){
+              const backoff=JSON.parse(localStorage.getItem('sb-127-auth-token:refresh-backoff')||'null');
+              const delay=backoff&&typeof backoff.nextAttemptAt==='number'?Math.max(0,backoff.nextAttemptAt-Date.now())+150:2500;
+              await new Promise(r=>setTimeout(r,delay));
+            }
             frame.contentDocument.querySelector('[data-retry-workspaces]').click();
             await wait(()=>state()==='create','verified recovery after retry');check(stored()?.user.id===${JSON.stringify(userId)},'retry must recover same owner');
             if(mode.startsWith('refresh'))check(stored()?.refresh_token==='browser-rotated','recovery must persist the server-rotated credential');
