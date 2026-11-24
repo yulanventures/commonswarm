@@ -2458,4 +2458,509 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     expect(realClient.getChannels()).toHaveLength(0);
     gate.dispose();
   });
+
+  it('C2 listener disposal witness: every retired realtime generation removes its pinned Phoenix window listeners, clears stored bearer, and restores window.addEventListener identically', async () => {
+    const TRACKED_EVENTS = ['pagehide', 'pageshow', 'visibilitychange'] as const;
+    type TrackedEvent = (typeof TRACKED_EVENTS)[number];
+    const isTrackedEvent = (type: string): type is TrackedEvent =>
+      (TRACKED_EVENTS as readonly string[]).includes(type);
+
+    // Pinned @supabase/phoenix@0.4.5 Socket constructor registers 3 anonymous window listeners:
+    // pagehide (socket.js:102), pageshow (socket.js:108), visibilitychange (socket.js:114).
+    const EXPECTED_LISTENERS_PER_SOCKET = 3;
+
+    let holdSocketOpen = false;
+    const sockets: MockPhoenixSocket[] = [];
+    class MockPhoenixSocket {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+
+      readyState = MockPhoenixSocket.CONNECTING;
+      binaryType = 'arraybuffer';
+      onopen: ((ev: Event) => void) | null = null;
+      onclose: ((ev: CloseEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      readonly sent: Array<{ topic: string; event: string; payload: Record<string, unknown> }> = [];
+
+      constructor(public readonly url: string | URL) {
+        sockets.push(this);
+        if (!holdSocketOpen) {
+          queueMicrotask(() => this.open());
+        }
+      }
+
+      open(): void {
+        if (this.readyState !== MockPhoenixSocket.CONNECTING) return;
+        this.readyState = MockPhoenixSocket.OPEN;
+        this.onopen?.(new Event('open'));
+      }
+
+      send(data: string | ArrayBuffer): void {
+        if (typeof data !== 'string') return;
+        const [joinRef, ref, topic, event, payload] = JSON.parse(data) as [
+          string | null,
+          string | null,
+          string,
+          string,
+          Record<string, unknown>,
+        ];
+        this.sent.push({ topic, event, payload });
+        if (event === 'phx_join' || event === 'phx_leave') {
+          queueMicrotask(() => {
+            if (this.readyState !== MockPhoenixSocket.OPEN) return;
+            this.onmessage?.({
+              data: JSON.stringify([
+                joinRef,
+                ref,
+                topic,
+                'phx_reply',
+                { status: 'ok', response: {} },
+              ]),
+            } as MessageEvent);
+          });
+        }
+      }
+
+      close(code = 1000, reason = ''): void {
+        if (this.readyState === MockPhoenixSocket.CLOSED) return;
+        this.readyState = MockPhoenixSocket.CLOSED;
+        this.onclose?.({ code, reason, wasClean: true } as CloseEvent);
+      }
+    }
+
+    const token = makeFakeJwt({ sub: USER_1, session_id: 'sid-c2-listeners', jti: 'c2-l1' });
+    const session = makeFakeSession({
+      userId: USER_1,
+      sessionId: 'sid-c2-listeners',
+      accessToken: token,
+    });
+
+    const realClient = createClient(DEPLOY_URL, ANON_KEY, {
+      auth: {
+        storageKey: 'sb-c2-listener-witness',
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+      realtime: {
+        transport: MockPhoenixSocket as unknown as NonNullable<
+          Parameters<typeof createClient>[2]
+        >['realtime'] extends { transport?: infer T }
+          ? T
+          : never,
+        heartbeatIntervalMs: 60_000,
+      },
+    });
+    vi.spyOn(realClient.auth, 'getSession').mockImplementation(async () => ({
+      data: { session },
+      error: null,
+    }));
+    vi.spyOn(realClient.auth, 'onAuthStateChange').mockImplementation((cb) => ({
+      data: {
+        subscription: {
+          id: 'test-sub-listeners',
+          callback: cb,
+          unsubscribe() {},
+        },
+      },
+    }));
+
+    const realBrowserSession = {
+      ok: true as const,
+      client: realClient,
+      storageKey: 'sb-c2-listener-witness',
+      async currentSession() {
+        return session;
+      },
+      async verifiedSession() {
+        return session;
+      },
+      async boundedAuth<T>(op: Promise<T>) {
+        return op;
+      },
+      async signOut() {},
+      async quiesce() {
+        await realClient.removeAllChannels();
+      },
+    };
+
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => realBrowserSession,
+    });
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+
+    // Track every generation's RealtimeClient instance via setAuth (runs even if channel attach fails).
+    const generationClients: RealtimeClient[] = [];
+    const origProtoSetAuth = RealtimeClient.prototype.setAuth;
+    const setAuthTrackSpy = vi
+      .spyOn(RealtimeClient.prototype, 'setAuth')
+      .mockImplementation(function (this: RealtimeClient, t?: string | null) {
+        if (!generationClients.includes(this)) {
+          generationClients.push(this);
+        }
+        return origProtoSetAuth.call(this, t);
+      });
+
+    // Establish baseline AFTER realClient + gate initialization.
+    const activeByType: Record<TrackedEvent, Set<EventListenerOrEventListenerObject>> = {
+      pagehide: new Set(),
+      pageshow: new Set(),
+      visibilitychange: new Set(),
+    };
+    const totalActiveCount = (): number =>
+      activeByType.pagehide.size +
+      activeByType.pageshow.size +
+      activeByType.visibilitychange.size;
+
+    let addedThisGen: Array<{ type: TrackedEvent; listener: EventListenerOrEventListenerObject }> = [];
+    let removedThisGen: Array<{ type: TrackedEvent; listener: EventListenerOrEventListenerObject }> = [];
+    let throwOnPageshowOnce = false;
+
+    const origAddBound = window.addEventListener.bind(window);
+    const origRemoveBound = window.removeEventListener.bind(window);
+
+    const addSpy = vi
+      .spyOn(window, 'addEventListener')
+      .mockImplementation((type, listener, options) => {
+        if (throwOnPageshowOnce && type === 'pageshow') {
+          throwOnPageshowOnce = false;
+          throw new Error('simulated_pageshow_add_failure');
+        }
+        if (isTrackedEvent(type) && listener) {
+          activeByType[type].add(listener);
+          addedThisGen.push({ type, listener });
+        }
+        return origAddBound(type, listener, options);
+      });
+
+    const removeSpy = vi
+      .spyOn(window, 'removeEventListener')
+      .mockImplementation((type, listener, options) => {
+        if (isTrackedEvent(type) && listener) {
+          activeByType[type].delete(listener);
+          removedThisGen.push({ type, listener });
+        }
+        return origRemoveBound(type, listener, options);
+      });
+
+    const spiedWindowAdd = window.addEventListener;
+    expect(totalActiveCount()).toBe(0);
+
+    const assertExactAddedRemovedMatch = (
+      added: ReadonlyArray<{ type: TrackedEvent; listener: EventListenerOrEventListenerObject }>,
+      removed: ReadonlyArray<{ type: TrackedEvent; listener: EventListenerOrEventListenerObject }>,
+    ) => {
+      expect(added).toHaveLength(EXPECTED_LISTENERS_PER_SOCKET);
+      expect(removed).toHaveLength(EXPECTED_LISTENERS_PER_SOCKET);
+      for (const entry of added) {
+        const matched = removed.some(
+          (r) => r.type === entry.type && r.listener === entry.listener,
+        );
+        expect(matched).toBe(true);
+      }
+      expect(totalActiveCount()).toBe(0);
+      expect(activeByType.pagehide.size).toBe(0);
+      expect(activeByType.pageshow.size).toBe(0);
+      expect(activeByType.visibilitychange.size).toBe(0);
+      expect(window.addEventListener).toBe(spiedWindowAdd);
+    };
+
+    const deterministicTimers = () => {
+      const timeouts: Array<() => void> = [];
+      return {
+        timeouts,
+        timers: {
+          setInterval(_fn: () => void, _ms: number) {
+            return 1;
+          },
+          clearInterval() {},
+          setTimeout(fn: () => void, _ms: number) {
+            timeouts.push(fn);
+            return timeouts.length;
+          },
+          clearTimeout() {},
+        },
+      };
+    };
+
+    // Cycle 10 generations in a row:
+    // - Gen 1: normal subscribed -> retire
+    // - Gen 2: retired while still CONNECTING
+    // - Gen 3: second attach fails (partial channel attach throws) -> automatic retirement
+    // - Gens 4..10: seven more full generations back to back
+    const origProtoChannel = RealtimeClient.prototype.channel;
+    for (let genIdx = 1; genIdx <= 10; genIdx += 1) {
+      addedThisGen = [];
+      removedThisGen = [];
+      const clientsBefore = generationClients.length;
+      const socketsBefore = sockets.length;
+
+      if (genIdx === 2) {
+        // Generation retired while still CONNECTING.
+        holdSocketOpen = true;
+        const manager = createWorkspaceLiveManager({
+          sessionGate: gate,
+          workspaceId: WS_1,
+          onRefresh: () => {},
+        });
+
+        await waitFor(() => {
+          expect(generationClients.length).toBe(clientsBefore + 1);
+          expect(sockets.length).toBe(socketsBefore + 1);
+        });
+        expect(sockets.at(-1)!.readyState).toBe(MockPhoenixSocket.CONNECTING);
+        expect(totalActiveCount()).toBe(EXPECTED_LISTENERS_PER_SOCKET);
+        expect(activeByType.pagehide.size).toBe(1);
+        expect(activeByType.pageshow.size).toBe(1);
+        expect(activeByType.visibilitychange.size).toBe(1);
+        expect(window.addEventListener).toBe(spiedWindowAdd);
+
+        const rtClient = generationClients[clientsBefore]!;
+        expect(rtClient.accessTokenValue).toBe(token);
+
+        manager.dispose();
+        await waitFor(() => {
+          expect(sockets.at(-1)!.readyState).toBe(MockPhoenixSocket.CLOSED);
+          expect(totalActiveCount()).toBe(0);
+        });
+        assertExactAddedRemovedMatch(addedThisGen, removedThisGen);
+        expect(rtClient.accessTokenValue).toBeNull();
+        expect(sockets.at(-1)!.sent).toEqual([]);
+
+        holdSocketOpen = false;
+        sockets.at(-1)!.open();
+        expect(sockets.at(-1)!.sent).toEqual([]);
+        continue;
+      }
+
+      if (genIdx === 3) {
+        // Generation whose second attach fails.
+        const dt = deterministicTimers();
+        let callsInGen3 = 0;
+        const failSecondSpy = vi
+          .spyOn(RealtimeClient.prototype, 'channel')
+          .mockImplementation(function (
+            this: RealtimeClient,
+            name: string,
+            opts?: Parameters<RealtimeClient['channel']>[1],
+          ) {
+            callsInGen3 += 1;
+            if (callsInGen3 === 2) {
+              throw new Error('simulated_second_attach_failure_c2_witness');
+            }
+            return origProtoChannel.call(this, name, opts);
+          });
+
+        const manager = createWorkspaceLiveManager({
+          sessionGate: gate,
+          workspaceId: WS_1,
+          onRefresh: () => {},
+          timers: dt.timers,
+        });
+
+        await waitFor(() => {
+          expect(dt.timeouts).toHaveLength(1);
+          expect(generationClients.length).toBe(clientsBefore + 1);
+        });
+        const rtClient = generationClients[clientsBefore]!;
+        assertExactAddedRemovedMatch(addedThisGen, removedThisGen);
+        expect(rtClient.getChannels()).toHaveLength(0);
+        expect(rtClient.accessTokenValue).toBeNull();
+
+        failSecondSpy.mockRestore();
+        manager.dispose();
+        expect(totalActiveCount()).toBe(0);
+        expect(window.addEventListener).toBe(spiedWindowAdd);
+        continue;
+      }
+
+      // Normal subscribed generation -> retire.
+      const manager = createWorkspaceLiveManager({
+        sessionGate: gate,
+        workspaceId: WS_1,
+        onRefresh: () => {},
+      });
+
+      await waitFor(() => {
+        expect(manager.subscribed).toBe(true);
+        expect(generationClients.length).toBe(clientsBefore + 1);
+      });
+      expect(totalActiveCount()).toBe(EXPECTED_LISTENERS_PER_SOCKET);
+      expect(activeByType.pagehide.size).toBe(1);
+      expect(activeByType.pageshow.size).toBe(1);
+      expect(activeByType.visibilitychange.size).toBe(1);
+      expect(window.addEventListener).toBe(spiedWindowAdd);
+
+      const rtClient = generationClients[clientsBefore]!;
+      expect(rtClient.accessTokenValue).toBe(token);
+      const sock = sockets.at(-1)!;
+      const sentBeforeRetire = sock.sent.length;
+
+      manager.dispose();
+      await waitFor(() => {
+        expect(rtClient.getChannels()).toHaveLength(0);
+        expect(sock.readyState).toBe(MockPhoenixSocket.CLOSED);
+        expect(totalActiveCount()).toBe(0);
+      });
+
+      assertExactAddedRemovedMatch(addedThisGen, removedThisGen);
+      expect(rtClient.accessTokenValue).toBeNull();
+      // Clearing auth on retirement must not send any access_token frame.
+      expect(
+        sock.sent.slice(sentBeforeRetire).filter((f) => f.event === 'access_token'),
+      ).toEqual([]);
+    }
+
+    expect(generationClients).toHaveLength(10);
+
+    // After retirement of all 10 generations, dispatching pagehide, pageshow, and visibilitychange
+    // must open NO socket and touch NO retired client or its underlying Phoenix Socket.
+    const retiredClientSpies = generationClients.flatMap((rtClient) => {
+      const phoenixSocket = (
+        rtClient as unknown as {
+          socketAdapter: {
+            getSocket(): {
+              connect: () => void;
+              disconnect: () => void;
+              teardown: () => void;
+            };
+          };
+        }
+      ).socketAdapter.getSocket();
+      return [
+        vi.spyOn(rtClient, 'connect'),
+        vi.spyOn(rtClient, 'disconnect'),
+        vi.spyOn(phoenixSocket, 'connect'),
+        vi.spyOn(phoenixSocket, 'disconnect'),
+        vi.spyOn(phoenixSocket, 'teardown'),
+      ];
+    });
+
+    const socketsBeforeEvents = sockets.length;
+    const origVisDesc = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    try {
+      window.dispatchEvent(new Event('pagehide'));
+      window.dispatchEvent(new Event('pageshow'));
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'hidden',
+      });
+      window.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'visible',
+      });
+      window.dispatchEvent(new Event('visibilitychange'));
+    } finally {
+      if (origVisDesc) {
+        Object.defineProperty(document, 'visibilityState', origVisDesc);
+      } else {
+        delete (document as { visibilityState?: DocumentVisibilityState }).visibilityState;
+      }
+    }
+
+    expect(sockets.length).toBe(socketsBeforeEvents);
+    for (const spy of retiredClientSpies) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+
+    // Re-settle SessionGate after the pagehide/pageshow transition before the throw-path checks.
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+
+    // Throwing construction case A: RealtimeClient constructor throws synchronously (missing apikey).
+    {
+      const dt = deterministicTimers();
+      const origAcquire = gate.acquireAccessToken.bind(gate);
+      const acquireSpy = vi
+        .spyOn(gate, 'acquireAccessToken')
+        .mockImplementationOnce(async () => {
+          const auth = await origAcquire();
+          return auth ? { ...auth, anonKey: '' } : null;
+        });
+
+      const manager = createWorkspaceLiveManager({
+        sessionGate: gate,
+        workspaceId: WS_1,
+        onRefresh: () => {},
+        timers: dt.timers,
+      });
+
+      await waitFor(() => {
+        expect(dt.timeouts).toHaveLength(1);
+      });
+      expect(window.addEventListener).toBe(spiedWindowAdd);
+      expect(totalActiveCount()).toBe(0);
+
+      acquireSpy.mockRestore();
+      manager.dispose();
+    }
+
+    // Throwing construction case B: throw mid-registration AFTER pagehide was registered -> rolls back pagehide and restores window.addEventListener === original.
+    {
+      addedThisGen = [];
+      removedThisGen = [];
+      throwOnPageshowOnce = true;
+      const dt = deterministicTimers();
+
+      const manager = createWorkspaceLiveManager({
+        sessionGate: gate,
+        workspaceId: WS_1,
+        onRefresh: () => {},
+        timers: dt.timers,
+      });
+
+      await waitFor(() => {
+        expect(dt.timeouts).toHaveLength(1);
+      });
+      expect(window.addEventListener).toBe(spiedWindowAdd);
+      expect(totalActiveCount()).toBe(0);
+      expect(addedThisGen).toHaveLength(1);
+      expect(addedThisGen[0]!.type).toBe('pagehide');
+      expect(removedThisGen).toHaveLength(1);
+      expect(removedThisGen[0]!.type).toBe('pagehide');
+      expect(removedThisGen[0]!.listener).toBe(addedThisGen[0]!.listener);
+
+      manager.dispose();
+    }
+
+    // Verify native (unspied) window.addEventListener identity and property descriptor as well.
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+    setAuthTrackSpy.mockRestore();
+
+    const nativeWindowAdd = window.addEventListener;
+    const nativeWindowAddDesc = Object.getOwnPropertyDescriptor(
+      window,
+      'addEventListener',
+    );
+
+    const finalManager = createWorkspaceLiveManager({
+      sessionGate: gate,
+      workspaceId: WS_1,
+      onRefresh: () => {},
+    });
+    await waitFor(() => expect(finalManager.subscribed).toBe(true));
+    expect(window.addEventListener).toBe(nativeWindowAdd);
+    expect(Object.getOwnPropertyDescriptor(window, 'addEventListener')).toEqual(
+      nativeWindowAddDesc,
+    );
+
+    finalManager.dispose();
+    await waitFor(() => expect(sockets.at(-1)!.readyState).toBe(MockPhoenixSocket.CLOSED));
+    expect(window.addEventListener).toBe(nativeWindowAdd);
+    expect(Object.getOwnPropertyDescriptor(window, 'addEventListener')).toEqual(
+      nativeWindowAddDesc,
+    );
+
+    gate.dispose();
+  });
 });

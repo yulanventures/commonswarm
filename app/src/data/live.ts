@@ -188,11 +188,139 @@ type OwnedChannel = Parameters<FeedPushChannelClient['removeChannel']>[0] & {
   teardown?(): void;
 };
 
+interface CapturedWindowListener {
+  readonly type: string;
+  readonly listener: EventListenerOrEventListenerObject;
+  readonly hasOptions: boolean;
+  readonly options: boolean | AddEventListenerOptions | undefined;
+}
+
+const activeWindowCaptureBuckets: CapturedWindowListener[][] = [];
+
+function removeCapturedWindowListeners(
+  entries: CapturedWindowListener[],
+): void {
+  const toRemove = entries.splice(0, entries.length);
+  if (
+    toRemove.length === 0 ||
+    typeof window === 'undefined' ||
+    typeof window.removeEventListener !== 'function'
+  ) {
+    return;
+  }
+  for (const entry of toRemove) {
+    try {
+      if (entry.hasOptions) {
+        window.removeEventListener(entry.type, entry.listener, entry.options);
+      } else {
+        window.removeEventListener(entry.type, entry.listener);
+      }
+    } catch {
+      // Ignore listener removal errors during disposal.
+    }
+  }
+}
+
+/**
+ * Synchronously capture every `window.addEventListener` registration performed
+ * during `fn` (specifically Phoenix `Socket`'s anonymous `pagehide`, `pageshow`,
+ * and `visibilitychange` hooks registered inside `new RealtimeClient(...)`).
+ *
+ * Passes every call through unchanged, restores the exact original
+ * `window.addEventListener` (including property ownership) in `finally` even if
+ * `fn` throws, and rolls back any partial registrations on throw.
+ */
+function captureWindowListeners<T>(fn: () => T): {
+  value: T;
+  listeners: CapturedWindowListener[];
+} {
+  const listeners: CapturedWindowListener[] = [];
+  if (
+    typeof window === 'undefined' ||
+    typeof window.addEventListener !== 'function'
+  ) {
+    return { value: fn(), listeners };
+  }
+
+  const isOutermost = activeWindowCaptureBuckets.length === 0;
+  let hasOwn = false;
+  let ownDesc: PropertyDescriptor | undefined;
+  let originalAddEventListener: Window['addEventListener'] | undefined;
+  let usedDefineProperty = false;
+  let installed = false;
+
+  if (isOutermost) {
+    hasOwn = Object.prototype.hasOwnProperty.call(window, 'addEventListener');
+    ownDesc = hasOwn
+      ? Object.getOwnPropertyDescriptor(window, 'addEventListener')
+      : undefined;
+    originalAddEventListener = window.addEventListener;
+
+    const wrappedAddEventListener: Window['addEventListener'] = function (
+      this: Window,
+      ...args: Parameters<Window['addEventListener']>
+    ) {
+      const result = Reflect.apply(originalAddEventListener!, this, args);
+      const [type, listener, options] = args;
+      const bucket =
+        activeWindowCaptureBuckets[activeWindowCaptureBuckets.length - 1];
+      if (bucket && typeof type === 'string' && listener != null) {
+        bucket.push({
+          type,
+          listener,
+          hasOptions: args.length >= 3,
+          options,
+        });
+      }
+      return result;
+    };
+
+    if (!hasOwn || ownDesc?.configurable !== false) {
+      Object.defineProperty(window, 'addEventListener', {
+        value: wrappedAddEventListener,
+        writable: true,
+        enumerable: ownDesc?.enumerable ?? false,
+        configurable: true,
+      });
+      usedDefineProperty = true;
+    } else {
+      window.addEventListener = wrappedAddEventListener;
+    }
+    installed = true;
+  }
+
+  activeWindowCaptureBuckets.push(listeners);
+  try {
+    const value = fn();
+    return { value, listeners };
+  } catch (error) {
+    removeCapturedWindowListeners(listeners);
+    throw error;
+  } finally {
+    activeWindowCaptureBuckets.pop();
+    if (installed && originalAddEventListener) {
+      if (usedDefineProperty) {
+        if (hasOwn && ownDesc) {
+          Object.defineProperty(window, 'addEventListener', ownDesc);
+        } else {
+          delete (window as { addEventListener?: unknown }).addEventListener;
+          if (window.addEventListener !== originalAddEventListener) {
+            window.addEventListener = originalAddEventListener;
+          }
+        }
+      } else {
+        window.addEventListener = originalAddEventListener;
+      }
+    }
+  }
+}
+
 interface GenerationRealtimeTransport extends FeedPushChannelClient {
   readonly dedicated: boolean;
   setAuth(token: string): Promise<void> | void;
   isConnected(): boolean;
   clearSendBuffer(): void;
+  dispose(): void;
   removeAllChannels?(): Promise<unknown> | unknown;
   disconnect?(): Promise<unknown> | unknown;
 }
@@ -244,12 +372,26 @@ function createGenerationTransport(
       throw new Error('live_realtime_origin_mismatch');
     }
     const baseRealtime = rawClient.realtime;
-    const rtClient = new RealtimeClient(realtimeEndpoint, {
-      params: { apikey: anonKey },
-      transport: createGenerationTransportCtor(baseRealtime.transport, isRetired),
-      heartbeatIntervalMs: baseRealtime.heartbeatIntervalMs,
-      timeout: baseRealtime.timeout,
-    });
+    const { value: rtClient, listeners: capturedWindowListeners } =
+      captureWindowListeners(
+        () =>
+          new RealtimeClient(realtimeEndpoint, {
+            params: { apikey: anonKey },
+            transport: createGenerationTransportCtor(
+              baseRealtime.transport,
+              isRetired,
+            ),
+            heartbeatIntervalMs: baseRealtime.heartbeatIntervalMs,
+            timeout: baseRealtime.timeout,
+          }),
+      );
+    const disposeClient = (): void => {
+      removeCapturedWindowListeners(capturedWindowListeners);
+      // Clear the stored bearer directly without sending any frame over the socket
+      // (in manual-token mode `setAuth()` / `setAuth(null)` is a no-op that retains `accessTokenValue`).
+      rtClient.accessTokenValue = null;
+      rtClient.accessToken = null;
+    };
     if (
       !realtimeEndpointMatchesApiOrigin(
         rtClient as unknown as RealtimeCapableClient,
@@ -257,6 +399,7 @@ function createGenerationTransport(
       )
     ) {
       void safeInvoke(() => rtClient.disconnect());
+      disposeClient();
       throw new Error('live_realtime_origin_mismatch');
     }
     return {
@@ -276,6 +419,7 @@ function createGenerationTransport(
         return rtClient.disconnect();
       },
       setAuth(token) {
+        if (isRetired()) return;
         return rtClient.setAuth(token);
       },
       isConnected() {
@@ -285,6 +429,9 @@ function createGenerationTransport(
         if (Array.isArray(rtClient.sendBuffer)) {
           rtClient.sendBuffer.length = 0;
         }
+      },
+      dispose() {
+        disposeClient();
       },
     };
   }
@@ -299,12 +446,14 @@ function createGenerationTransport(
       return rawClient.removeChannel(ch);
     },
     setAuth(token) {
+      if (isRetired()) return;
       return rawClient.realtime?.setAuth(token);
     },
     isConnected() {
       return Boolean(rawClient.realtime?.isConnected?.());
     },
     clearSendBuffer() {},
+    dispose() {},
   };
 }
 
@@ -319,12 +468,16 @@ function createGenerationTransport(
  *   discarded before any microtask runs.
  * - While already connected (`OPEN`), calls `removeAllChannels()` (which sends `phx_leave`,
  *   tears down channels, and calls `disconnect()`), then wipes `sendBuffer` and drops refs.
+ * - Unregisters every `window` listener captured during `RealtimeClient` construction and
+ *   clears the client's stored bearer so nothing remains reachable from `window`.
  */
 function retireAndCleanupSession(session: OwnedRealtimeSession): Promise<void> {
   session.retired = true;
+  session.lastAccessToken = '';
   session.transport.clearSendBuffer();
 
   if (session.cleanupPromise) {
+    session.transport.dispose();
     return session.cleanupPromise;
   }
 
@@ -344,6 +497,7 @@ function retireAndCleanupSession(session: OwnedRealtimeSession): Promise<void> {
       }
       // `channel.leave()` pushes `phx_leave` onto `sendBuffer` synchronously when disconnected.
       transport.clearSendBuffer();
+      transport.dispose();
 
       session.cleanupPromise = Promise.allSettled([
         disconnectPromise,
@@ -351,13 +505,17 @@ function retireAndCleanupSession(session: OwnedRealtimeSession): Promise<void> {
       ]).then(() => {
         transport.clearSendBuffer();
         session.channels.clear();
-        // Advance `connectClock` once closed so Phoenix's `pageshow` listener cannot revive it.
-        return safeInvoke(() => transport.disconnect?.());
+        // Advance `connectClock` once closed and ensure auth/listeners stay cleared.
+        return safeInvoke(() => transport.disconnect?.()).then(() => {
+          transport.clearSendBuffer();
+          transport.dispose();
+        });
       });
       return session.cleanupPromise;
     }
 
     const removePromise = safeInvoke(() => transport.removeAllChannels?.());
+    transport.dispose();
     session.cleanupPromise = removePromise.then(() => {
       transport.clearSendBuffer();
       for (const ch of ownedChannels) {
@@ -368,7 +526,10 @@ function retireAndCleanupSession(session: OwnedRealtimeSession): Promise<void> {
         }
       }
       session.channels.clear();
-      return safeInvoke(() => transport.disconnect?.());
+      return safeInvoke(() => transport.disconnect?.()).then(() => {
+        transport.clearSendBuffer();
+        transport.dispose();
+      });
     });
     return session.cleanupPromise;
   }
@@ -379,6 +540,7 @@ function retireAndCleanupSession(session: OwnedRealtimeSession): Promise<void> {
   );
   session.cleanupPromise = Promise.allSettled(removals).then(() => {
     session.channels.clear();
+    transport.dispose();
   });
   return session.cleanupPromise;
 }
