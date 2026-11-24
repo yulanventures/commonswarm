@@ -10,6 +10,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  SessionExpired,
   createBrowserSession,
   deploymentOriginHash,
   sessionStorageKeyForDeployment,
@@ -778,6 +779,734 @@ describe('C2: fenced PostgREST wire transport against real pinned Supabase SDK 2
     expect(fakeHarness.wireCalls).toHaveLength(0);
 
     apiKeyGate.dispose();
+    gate.dispose();
+  });
+});
+
+describe('C1 (round 2): pinned SDK final teardown after pending initialization + peer usability', () => {
+  const originalFetch = globalThis.fetch;
+  const originalNavigatorLocks = Object.getOwnPropertyDescriptor(
+    globalThis.navigator,
+    'locks',
+  );
+  const originalVisibilityState = Object.getOwnPropertyDescriptor(
+    document,
+    'visibilityState',
+  );
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    localStorage.clear();
+    if (originalNavigatorLocks) {
+      Object.defineProperty(globalThis.navigator, 'locks', originalNavigatorLocks);
+    } else {
+      delete (globalThis.navigator as { locks?: unknown }).locks;
+    }
+    if (originalVisibilityState) {
+      Object.defineProperty(document, 'visibilityState', originalVisibilityState);
+    } else {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+    vi.restoreAllMocks();
+  });
+
+  function setVisibilityState(value: 'visible' | 'hidden') {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => value,
+    });
+  }
+
+  function createSharedMutexLocks() {
+    const queues = new Map<string, Promise<void>>();
+    const heldNames = new Set<string>();
+    const acquisitions: Array<{ name: string; ifAvailable: boolean }> = [];
+
+    const locks = {
+      async request<T>(
+        name: string,
+        optsOrCb:
+          | { ifAvailable?: boolean; signal?: AbortSignal }
+          | ((lock: { name: string } | null) => Promise<T> | T),
+        maybeCb?: (lock: { name: string } | null) => Promise<T> | T,
+      ): Promise<T> {
+        const opts = typeof optsOrCb === 'function' ? {} : optsOrCb;
+        const cb = typeof optsOrCb === 'function' ? optsOrCb : maybeCb!;
+        acquisitions.push({ name, ifAvailable: Boolean(opts.ifAvailable) });
+
+        if (opts.ifAvailable && heldNames.has(name)) {
+          return await cb(null);
+        }
+
+        const prev = queues.get(name) ?? Promise.resolve();
+        let release!: () => void;
+        const next = new Promise<void>((r) => {
+          release = r;
+        });
+        queues.set(name, next);
+
+        await prev;
+        heldNames.add(name);
+        try {
+          return await cb({ name });
+        } finally {
+          heldNames.delete(name);
+          release();
+        }
+      },
+    };
+
+    Object.defineProperty(globalThis.navigator, 'locks', {
+      configurable: true,
+      value: locks,
+    });
+
+    return { locks, acquisitions, heldNames };
+  }
+
+  function trackListenersAndTimers() {
+    const activeWindowListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+    const activeIntervals = new Set<unknown>();
+    const activeTimeouts = new Set<unknown>();
+
+    const origAdd = window.addEventListener.bind(window);
+    const origRemove = window.removeEventListener.bind(window);
+    const origSetInterval = globalThis.setInterval.bind(globalThis);
+    const origClearInterval = globalThis.clearInterval.bind(globalThis);
+    const origSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const origClearTimeout = globalThis.clearTimeout.bind(globalThis);
+
+    vi.spyOn(window, 'addEventListener').mockImplementation((type, listener, options) => {
+      if (listener) {
+        let bucket = activeWindowListeners.get(type);
+        if (!bucket) {
+          bucket = new Set();
+          activeWindowListeners.set(type, bucket);
+        }
+        bucket.add(listener);
+      }
+      return origAdd(type, listener, options);
+    });
+
+    vi.spyOn(window, 'removeEventListener').mockImplementation((type, listener, options) => {
+      if (listener) {
+        activeWindowListeners.get(type)?.delete(listener);
+      }
+      return origRemove(type, listener, options);
+    });
+
+    vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      const id = origSetInterval(handler, timeout, ...args);
+      activeIntervals.add(id);
+      return id;
+    }) as typeof setInterval);
+
+    vi.spyOn(globalThis, 'clearInterval').mockImplementation(((
+      id: unknown,
+    ) => {
+      if (id !== undefined) activeIntervals.delete(id);
+      return origClearInterval(id as ReturnType<typeof setInterval>);
+    }) as typeof clearInterval);
+
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      let id: unknown;
+      const wrapped: TimerHandler =
+        typeof handler === 'function'
+          ? (...cbArgs: unknown[]) => {
+              activeTimeouts.delete(id);
+              return (handler as (...a: unknown[]) => unknown)(...cbArgs);
+            }
+          : handler;
+      id = origSetTimeout(wrapped, timeout, ...args);
+      activeTimeouts.add(id);
+      return id;
+    }) as typeof setTimeout);
+
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((
+      id: unknown,
+    ) => {
+      if (id !== undefined) activeTimeouts.delete(id);
+      return origClearTimeout(id as ReturnType<typeof setTimeout>);
+    }) as typeof clearTimeout);
+
+    return {
+      activeWindowListeners,
+      activeIntervals,
+      activeTimeouts,
+      visibilityListenerCount: () =>
+        activeWindowListeners.get('visibilitychange')?.size ?? 0,
+      storageListenerCount: () => activeWindowListeners.get('storage')?.size ?? 0,
+    };
+  }
+
+  it('closing while _initialize() refresh is held leaves zero visibility listeners, zero timers, zero post-quiesce auth fetches/locks, and peer tab remains usable', async () => {
+    setVisibilityState('visible');
+    const sharedLocks = createSharedMutexLocks();
+    const tracker = trackListenersAndTimers();
+
+    const expiredToken = makeFakeJwt({ sub: 'user-1', session_id: 'sid-1', jti: 'exp-1' });
+    const rotatedToken = makeFakeJwt({ sub: 'user-1', session_id: 'sid-1', jti: 'rot-2' });
+    const storageKey = sessionStorageKeyForDeployment(DEPLOY_URL);
+    const initialStored = JSON.stringify({
+      access_token: expiredToken,
+      refresh_token: 'rt-initial',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) - 60,
+      token_type: 'bearer',
+      user: { id: 'user-1', aud: 'authenticated' },
+    });
+    localStorage.setItem(storageKey, initialStored);
+
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem');
+
+    const initRefreshStarted = createDeferred<void>();
+    const releaseInitRefresh = createDeferred<void>();
+    let initSignalAborted = false;
+    let authFetchCount = 0;
+
+    globalThis.fetch = (async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      authFetchCount += 1;
+      if (url.includes('/auth/v1/token') && authFetchCount === 1) {
+        initSignalAborted = Boolean(init?.signal?.aborted);
+        init?.signal?.addEventListener('abort', () => {
+          initSignalAborted = true;
+        });
+        initRefreshStarted.resolve();
+        await releaseInitRefresh.promise;
+        // Simulate a transport that resolves with rotated tokens despite abort.
+        return new Response(
+          JSON.stringify({
+            access_token: 'at-from-aborted-tabA',
+            refresh_token: 'rt-from-aborted-tabA',
+            expires_in: 3600,
+            token_type: 'bearer',
+            user: { id: 'user-1', aud: 'authenticated' },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/auth/v1/token')) {
+        return new Response(
+          JSON.stringify({
+            access_token: rotatedToken,
+            refresh_token: 'rt-peer-rotated',
+            expires_in: 3600,
+            token_type: 'bearer',
+            user: { id: 'user-1', aud: 'authenticated' },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/auth/v1/user')) {
+        return new Response(JSON.stringify({ id: 'user-1', aud: 'authenticated' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    const tabA = createBrowserSession({
+      url: DEPLOY_URL,
+      anonKey: ANON_KEY,
+      detectSessionInUrl: false,
+      allowProcessLockFallback: false,
+      sdk: {
+        createClient,
+        navigatorLock,
+        processLock,
+        isAuthSessionMissingError,
+        AuthRetryableFetchError,
+      },
+    });
+    expect(tabA.ok).toBe(true);
+    if (!tabA.ok) return;
+
+    // Baseline listeners added synchronously by SupabaseClient's unconnected Phoenix Realtime Socket
+    // constructor (not GoTrueClient auth). Track every auth visibilitychange listener added afterwards.
+    const realtimeBaselineListeners = new Set(
+      tracker.activeWindowListeners.get('visibilitychange') ?? [],
+    );
+    const activeAuthVisibilityListeners = () =>
+      [...(tracker.activeWindowListeners.get('visibilitychange') ?? [])].filter(
+        (fn) => !realtimeBaselineListeners.has(fn),
+      ).length;
+
+    // Wait until Tab A's constructor _initialize() enters the refresh fetch under the Web Lock.
+    await initRefreshStarted.promise;
+    expect(sharedLocks.heldNames.has(`lock:${storageKey}`)).toBe(true);
+
+    // Quiesce Tab A while _initialize() is held (BEFORE _initialize()'s finally runs _handleVisibilityChange).
+    const quiesceDone = tabA.quiesce();
+    expect(initSignalAborted).toBe(true);
+
+    // Release the held refresh fetch so _initialize() unwinds through finally -> _handleVisibilityChange().
+    releaseInitRefresh.resolve();
+    await quiesceDone;
+
+    // Immediately after quiesce() resolves, Tab A must have ZERO attached auth listeners and ZERO timers,
+    // and the shared Web Lock must already be released.
+    expect(sharedLocks.heldNames.has(`lock:${storageKey}`)).toBe(false);
+    expect(activeAuthVisibilityListeners()).toBe(0);
+    expect(
+      (tabA.client.auth as unknown as { visibilityChangedCallback?: unknown })
+        .visibilityChangedCallback,
+    ).toBeNull();
+    expect(tracker.storageListenerCount()).toBe(0);
+    expect(tracker.activeIntervals.size).toBe(0);
+    expect(tracker.activeTimeouts.size).toBe(0);
+
+    // Tab A wrote/removed ZERO auth entries in localStorage (peer credentials untouched).
+    const authWritesByTabA = setItemSpy.mock.calls.filter(
+      ([k]) => !String(k).startsWith('commonswarm-storage-'),
+    );
+    const authRemovalsByTabA = removeItemSpy.mock.calls.filter(
+      ([k]) => !String(k).startsWith('commonswarm-storage-'),
+    );
+    expect(authWritesByTabA).toHaveLength(0);
+    expect(authRemovalsByTabA).toHaveLength(0);
+    expect(localStorage.getItem(storageKey)).toBe(initialStored);
+
+    // Record counts after quiesce, then drive visibility transitions and macrotask turns.
+    const fetchesAfterQuiesce = authFetchCount;
+    const locksAfterQuiesce = sharedLocks.acquisitions.length;
+
+    setVisibilityState('hidden');
+    window.dispatchEvent(new Event('visibilitychange'));
+    setVisibilityState('visible');
+    window.dispatchEvent(new Event('visibilitychange'));
+    await new Promise((r) => setTimeout(r, 25));
+
+    expect(authFetchCount).toBe(fetchesAfterQuiesce);
+    expect(sharedLocks.acquisitions.length).toBe(locksAfterQuiesce);
+    expect(activeAuthVisibilityListeners()).toBe(0);
+    expect(tracker.activeIntervals.size).toBe(0);
+
+    // Two-tab peer proof: a peer tab (/app) using the same storage and shared Web Locks
+    // cleanly acquires the lock, refreshes the expired session, verifies, and persists rotated credentials.
+    const tabB = createBrowserSession({
+      url: DEPLOY_URL,
+      anonKey: ANON_KEY,
+      detectSessionInUrl: true,
+      allowProcessLockFallback: true,
+      sdk: {
+        createClient,
+        navigatorLock,
+        processLock,
+        isAuthSessionMissingError,
+        AuthRetryableFetchError,
+      },
+    });
+    expect(tabB.ok).toBe(true);
+    if (!tabB.ok) return;
+
+    const peerSession = await tabB.verifiedSession();
+    expect(peerSession?.access_token).toBe(rotatedToken);
+    expect(peerSession?.refresh_token).toBe('rt-peer-rotated');
+    expect(localStorage.getItem(storageKey)).toContain(rotatedToken);
+
+    await tabB.quiesce();
+    expect(
+      (tabB.client.auth as unknown as { visibilityChangedCallback?: unknown })
+        .visibilityChangedCallback,
+    ).toBeNull();
+    expect(tracker.activeIntervals.size).toBe(0);
+  });
+
+  it('closing while _initialize() is queued behind a peer Web Lock cleans up late _handleVisibilityChange() with zero leaked listeners, timers, fetches, or lock acquisitions', async () => {
+    setVisibilityState('visible');
+    const sharedLocks = createSharedMutexLocks();
+    const tracker = trackListenersAndTimers();
+
+    const validToken = makeFakeJwt({ sub: 'user-1', session_id: 'sid-1', jti: 'ok-1' });
+    const storageKey = sessionStorageKeyForDeployment(DEPLOY_URL);
+    const stored = JSON.stringify({
+      access_token: validToken,
+      refresh_token: 'rt-1',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      token_type: 'bearer',
+      user: { id: 'user-1', aud: 'authenticated' },
+    });
+    localStorage.setItem(storageKey, stored);
+
+    let fetchCount = 0;
+    globalThis.fetch = (async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      fetchCount += 1;
+      if (url.includes('/auth/v1/user')) {
+        return new Response(JSON.stringify({ id: 'user-1', aud: 'authenticated' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    // Peer holds the shared Web Lock before Tab A is created.
+    const peerLockEntered = createDeferred<void>();
+    const releasePeerLock = createDeferred<void>();
+    const peerWork = sharedLocks.locks.request(`lock:${storageKey}`, {}, async () => {
+      peerLockEntered.resolve();
+      await releasePeerLock.promise;
+    });
+    await peerLockEntered.promise;
+
+    const tabA = createBrowserSession({
+      url: DEPLOY_URL,
+      anonKey: ANON_KEY,
+      detectSessionInUrl: false,
+      allowProcessLockFallback: false,
+      sdk: {
+        createClient,
+        navigatorLock,
+        processLock,
+        isAuthSessionMissingError,
+        AuthRetryableFetchError,
+      },
+    });
+    expect(tabA.ok).toBe(true);
+    if (!tabA.ok) return;
+
+    const realtimeBaselineListeners = new Set(
+      tracker.activeWindowListeners.get('visibilitychange') ?? [],
+    );
+    const activeAuthVisibilityListeners = () =>
+      [...(tracker.activeWindowListeners.get('visibilitychange') ?? [])].filter(
+        (fn) => !realtimeBaselineListeners.has(fn),
+      ).length;
+
+    // Wait one microtask so Tab A's constructor `_initialize()` passes `navigatorLock`'s
+    // leading `await Promise.resolve()` (`locks.js:102`) and is actively queued on the peer's Web Lock.
+    await Promise.resolve();
+    expect(sharedLocks.acquisitions.length).toBe(2);
+
+    // Quiesce Tab A BEFORE peer releases the lock, so Tab A's _initialize() runs entirely after quiesce() starts.
+    const quiesceDone = tabA.quiesce();
+    const lockCountAtQuiesce = sharedLocks.acquisitions.length;
+    releasePeerLock.resolve();
+    await peerWork;
+    await quiesceDone;
+
+    expect(sharedLocks.heldNames.has(`lock:${storageKey}`)).toBe(false);
+    // Zero NEW shared lock acquisitions after quiesce() started (including from onAuthStateChange IIFEs).
+    expect(sharedLocks.acquisitions.length).toBe(lockCountAtQuiesce);
+    expect(activeAuthVisibilityListeners()).toBe(0);
+    expect(
+      (tabA.client.auth as unknown as { visibilityChangedCallback?: unknown })
+        .visibilityChangedCallback,
+    ).toBeNull();
+    expect(tracker.storageListenerCount()).toBe(0);
+    expect(tracker.activeIntervals.size).toBe(0);
+    expect(tracker.activeTimeouts.size).toBe(0);
+    expect(fetchCount).toBe(0);
+    expect(localStorage.getItem(storageKey)).toBe(stored);
+
+    setVisibilityState('hidden');
+    window.dispatchEvent(new Event('visibilitychange'));
+    setVisibilityState('visible');
+    window.dispatchEvent(new Event('visibilitychange'));
+    await new Promise((r) => setTimeout(r, 25));
+
+    expect(sharedLocks.acquisitions.length).toBe(lockCountAtQuiesce);
+    expect(fetchCount).toBe(0);
+    expect(activeAuthVisibilityListeners()).toBe(0);
+    expect(tracker.activeIntervals.size).toBe(0);
+  });
+});
+
+describe('C2 (round 2): late terminal 401 refusals are scoped to their captured login lifetime across PostgREST and Edge', () => {
+  it('terminal 401 refusal held across peer sign-out + re-sign-in as another user leaves successor state and pending verification untouched (PostgREST and Edge)', async () => {
+    const sessionUser1 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-u1' });
+    const sessionUser2 = makeFakeSession({ userId: 'user-2', sessionId: 'sid-u2' });
+
+    const heldPgBody = createDeferred<string>();
+    const heldEdgeResp = createDeferred<Response>();
+
+    let activeHandlersMode: 'hold-u1-401' | 'ok-u2' = 'hold-u1-401';
+    const harness = createFakeSessionHarness(sessionUser1, makeStandardHandlers());
+    const customFetch: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (activeHandlersMode === 'hold-u1-401') {
+        if (url.includes('/rest/v1/workspaces')) {
+          // Return a 401 session_not_found whose body `.text()` is held across the retirement gap.
+          return {
+            ok: false,
+            status: 401,
+            text: () => heldPgBody.promise,
+          } as unknown as Response;
+        }
+        if (url.includes('/functions/v1/read')) {
+          return heldEdgeResp.promise;
+        }
+      }
+      return harness.fetchImpl(input, init);
+    };
+
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harness.browserSession,
+      fetchImpl: customFetch,
+    });
+    const queryClient = createAppQueryClient();
+    const controller = createDataController(gate, queryClient);
+
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    expect(gate.userId).toBe('user-1');
+
+    const verifiedSpy = vi.spyOn(harness.browserSession, 'verifiedSession');
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+    const fenceUser1 = gate.fenceTracker.capture({ workspaceId: WS_1, conversationId: null });
+    const loginFenceUser1 = gate.fenceTracker.capture({ workspaceId: null, conversationId: null });
+
+    // Launch both PostgREST and Edge reads under user-1; both will receive terminal 401s.
+    const pgRead = readWorkspaces(gate, { fence: loginFenceUser1 });
+    const edgeRead = readConversations(gate, WS_1, { fence: fenceUser1 });
+
+    // Wait for both reads to reach the network layer.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Hold successor user-2's verification so we verify the old 401 does not kill pending verification.
+    const user2Verify = createDeferred<Session | null>();
+    harness.setCurrentSessionHandler(() => user2Verify.promise);
+    activeHandlersMode = 'ok-u2';
+
+    // Peer signs out user-1 and signs in user-2 -> gate enters `checking` for user-2.
+    harness.emitAuthChange('SIGNED_OUT', null);
+    harness.emitAuthChange('SIGNED_IN', sessionUser2);
+    expect(gate.state).toEqual({ status: 'checking' });
+    const checkingGen = gate.loginGeneration;
+
+    // Release BOTH old user-1 terminal refusals WHILE user-2's verification is still pending.
+    heldPgBody.resolve(JSON.stringify({ code: 'session_not_found', message: 'Session ended' }));
+    heldEdgeResp.resolve(
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(pgRead).rejects.toBeInstanceOf(StaleFenceError);
+    await expect(edgeRead).rejects.toBeInstanceOf(StaleFenceError);
+
+    // Direct call with retired fence while successor is checking is also a no-op.
+    expect(gate.handleUnauthorized(loginFenceUser1)).toBe(false);
+
+    // Successor's pending verification was NOT invalidated or forced to signed_out.
+    expect(gate.state).toEqual({ status: 'checking' });
+    expect(gate.loginGeneration).toBe(checkingGen);
+    expect(verifiedSpy).not.toHaveBeenCalled();
+
+    // Complete user-2 verification -> publishes authenticated cleanly.
+    user2Verify.resolve(sessionUser2);
+    await waitFor(() => {
+      expect(gate.state).toEqual({ status: 'authenticated' });
+      expect(gate.userId).toBe('user-2');
+      expect(gate.fenceTracker.loginIdentity?.sessionId).toBe('sid-u2');
+    });
+    const user2Gen = gate.loginGeneration;
+
+    // Direct call with retired fence AFTER user-2 is authenticated also changes nothing.
+    expect(gate.handleUnauthorized(loginFenceUser1)).toBe(false);
+    expect(gate.state).toEqual({ status: 'authenticated' });
+    expect(gate.userId).toBe('user-2');
+    expect(gate.loginGeneration).toBe(user2Gen);
+    expect(verifiedSpy).not.toHaveBeenCalled();
+
+    controller.dispose();
+    gate.dispose();
+  });
+
+  it('terminal 401 refusal held across same-person replacement (sid-1 -> sid-2) leaves successor state and verification untouched (PostgREST and Edge)', async () => {
+    const session1 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-1' });
+    const session2 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-2' });
+
+    const heldPgResp = createDeferred<Response>();
+    const heldEdgeResp = createDeferred<Response>();
+    const heldPgBodyAfterAuth = createDeferred<string>();
+    const heldEdgeAfterAuth = createDeferred<Response>();
+    let pgCount = 0;
+    let edgeCount = 0;
+
+    const harness = createFakeSessionHarness(session1, makeStandardHandlers());
+    const customFetch: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('/rest/v1/workspaces')) {
+        pgCount += 1;
+        if (pgCount === 1) return heldPgResp.promise;
+        if (pgCount === 2) {
+          return {
+            ok: false,
+            status: 401,
+            text: () => heldPgBodyAfterAuth.promise,
+          } as unknown as Response;
+        }
+      }
+      if (url.includes('/functions/v1/read')) {
+        edgeCount += 1;
+        if (edgeCount === 1) return heldEdgeResp.promise;
+        if (edgeCount === 2) return heldEdgeAfterAuth.promise;
+      }
+      return harness.fetchImpl(input, init);
+    };
+
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harness.browserSession,
+      fetchImpl: customFetch,
+    });
+
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    const verifiedSpy = vi.spyOn(harness.browserSession, 'verifiedSession');
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+    const loginFence1 = gate.fenceTracker.capture({ workspaceId: null, conversationId: null });
+    const wsFence1 = gate.fenceTracker.capture({ workspaceId: WS_1, conversationId: null });
+
+    const pgWhilePending = readWorkspaces(gate, { fence: loginFence1 });
+    const edgeWhilePending = readConversations(gate, WS_1, { fence: wsFence1 });
+    const pgAfterAuth = readWorkspaces(gate, { fence: loginFence1 });
+    const edgeAfterAuth = readConversations(gate, WS_1, { fence: wsFence1 });
+
+    await waitFor(() => {
+      expect(pgCount).toBe(2);
+      expect(edgeCount).toBe(2);
+    });
+
+    // Same user replaces login (sid-1 -> sid-2); hold sid-2 verification.
+    const sid2Verify = createDeferred<Session | null>();
+    harness.setCurrentSessionHandler(() => sid2Verify.promise);
+    harness.emitAuthChange('SIGNED_IN', session2);
+    expect(gate.state).toEqual({ status: 'checking' });
+
+    // Release first pair while sid-2 verification is still pending.
+    heldPgResp.resolve(
+      new Response(JSON.stringify({ code: 'session_not_found', message: 'ended' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    heldEdgeResp.resolve(
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await expect(pgWhilePending).rejects.toBeInstanceOf(StaleFenceError);
+    await expect(edgeWhilePending).rejects.toBeInstanceOf(StaleFenceError);
+    expect(gate.state).toEqual({ status: 'checking' });
+    expect(verifiedSpy).not.toHaveBeenCalled();
+
+    // Let sid-2 verify and become authenticated.
+    sid2Verify.resolve(session2);
+    await waitFor(() => {
+      expect(gate.state).toEqual({ status: 'authenticated' });
+      expect(gate.fenceTracker.loginIdentity?.sessionId).toBe('sid-2');
+    });
+    const sid2Gen = gate.loginGeneration;
+
+    // Release second pair AFTER sid-2 is authenticated.
+    heldPgBodyAfterAuth.resolve(JSON.stringify({ code: 'session_not_found', message: 'ended' }));
+    heldEdgeAfterAuth.resolve(
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await expect(pgAfterAuth).rejects.toBeInstanceOf(StaleFenceError);
+    await expect(edgeAfterAuth).rejects.toBeInstanceOf(StaleFenceError);
+
+    expect(gate.state).toEqual({ status: 'authenticated' });
+    expect(gate.fenceTracker.loginIdentity?.sessionId).toBe('sid-2');
+    expect(gate.loginGeneration).toBe(sid2Gen);
+    expect(verifiedSpy).not.toHaveBeenCalled();
+
+    gate.dispose();
+  });
+
+  it('control: terminal 401 refusal for the CURRENT login still retires it, purges state, and triggers locked verification (PostgREST and Edge)', async () => {
+    const session1 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-1' });
+    const session2 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-2' });
+
+    const harness = createFakeSessionHarness(session1, {
+      ...makeStandardHandlers(),
+      onFrom(call) {
+        if (call.target === 'workspaces') {
+          return {
+            data: null,
+            error: { code: 'session_not_found', message: 'Session ended' },
+            status: 401,
+          };
+        }
+        return { data: [], error: null, status: 200 };
+      },
+      onFetch() {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    const queryClient = createAppQueryClient();
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harness.browserSession,
+      fetchImpl: harness.fetchImpl,
+    });
+    const controller = createDataController(gate, queryClient);
+
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    const verifiedSpy = vi.spyOn(harness.browserSession, 'verifiedSession');
+    queryClient.setQueryData(['probe'], { secret: true });
+
+    // 1. PostgREST current-login 401 + session_not_found retires immediately.
+    const pgFence = gate.fenceTracker.capture({ workspaceId: null, conversationId: null });
+    await expect(readWorkspaces(gate, { fence: pgFence })).rejects.toBeInstanceOf(
+      SessionExpired,
+    );
+    expect(gate.state).toEqual({ status: 'signed_out' });
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(verifiedSpy).toHaveBeenCalledTimes(1);
+
+    // Re-authenticate with session2 to test Edge current-login 401 control.
+    harness.emitAuthChange('SIGNED_IN', session2);
+    await waitFor(() => {
+      expect(gate.state).toEqual({ status: 'authenticated' });
+      expect(gate.fenceTracker.loginIdentity?.sessionId).toBe('sid-2');
+    });
+    queryClient.setQueryData(['probe-2'], { secret: true });
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+    const edgeFence = gate.fenceTracker.capture({ workspaceId: WS_1, conversationId: null });
+
+    // 2. Edge current-login 401 retires immediately.
+    await expect(
+      readConversations(gate, WS_1, { fence: edgeFence }),
+    ).rejects.toBeInstanceOf(SessionExpired);
+    expect(gate.state).toEqual({ status: 'signed_out' });
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(verifiedSpy).toHaveBeenCalledTimes(2);
+
+    controller.dispose();
     gate.dispose();
   });
 });

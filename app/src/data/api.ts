@@ -278,9 +278,16 @@ async function postgrestRead(
   assertStillCurrent(sessionGate, fence, auth, signal);
 
   if (!response.ok) {
+    const parsedError = parsePostgrestErrorBody(text, response.status);
+    if (response.status === 401 && parsedError.code === 'session_not_found') {
+      if (sessionGate.handleUnauthorized(fence, auth.identity)) {
+        throw new SessionExpired();
+      }
+      throw new StaleFenceError();
+    }
     return {
       data: null,
-      error: parsePostgrestErrorBody(text, response.status),
+      error: parsedError,
       status: response.status,
     };
   }
@@ -304,11 +311,14 @@ function checkPostgrestError(
   error: { message?: string; code?: string } | null,
   status: number | undefined,
   sessionGate: SessionGate,
+  fence: Fence,
 ): void {
   if (!error) return;
   if (status === 401 && error.code === 'session_not_found') {
-    sessionGate.handleUnauthorized();
-    throw new SessionExpired();
+    if (sessionGate.handleUnauthorized(fence)) {
+      throw new SessionExpired();
+    }
+    throw new StaleFenceError();
   }
   throw new ApiReadError(
     error.message ?? 'CommonSwarm read failed.',
@@ -348,7 +358,7 @@ export async function readWorkspaces(
         ],
       },
     );
-    checkPostgrestError(error, status, sessionGate);
+    checkPostgrestError(error, status, sessionGate, fence);
 
     if (!Array.isArray(data)) {
       throw new ApiDecodeError('workspaces_malformed');
@@ -415,7 +425,7 @@ export async function readHomeOverview(
     if (homeOverviewUnavailable(status, error.code)) {
       return null;
     }
-    checkPostgrestError(error, status, sessionGate);
+    checkPostgrestError(error, status, sessionGate, fence);
   }
 
   let parsed: HomeOverview;
@@ -464,15 +474,20 @@ export async function readConversations(
     signal,
   );
 
+  assertStillCurrent(sessionGate, fence, auth, signal);
+
   if (response.status === 401) {
-    sessionGate.handleUnauthorized();
-    throw new SessionExpired();
+    if (sessionGate.handleUnauthorized(fence, auth.identity)) {
+      throw new SessionExpired();
+    }
+    throw new StaleFenceError();
   }
 
   let raw: unknown;
   try {
     raw = await response.json();
   } catch {
+    assertStillCurrent(sessionGate, fence, auth, signal);
     throw new ApiDecodeError('conversations_malformed');
   }
 
@@ -524,7 +539,7 @@ export async function readAgentPrincipals(
         ],
       },
     );
-    checkPostgrestError(error, status, sessionGate);
+    checkPostgrestError(error, status, sessionGate, fence);
 
     if (!Array.isArray(data)) {
       throw new ApiDecodeError('agent_principals_malformed');
@@ -614,7 +629,7 @@ export async function readAgentPresence(
         ],
       },
     );
-    checkPostgrestError(error, status, sessionGate);
+    checkPostgrestError(error, status, sessionGate, fence);
 
     if (!Array.isArray(data)) {
       throw new ApiDecodeError('agent_presence_malformed');
@@ -659,7 +674,7 @@ export async function readAgentWakePath(
   ) {
     res = await runSelect('principal_id,oldest_unobserved_at');
   }
-  checkPostgrestError(res.error, res.status, sessionGate);
+  checkPostgrestError(res.error, res.status, sessionGate, fence);
 
   if (!Array.isArray(res.data)) {
     throw new ApiDecodeError('agent_wake_path_malformed');
@@ -717,7 +732,7 @@ export async function readMemberProfiles(
       ],
     },
   );
-  checkPostgrestError(error, status, sessionGate);
+  checkPostgrestError(error, status, sessionGate, fence);
 
   if (!Array.isArray(data)) {
     throw new ApiDecodeError('member_profiles_malformed');
@@ -767,7 +782,7 @@ export async function readDecisionQueue(
       args: { p_workspace_id: normalizedWorkspace },
     },
   );
-  checkPostgrestError(error, status, sessionGate);
+  checkPostgrestError(error, status, sessionGate, fence);
 
   try {
     return parseDecisionQueue(data, normalizedWorkspace);
@@ -801,7 +816,7 @@ export async function readWaitingTodos(
       },
     },
   );
-  checkPostgrestError(error, status, sessionGate);
+  checkPostgrestError(error, status, sessionGate, fence);
 
   try {
     return parseWaitingTodosQueue(data, normalizedWorkspace);
