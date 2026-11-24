@@ -1527,4 +1527,730 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       }
     }
   });
+
+  it('C1: current 404 with a held body or malformed body on realtime refresh retires a populated conversation immediately; late old-login 404 leaves successor alone', async () => {
+    const nowIso = '2026-11-23T12:00:00.000Z';
+    const privConv = makeConversationRow({
+      conversation_id: CONV_PRIVATE,
+      kind: 'private_channel',
+      channel_id: CONV_PRIVATE,
+      slug: 'vault-c1',
+    });
+
+    // --- Part A: 404 with HELD body (never-resolving stream / .json()) retires immediately ---
+    const sessionA = makeFakeSession({ userId: USER_1, sessionId: 'sid-c1-a' });
+    let phaseA: 'initial' | 'held_404' = 'initial';
+    let heldBodyJsonCalls = 0;
+
+    const harnessA = createFakeSessionHarness(sessionA, {
+      ...makeStandardFromAndRpc(nowIso),
+      enableRealtime: true,
+      onFetch(_input, init) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        if (body.resource === 'conversations') {
+          return jsonResponse({ conversations: [privConv] });
+        }
+        if (body.resource === 'conversation_history') {
+          if (phaseA === 'held_404') {
+            const heldStream = new ReadableStream<Uint8Array>({
+              start() {
+                // Intentionally never enqueue or close: simulates a stalled 404 body.
+              },
+            });
+            const resp = new Response(heldStream, {
+              status: 404,
+              headers: { 'content-type': 'application/json' },
+            });
+            const origJson = resp.json.bind(resp);
+            resp.json = () => {
+              heldBodyJsonCalls += 1;
+              return origJson();
+            };
+            return resp;
+          }
+          return jsonResponse({
+            conversation: privConv,
+            messages: [
+              makeMessageRow({
+                id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd60',
+                body: 'Populated message before held 404',
+              }),
+            ],
+            has_more: true,
+            next_before: {
+              created_at: '2026-11-23T10:31:00.000Z',
+              id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd60',
+            },
+            next_after: null,
+          });
+        }
+        return jsonResponse({}, 404);
+      },
+    });
+
+    const qcA = createAppQueryClient();
+    const gateA = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harnessA.browserSession,
+      fetchImpl: harnessA.fetchImpl,
+    });
+    const ctrlA = createDataController(gateA, qcA);
+
+    const viewA = render(
+      <MemoryRouter initialEntries={[`/channels/${CONV_PRIVATE}`]}>
+        <AppRoutes controller={ctrlA} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(
+        within(viewA.container).getByText('Populated message before held 404'),
+      ).toBeInTheDocument();
+      expect(harnessA.realtime!.activeChannels()).toHaveLength(2);
+    });
+    act(() => {
+      harnessA.realtime!.emitStatus('SUBSCRIBED');
+    });
+
+    // Realtime refresh hits HTTP 404 with a held body -> retires immediately WITHOUT reading JSON!
+    phaseA = 'held_404';
+    act(() => {
+      harnessA.realtime!.emitHint({ v: 1 }, 'cswarm-member:');
+    });
+
+    await waitFor(() => {
+      expect(
+        within(viewA.container).getByTestId('conversation-unavailable'),
+      ).toHaveTextContent(CONVERSATION_UNAVAILABLE_TEXT);
+    });
+    expect(heldBodyJsonCalls).toBe(0);
+    expect(
+      within(viewA.container).queryByText('Populated message before held 404'),
+    ).not.toBeInTheDocument();
+    const cachedA = JSON.stringify(
+      qcA.getQueryCache().getAll().map((q) => q.state.data),
+    );
+    expect(cachedA).not.toContain('Populated message before held 404');
+    expect(cachedA).not.toContain('dddddddd-dddd-4ddd-8ddd-dddddddddd60');
+
+    allWireCalls.push(...harnessA.wireCalls);
+    viewA.unmount();
+    ctrlA.dispose();
+    gateA.dispose();
+    resetAppStore();
+
+    // --- Part B: 404 with MALFORMED body retires immediately ---
+    const sessionB = makeFakeSession({ userId: USER_1, sessionId: 'sid-c1-b' });
+    let phaseB: 'initial' | 'malformed_404' = 'initial';
+
+    const harnessB = createFakeSessionHarness(sessionB, {
+      ...makeStandardFromAndRpc(nowIso),
+      enableRealtime: true,
+      onFetch(_input, init) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        if (body.resource === 'conversations') {
+          return jsonResponse({ conversations: [privConv] });
+        }
+        if (body.resource === 'conversation_history') {
+          if (phaseB === 'malformed_404') {
+            return new Response('<html>not valid json {{{', {
+              status: 404,
+              headers: { 'content-type': 'text/html' },
+            });
+          }
+          return jsonResponse({
+            conversation: privConv,
+            messages: [
+              makeMessageRow({
+                id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd61',
+                body: 'Populated message before malformed 404',
+              }),
+            ],
+            has_more: true,
+            next_before: {
+              created_at: '2026-11-23T10:31:00.000Z',
+              id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd61',
+            },
+            next_after: null,
+          });
+        }
+        return jsonResponse({}, 404);
+      },
+    });
+
+    const qcB = createAppQueryClient();
+    const gateB = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harnessB.browserSession,
+      fetchImpl: harnessB.fetchImpl,
+    });
+    const ctrlB = createDataController(gateB, qcB);
+
+    const viewB = render(
+      <MemoryRouter initialEntries={[`/channels/${CONV_PRIVATE}`]}>
+        <AppRoutes controller={ctrlB} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(
+        within(viewB.container).getByText('Populated message before malformed 404'),
+      ).toBeInTheDocument();
+      expect(harnessB.realtime!.activeChannels()).toHaveLength(2);
+    });
+    act(() => {
+      harnessB.realtime!.emitStatus('SUBSCRIBED');
+    });
+
+    phaseB = 'malformed_404';
+    act(() => {
+      harnessB.realtime!.emitHint({ v: 1 }, 'cswarm-member:');
+    });
+
+    await waitFor(() => {
+      expect(
+        within(viewB.container).getByTestId('conversation-unavailable'),
+      ).toHaveTextContent(CONVERSATION_UNAVAILABLE_TEXT);
+    });
+    expect(
+      within(viewB.container).queryByText('Populated message before malformed 404'),
+    ).not.toBeInTheDocument();
+    const cachedB = JSON.stringify(
+      qcB.getQueryCache().getAll().map((q) => q.state.data),
+    );
+    expect(cachedB).not.toContain('Populated message before malformed 404');
+    expect(cachedB).not.toContain('dddddddd-dddd-4ddd-8ddd-dddddddddd61');
+
+    allWireCalls.push(...harnessB.wireCalls);
+    viewB.unmount();
+    ctrlB.dispose();
+    gateB.dispose();
+    resetAppStore();
+
+    // --- Part C: Late 404 from an old login leaves successor alone + current-login control ---
+    const tokenOld = makeFakeJwt({ sub: USER_1, session_id: 'sid-c1-old', jti: 'c1-1' });
+    const tokenNew = makeFakeJwt({ sub: USER_1, session_id: 'sid-c1-new', jti: 'c1-2' });
+    const sessionOld = makeFakeSession({
+      userId: USER_1,
+      sessionId: 'sid-c1-old',
+      accessToken: tokenOld,
+    });
+    const sessionNew = makeFakeSession({
+      userId: USER_1,
+      sessionId: 'sid-c1-new',
+      accessToken: tokenNew,
+    });
+
+    const heldOldLogin404 = createDeferred<Response>();
+    let sid2RefreshVersion = 1;
+    let sid2FailWith404 = false;
+
+    const harnessC = createFakeSessionHarness(sessionOld, {
+      ...makeStandardFromAndRpc(nowIso),
+      enableRealtime: true,
+      onFetch(_input, init) {
+        const headers = new Headers(init?.headers);
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        if (body.resource === 'conversations') {
+          return jsonResponse({ conversations: [privConv] });
+        }
+        if (body.resource === 'conversation_history') {
+          if (headers.get('authorization') === `Bearer ${tokenOld}`) {
+            return heldOldLogin404.promise;
+          }
+          if (sid2FailWith404) {
+            return new Response('corrupt 404 body', { status: 404 });
+          }
+          return jsonResponse({
+            conversation: privConv,
+            messages: [
+              makeMessageRow({
+                id: `dddddddd-dddd-4ddd-8ddd-dddddddddd7${sid2RefreshVersion}`,
+                body:
+                  sid2RefreshVersion === 1
+                    ? 'Successor sid-2 initial message'
+                    : 'Successor sid-2 live refreshed message',
+              }),
+            ],
+            has_more: false,
+            next_before: null,
+            next_after: null,
+          });
+        }
+        return jsonResponse({}, 404);
+      },
+    });
+
+    const qcC = createAppQueryClient();
+    const gateC = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harnessC.browserSession,
+      fetchImpl: harnessC.fetchImpl,
+    });
+    const ctrlC = createDataController(gateC, qcC);
+
+    const viewC = render(
+      <MemoryRouter initialEntries={[`/channels/${CONV_PRIVATE}`]}>
+        <AppRoutes controller={ctrlC} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(
+        harnessC.fetchCalls.some(
+          (c) =>
+            (c.body as { resource?: string })?.resource === 'conversation_history' &&
+            c.authHeader === `Bearer ${tokenOld}`,
+        ),
+      ).toBe(true);
+    });
+
+    // Switch to new login (sid-c1-new) while old login's history request is held.
+    act(() => {
+      harnessC.emitAuthChange('SIGNED_IN', sessionNew);
+    });
+
+    await waitFor(() => {
+      expect(
+        within(viewC.container).getByText('Successor sid-2 initial message'),
+      ).toBeInTheDocument();
+      expect(harnessC.realtime!.activeChannels()).toHaveLength(2);
+    });
+    act(() => {
+      harnessC.realtime!.emitStatus('SUBSCRIBED');
+    });
+
+    // Now settle old login's held request with a malformed HTTP 404 -> MUST leave successor alone!
+    await act(async () => {
+      heldOldLogin404.resolve(new Response('not json 404', { status: 404 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      within(viewC.container).queryByTestId('conversation-unavailable'),
+    ).not.toBeInTheDocument();
+    expect(
+      within(viewC.container).getByText('Successor sid-2 initial message'),
+    ).toBeInTheDocument();
+
+    // Current-login control: successor still receives live updates and then retires on its OWN 404.
+    sid2RefreshVersion = 2;
+    act(() => {
+      harnessC.realtime!.emitHint({ v: 1 }, 'cswarm-member:');
+    });
+    await waitFor(() => {
+      expect(
+        within(viewC.container).getByText('Successor sid-2 live refreshed message'),
+      ).toBeInTheDocument();
+    });
+
+    sid2FailWith404 = true;
+    act(() => {
+      harnessC.realtime!.emitHint({ v: 1 }, 'cswarm-member:');
+    });
+    await waitFor(() => {
+      expect(
+        within(viewC.container).getByTestId('conversation-unavailable'),
+      ).toHaveTextContent(CONVERSATION_UNAVAILABLE_TEXT);
+    });
+
+    allWireCalls.push(...harnessC.wireCalls);
+    viewC.unmount();
+    ctrlC.dispose();
+    gateC.dispose();
+  });
+
+  it('C2: pinned RealtimeClient serializes held leave against immediate same-workspace return, cleans up partial second-attach failures, and delivers successor hints after old teardown settles', async () => {
+    interface SentFrame {
+      joinRef: string | null;
+      ref: string | null;
+      topic: string;
+      event: string;
+      payload: Record<string, unknown>;
+    }
+
+    const sockets: MockPhoenixSocket[] = [];
+    let holdSocketClose = false;
+    const heldCloses: Array<() => void> = [];
+
+    class MockPhoenixSocket {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSING = 2;
+      readonly CLOSED = 3;
+
+      readyState = MockPhoenixSocket.CONNECTING;
+      binaryType = 'arraybuffer';
+      onopen: ((ev: Event) => void) | null = null;
+      onclose: ((ev: CloseEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      readonly sent: SentFrame[] = [];
+      closeCalls = 0;
+
+      constructor(public readonly url: string | URL) {
+        sockets.push(this);
+        queueMicrotask(() => {
+          if (this.readyState === MockPhoenixSocket.CONNECTING) {
+            this.readyState = MockPhoenixSocket.OPEN;
+            this.onopen?.(new Event('open'));
+          }
+        });
+      }
+
+      send(data: string | ArrayBuffer): void {
+        if (typeof data !== 'string') return;
+        const [joinRef, ref, topic, event, payload] = JSON.parse(data) as [
+          string | null,
+          string | null,
+          string,
+          string,
+          Record<string, unknown>,
+        ];
+        const frame: SentFrame = { joinRef, ref, topic, event, payload };
+        this.sent.push(frame);
+
+        if (event === 'phx_join') {
+          queueMicrotask(() => {
+            this.deliverFromServer([
+              joinRef,
+              ref,
+              topic,
+              'phx_reply',
+              { status: 'ok', response: {} },
+            ]);
+          });
+          return;
+        }
+
+        if (event === 'phx_leave') {
+          queueMicrotask(() => {
+            this.deliverFromServer([
+              joinRef,
+              ref,
+              topic,
+              'phx_reply',
+              { status: 'ok', response: {} },
+            ]);
+          });
+        }
+      }
+
+      deliverFromServer(tuple: unknown[]): void {
+        if (this.readyState !== MockPhoenixSocket.OPEN) return;
+        this.onmessage?.({ data: JSON.stringify(tuple) } as MessageEvent);
+      }
+
+      close(code = 1000, reason = ''): void {
+        this.closeCalls += 1;
+        if (this.readyState === MockPhoenixSocket.CLOSED) return;
+        if (holdSocketClose) {
+          this.readyState = MockPhoenixSocket.CLOSING;
+          heldCloses.push(() => {
+            if (this.readyState === MockPhoenixSocket.CLOSED) return;
+            this.readyState = MockPhoenixSocket.CLOSED;
+            this.onclose?.({ code, reason, wasClean: true } as CloseEvent);
+          });
+          return;
+        }
+        this.readyState = MockPhoenixSocket.CLOSED;
+        this.onclose?.({ code, reason, wasClean: true } as CloseEvent);
+      }
+    }
+
+    const token = makeFakeJwt({ sub: USER_1, session_id: 'sid-c2-real', jti: 'c2-1' });
+    const session = makeFakeSession({
+      userId: USER_1,
+      sessionId: 'sid-c2-real',
+      accessToken: token,
+    });
+
+    // Real pinned @supabase/supabase-js (2.111.0) + @supabase/realtime-js (2.111.0) client!
+    const realClient = createClient(DEPLOY_URL, ANON_KEY, {
+      auth: {
+        storageKey: 'sb-c2-real-test',
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+      realtime: {
+        transport: MockPhoenixSocket as unknown as NonNullable<
+          Parameters<typeof createClient>[2]
+        >['realtime'] extends { transport?: infer T }
+          ? T
+          : never,
+        heartbeatIntervalMs: 60_000,
+      },
+    });
+    vi.spyOn(realClient.auth, 'getSession').mockResolvedValue({
+      data: { session },
+      error: null,
+    });
+
+    const realBrowserSession = {
+      ok: true as const,
+      client: realClient,
+      storageKey: 'sb-c2-real-test',
+      async currentSession() {
+        return session;
+      },
+      async verifiedSession() {
+        return session;
+      },
+      async boundedAuth<T>(op: Promise<T>) {
+        return op;
+      },
+      async signOut() {},
+      async quiesce() {
+        await realClient.removeAllChannels();
+      },
+    };
+
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => realBrowserSession,
+    });
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+
+    // --- Witness 1: Held leave + held socket close with immediate return to the SAME workspace ---
+    let gen1Refreshes = 0;
+    const gen1 = createWorkspaceLiveManager({
+      sessionGate: gate,
+      workspaceId: WS_1,
+      onRefresh: () => {
+        gen1Refreshes += 1;
+      },
+    });
+
+    await waitFor(() => {
+      expect(gen1.subscribed).toBe(true);
+      expect(realClient.getChannels()).toHaveLength(2);
+    });
+    const oldChannels = [...realClient.getChannels()];
+    const socket1 = sockets[0]!;
+    expect(socket1.readyState).toBe(MockPhoenixSocket.OPEN);
+
+    const channelSpy = vi.spyOn(realClient, 'channel');
+
+    // Hold both channels' unsubscribe() before Phoenix leave() triggers onClose->_remove,
+    // keeping the retiring channels registered in realClient.channels, AND hold socket close
+    // in WebSocket.CLOSING so disconnect() also settles asynchronously.
+    const leaveGates = oldChannels.map((ch) => {
+      const gateDeferred = createDeferred<void>();
+      const origUnsubscribe = ch.unsubscribe.bind(ch);
+      vi.spyOn(ch, 'unsubscribe').mockImplementation(async (timeout?: number) => {
+        await gateDeferred.promise;
+        return origUnsubscribe(timeout);
+      });
+      return gateDeferred;
+    });
+    holdSocketClose = true;
+
+    gen1.dispose();
+
+    // Retiring channels are STILL registered on the pinned client while unsubscribe is held!
+    expect(realClient.getChannels()).toEqual(oldChannels);
+
+    // Callbacks are ALREADY retired synchronously: a broadcast on the retiring socket does nothing.
+    socket1.deliverFromServer([
+      null,
+      null,
+      `realtime:cswarm-member:${WS_1}:${USER_1}`,
+      'broadcast',
+      { type: 'broadcast', event: 'signal', payload: { v: 1 } },
+    ]);
+    await Promise.resolve();
+    expect(gen1Refreshes).toBe(0);
+
+    // Immediately return to the SAME workspace while gen1's leave is STILL held!
+    let gen2Refreshes = 0;
+    const gen2 = createWorkspaceLiveManager({
+      sessionGate: gate,
+      workspaceId: WS_1,
+      onRefresh: () => {
+        gen2Refreshes += 1;
+      },
+    });
+
+    // Give gen2's token acquisition microtasks time to queue behind gen1's teardown.
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+    }
+    // Critical invariant 1: gen2 MUST NOT call channel() or reuse gen1's retiring channels while leave is held!
+    expect(channelSpy).not.toHaveBeenCalled();
+    expect(realClient.getChannels()).toEqual(oldChannels);
+    expect(gen2.subscribed).toBe(false);
+
+    // Release the held channel unsubscribes while socket1.close() is still in CLOSING.
+    for (const d of leaveGates) {
+      d.resolve();
+    }
+    await waitFor(() => {
+      expect(realClient.getChannels()).toHaveLength(0);
+      expect(socket1.sent.filter((f) => f.event === 'phx_leave')).toHaveLength(2);
+      expect(socket1.readyState).toBe(MockPhoenixSocket.CLOSING);
+    });
+    // Critical invariant 2: even after channels unregister, gen2 MUST STILL wait for gen1's
+    // disconnect() to finish before calling channel() / opening a new socket!
+    expect(channelSpy).not.toHaveBeenCalled();
+    expect(gen2.subscribed).toBe(false);
+
+    // Now complete socket1's close handshake so gen1's removeAllChannels() + disconnect() settles.
+    holdSocketClose = false;
+    for (const finishClose of heldCloses.splice(0)) {
+      finishClose();
+    }
+
+    // After old cleanup settles, gen2 attaches BRAND NEW channels on a fresh socket and subscribes cleanly!
+    await waitFor(() => {
+      expect(gen2.subscribed).toBe(true);
+      expect(realClient.getChannels()).toHaveLength(2);
+    });
+
+    const newChannels = [...realClient.getChannels()];
+    expect(newChannels[0]).not.toBe(oldChannels[0]);
+    expect(newChannels[1]).not.toBe(oldChannels[1]);
+    expect(socket1.readyState).toBe(MockPhoenixSocket.CLOSED);
+
+    const socket2 = sockets.at(-1)!;
+    expect(socket2).not.toBe(socket1);
+    expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
+
+    // Stale teardown safety: a retired/idle manager calling teardown/dispose after gen2 owns
+    // the client MUST NOT disconnect gen2 or remove gen2's channels.
+    gen1.teardown({ disconnectSocket: true });
+    gen1.dispose();
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve();
+    }
+    expect(realClient.getChannels()).toEqual(newChannels);
+    expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
+
+    // Delivering a real broadcast hint on socket2 wakes gen2 (and NEVER gen1), proving old teardown did not disconnect gen2.
+    socket2.deliverFromServer([
+      null,
+      null,
+      `realtime:cswarm-member:${WS_1}:${USER_1}`,
+      'broadcast',
+      { type: 'broadcast', event: 'signal', payload: { v: 1 } },
+    ]);
+    await waitFor(() => {
+      expect(gen2Refreshes).toBe(1);
+    });
+    expect(gen1Refreshes).toBe(0);
+    expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
+
+    // Cleanly dispose gen2 and wait for quiesce before Witness 2.
+    gen2.dispose();
+    await waitFor(() => {
+      expect(realClient.getChannels()).toHaveLength(0);
+      expect(socket2.readyState).toBe(MockPhoenixSocket.CLOSED);
+    });
+    channelSpy.mockRestore();
+
+    // --- Witness 2: Second-attach failure (both channel() throw and subscribe() throw) cleans up partial channels immediately before retry ---
+    const origChannel = realClient.channel.bind(realClient);
+    let attachAttempt = 0;
+    const partialSpy = vi
+      .spyOn(realClient, 'channel')
+      .mockImplementation((name, opts) => {
+        attachAttempt += 1;
+        // Attempt 1 (channel 1 succeeds), attempt 2 (channel 2 throws on channel()).
+        if (attachAttempt === 2) {
+          throw new Error('simulated_second_channel_create_failure');
+        }
+        const ch = origChannel(name, opts);
+        // Attempt 3 (retry channel 1 succeeds), attempt 4 (retry channel 2 created, then throws on subscribe()).
+        if (attachAttempt === 4) {
+          vi.spyOn(ch, 'subscribe').mockImplementationOnce(() => {
+            throw new Error('simulated_second_channel_subscribe_failure');
+          });
+        }
+        return ch;
+      });
+
+    const backoffTimeouts: Array<() => void> = [];
+    const deterministicTimers = {
+      setInterval(_fn: () => void, _ms: number) {
+        return 1;
+      },
+      clearInterval() {},
+      setTimeout(fn: () => void, _ms: number) {
+        backoffTimeouts.push(fn);
+        return backoffTimeouts.length;
+      },
+      clearTimeout() {},
+    };
+
+    let gen3Refreshes = 0;
+    const gen3 = createWorkspaceLiveManager({
+      sessionGate: gate,
+      workspaceId: WS_1,
+      onRefresh: () => {
+        gen3Refreshes += 1;
+      },
+      timers: deterministicTimers,
+    });
+
+    // Failure A: channel 1 created, channel 2 channel() throws -> channel 1 MUST be removed immediately (zero leaked channels) and retry scheduled!
+    await waitFor(() => {
+      expect(backoffTimeouts).toHaveLength(1);
+      expect(realClient.getChannels()).toHaveLength(0);
+    });
+    expect(gen3.subscribed).toBe(false);
+
+    // Failure B: retry #1 creates channel 1 & channel 2, then channel 2 subscribe() throws -> BOTH channels MUST be removed immediately!
+    backoffTimeouts[0]!();
+    await waitFor(() => {
+      expect(backoffTimeouts).toHaveLength(2);
+      expect(realClient.getChannels()).toHaveLength(0);
+    });
+    expect(gen3.subscribed).toBe(false);
+
+    // Retry #2: both channels attach cleanly and deliver hints!
+    backoffTimeouts[1]!();
+    await waitFor(() => {
+      expect(gen3.subscribed).toBe(true);
+      expect(realClient.getChannels()).toHaveLength(2);
+    });
+
+    const socket3 = sockets.at(-1)!;
+    socket3.deliverFromServer([
+      null,
+      null,
+      `realtime:cswarm-member:${WS_1}:${USER_1}`,
+      'broadcast',
+      { type: 'broadcast', event: 'signal', payload: { v: 1 } },
+    ]);
+    await waitFor(() => {
+      expect(gen3Refreshes).toBe(1);
+    });
+
+    partialSpy.mockRestore();
+    gen3.dispose();
+    await waitFor(() => {
+      expect(realClient.getChannels()).toHaveLength(0);
+      expect(socket3.readyState).toBe(MockPhoenixSocket.CLOSED);
+    });
+    gate.dispose();
+  });
 });

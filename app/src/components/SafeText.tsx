@@ -16,14 +16,29 @@ const HAS_BIDI_OR_CONTROL_RE =
   /[\u0000-\u001F\u007F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
 
 const ALLOWED_LINK_PROTOCOLS = new Set(['https:', 'http:', 'mailto:']);
-const MAX_URL_CANDIDATE_LENGTH = 2048;
+export const MAX_URL_CANDIDATE_LENGTH = 2048;
 
 /**
  * Linear-time URL candidate pattern (no nested quantifiers).
  * Matches an explicit URI scheme followed by non-whitespace/non-delimiter characters.
  */
-const URL_CANDIDATE_RE = /[A-Za-z][A-Za-z0-9+.-]{0,31}:[^\s<>"]+?/g;
 const FULL_URL_TOKEN_RE = /[A-Za-z][A-Za-z0-9+.-]{0,31}:[^\s<>"]+/g;
+
+export interface SafeTextScanMetrics {
+  inlineCodeCharsVisited: number;
+  urlTrimCharsVisited: number;
+  urlTokensInspected: number;
+  urlTokensTrimmed: number;
+}
+
+export function createSafeTextScanMetrics(): SafeTextScanMetrics {
+  return {
+    inlineCodeCharsVisited: 0,
+    urlTrimCharsVisited: 0,
+    urlTokensInspected: 0,
+    urlTokensTrimmed: 0,
+  };
+}
 
 const MENTION_TONE_CLASSES: Record<AvatarTone, string> = {
   purple: 'bg-avatar-purple-bg text-avatar-purple-ink',
@@ -85,28 +100,70 @@ function renderInertText(text: string, keyPrefix: string): ReactNode {
   return nodes;
 }
 
+function isSimpleTrailingUrlPunctuation(ch: string): boolean {
+  return (
+    ch === '.' ||
+    ch === ',' ||
+    ch === ';' ||
+    ch === ':' ||
+    ch === '!' ||
+    ch === '?' ||
+    ch === "'"
+  );
+}
+
 /**
  * Trim trailing prose punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `'`, unmatched `)`/`]`/`}`)
- * from a candidate URL so sentences like `See https://example.com.` link cleanly.
+ * from a candidate URL in bounded linear time (at most one forward delimiter balance pass
+ * plus one backward trim pass) so sentences like `See https://example.com.` link cleanly.
  */
-function trimTrailingUrlPunctuation(raw: string): string {
+export function trimTrailingUrlPunctuation(
+  raw: string,
+  metrics?: SafeTextScanMetrics,
+): string {
   let end = raw.length;
+  let countsReady = false;
+  let parenBalance = 0; // opens - closes in raw[0..end)
+  let bracketBalance = 0;
+  let braceBalance = 0;
+
+  const initCounts = () => {
+    countsReady = true;
+    for (let i = 0; i < end; i += 1) {
+      if (metrics) metrics.urlTrimCharsVisited += 1;
+      const c = raw[i]!;
+      if (c === '(') parenBalance += 1;
+      else if (c === ')') parenBalance -= 1;
+      else if (c === '[') bracketBalance += 1;
+      else if (c === ']') bracketBalance -= 1;
+      else if (c === '{') braceBalance += 1;
+      else if (c === '}') braceBalance -= 1;
+    }
+  };
+
   while (end > 0) {
+    if (metrics) metrics.urlTrimCharsVisited += 1;
     const ch = raw[end - 1]!;
-    if (ch === '.' || ch === ',' || ch === ';' || ch === ':' || ch === '!' || ch === '?' || ch === "'") {
+    if (isSimpleTrailingUrlPunctuation(ch)) {
       end -= 1;
       continue;
     }
     if (ch === ')' || ch === ']' || ch === '}') {
-      const open = ch === ')' ? '(' : ch === ']' ? '[' : '{';
-      const slice = raw.slice(0, end);
-      let opens = 0;
-      let closes = 0;
-      for (let i = 0; i < slice.length; i += 1) {
-        if (slice[i] === open) opens += 1;
-        else if (slice[i] === ch) closes += 1;
+      if (!countsReady) {
+        initCounts();
       }
-      if (closes > opens) {
+      if (ch === ')' && parenBalance < 0) {
+        parenBalance += 1;
+        end -= 1;
+        continue;
+      }
+      if (ch === ']' && bracketBalance < 0) {
+        bracketBalance += 1;
+        end -= 1;
+        continue;
+      }
+      if (ch === '}' && braceBalance < 0) {
+        braceBalance += 1;
         end -= 1;
         continue;
       }
@@ -172,19 +229,20 @@ function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function renderMentionsInPlainText(
-  text: string,
+interface CompiledMentionMatcher {
+  readonly pattern: RegExp;
+  readonly byLowerName: Map<string, ResolvedMention>;
+}
+
+function compileMentionMatcher(
   mentions: readonly ResolvedMention[],
-  matchedMentionKeys: Set<string>,
-  keyPrefix: string,
-): ReactNode {
-  if (!text) return null;
+): CompiledMentionMatcher | null {
   const authorMentions = mentions
     .filter((m) => m.source === 'author' && m.name !== 'Unknown' && m.name.trim().length > 0)
     .sort((a, b) => b.name.length - a.name.length);
 
   if (authorMentions.length === 0) {
-    return renderInertText(text, keyPrefix);
+    return null;
   }
 
   const pattern = new RegExp(
@@ -196,7 +254,22 @@ function renderMentionsInPlainText(
     const key = m.name.toLowerCase();
     if (!byLowerName.has(key)) byLowerName.set(key, m);
   }
+  return { pattern, byLowerName };
+}
 
+function renderMentionsInPlainText(
+  text: string,
+  mentionMatcher: CompiledMentionMatcher | null,
+  matchedMentionKeys: Set<string>,
+  keyPrefix: string,
+): ReactNode {
+  if (!text) return null;
+  if (!mentionMatcher) {
+    return renderInertText(text, keyPrefix);
+  }
+
+  const { pattern, byLowerName } = mentionMatcher;
+  pattern.lastIndex = 0;
   let match = pattern.exec(text);
   if (!match) {
     return renderInertText(text, keyPrefix);
@@ -252,52 +325,59 @@ function renderMentionsInPlainText(
 
 function renderProseRun(
   text: string,
-  mentions: readonly ResolvedMention[],
+  mentionMatcher: CompiledMentionMatcher | null,
   matchedMentionKeys: Set<string>,
   keyPrefix: string,
+  metrics?: SafeTextScanMetrics,
 ): ReactNode {
   if (!text) return null;
 
-  // Quick scan using the non-backtracking token regex.
+  // Quick scan using the linear non-backtracking token regex.
   FULL_URL_TOKEN_RE.lastIndex = 0;
   const nodes: ReactNode[] = [];
   let cursor = 0;
   let idx = 0;
   let match = FULL_URL_TOKEN_RE.exec(text);
-  void URL_CANDIDATE_RE;
 
   while (match) {
     const tokenStart = match.index;
     const rawToken = match[0];
-    const candidate = trimTrailingUrlPunctuation(rawToken);
-    const safeHref = parseSafeLink(candidate);
+    if (metrics) metrics.urlTokensInspected += 1;
 
-    if (safeHref !== null) {
-      if (tokenStart > cursor) {
+    // Enforce the URL length cap BEFORE any trimming or parsing so oversized tokens
+    // do zero punctuation scanning and stay plain text.
+    if (rawToken.length <= MAX_URL_CANDIDATE_LENGTH) {
+      if (metrics) metrics.urlTokensTrimmed += 1;
+      const candidate = trimTrailingUrlPunctuation(rawToken, metrics);
+      const safeHref = parseSafeLink(candidate);
+
+      if (safeHref !== null) {
+        if (tokenStart > cursor) {
+          nodes.push(
+            <Fragment key={`${keyPrefix}-pre-${idx}`}>
+              {renderMentionsInPlainText(
+                text.slice(cursor, tokenStart),
+                mentionMatcher,
+                matchedMentionKeys,
+                `${keyPrefix}-pre-${idx}`,
+              )}
+            </Fragment>,
+          );
+        }
         nodes.push(
-          <Fragment key={`${keyPrefix}-pre-${idx}`}>
-            {renderMentionsInPlainText(
-              text.slice(cursor, tokenStart),
-              mentions,
-              matchedMentionKeys,
-              `${keyPrefix}-pre-${idx}`,
-            )}
-          </Fragment>,
+          <a
+            key={`${keyPrefix}-a-${idx}`}
+            href={safeHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-link underline decoration-link/40 underline-offset-2 transition-quiet hover:text-link-hover [overflow-wrap:anywhere]"
+          >
+            {candidate}
+          </a>,
         );
+        cursor = tokenStart + candidate.length;
+        idx += 1;
       }
-      nodes.push(
-        <a
-          key={`${keyPrefix}-a-${idx}`}
-          href={safeHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-link underline decoration-link/40 underline-offset-2 transition-quiet hover:text-link-hover [overflow-wrap:anywhere]"
-        >
-          {candidate}
-        </a>,
-      );
-      cursor = tokenStart + candidate.length;
-      idx += 1;
     }
 
     match = FULL_URL_TOKEN_RE.exec(text);
@@ -306,7 +386,7 @@ function renderProseRun(
   if (cursor === 0) {
     return renderMentionsInPlainText(
       text,
-      mentions,
+      mentionMatcher,
       matchedMentionKeys,
       `${keyPrefix}-plain`,
     );
@@ -317,7 +397,7 @@ function renderProseRun(
       <Fragment key={`${keyPrefix}-end`}>
         {renderMentionsInPlainText(
           text.slice(cursor),
-          mentions,
+          mentionMatcher,
           matchedMentionKeys,
           `${keyPrefix}-end`,
         )}
@@ -327,86 +407,89 @@ function renderProseRun(
   return nodes;
 }
 
-function renderInlineCodeAndProse(
+export interface InlineCodeSegment {
+  readonly kind: 'prose' | 'code';
+  readonly value: string;
+}
+
+/**
+ * Scan a prose block for same-line, non-empty inline `code` spans in a single forward
+ * pass with strictly bounded O(n) character visits (no repeated newline or closing searches).
+ */
+export function scanInlineCodeSegments(
   text: string,
-  mentions: readonly ResolvedMention[],
-  matchedMentionKeys: Set<string>,
-  keyPrefix: string,
-): ReactNode {
-  if (!text) return null;
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  let idx = 0;
+  metrics?: SafeTextScanMetrics,
+): InlineCodeSegment[] {
+  if (!text) return [];
+  const segments: InlineCodeSegment[] = [];
+  let proseStart = 0;
+  let open = -1;
 
-  while (cursor < text.length) {
-    const open = text.indexOf('`', cursor);
-    if (open === -1) {
-      nodes.push(
-        <Fragment key={`${keyPrefix}-p-${idx}`}>
-          {renderProseRun(
-            text.slice(cursor),
-            mentions,
-            matchedMentionKeys,
-            `${keyPrefix}-p-${idx}`,
-          )}
-        </Fragment>,
-      );
-      break;
-    }
-
-    // Find a matching closing backtick on the same line (non-empty content).
-    const nextNewline = text.indexOf('\n', open + 1);
-    const close = text.indexOf('`', open + 1);
-    const hasInlineClose =
-      close !== -1 &&
-      close > open + 1 &&
-      (nextNewline === -1 || close < nextNewline);
-
-    if (!hasInlineClose) {
-      // Unmatched backtick: treat up to and including it as ordinary prose.
-      const nextCursor = open + 1;
-      nodes.push(
-        <Fragment key={`${keyPrefix}-u-${idx}`}>
-          {renderProseRun(
-            text.slice(cursor, nextCursor),
-            mentions,
-            matchedMentionKeys,
-            `${keyPrefix}-u-${idx}`,
-          )}
-        </Fragment>,
-      );
-      cursor = nextCursor;
-      idx += 1;
+  for (let i = 0; i < text.length; i += 1) {
+    if (metrics) metrics.inlineCodeCharsVisited += 1;
+    const ch = text[i]!;
+    if (ch === '\n') {
+      // Inline code spans never cross a line break; any open backtick remains prose.
+      open = -1;
       continue;
     }
-
-    if (open > cursor) {
-      nodes.push(
-        <Fragment key={`${keyPrefix}-p-${idx}`}>
-          {renderProseRun(
-            text.slice(cursor, open),
-            mentions,
-            matchedMentionKeys,
-            `${keyPrefix}-p-${idx}`,
-          )}
-        </Fragment>,
-      );
+    if (ch === '`') {
+      if (open === -1) {
+        open = i;
+      } else if (i === open + 1) {
+        // Adjacent backtick (empty content): leave the previous backtick in prose and
+        // advance the candidate opening delimiter to this position.
+        open = i;
+      } else {
+        if (open > proseStart) {
+          segments.push({ kind: 'prose', value: text.slice(proseStart, open) });
+        }
+        segments.push({ kind: 'code', value: text.slice(open + 1, i) });
+        proseStart = i + 1;
+        open = -1;
+      }
     }
-
-    const codeText = text.slice(open + 1, close);
-    nodes.push(
-      <code
-        key={`${keyPrefix}-c-${idx}`}
-        className="rounded-tag bg-elevated px-1 py-0.5 font-mono text-sm text-ink-body [overflow-wrap:anywhere]"
-      >
-        {escapeBidiControlsPlain(codeText)}
-      </code>,
-    );
-    cursor = close + 1;
-    idx += 1;
   }
 
-  return nodes;
+  if (proseStart < text.length) {
+    segments.push({ kind: 'prose', value: text.slice(proseStart) });
+  }
+
+  return segments;
+}
+
+function renderInlineCodeAndProse(
+  text: string,
+  mentionMatcher: CompiledMentionMatcher | null,
+  matchedMentionKeys: Set<string>,
+  keyPrefix: string,
+  metrics?: SafeTextScanMetrics,
+): ReactNode {
+  if (!text) return null;
+  const segments = scanInlineCodeSegments(text, metrics);
+  return segments.map((segment, idx) => {
+    if (segment.kind === 'code') {
+      return (
+        <code
+          key={`${keyPrefix}-c-${idx}`}
+          className="rounded-tag bg-elevated px-1 py-0.5 font-mono text-sm text-ink-body [overflow-wrap:anywhere]"
+        >
+          {escapeBidiControlsPlain(segment.value)}
+        </code>
+      );
+    }
+    return (
+      <Fragment key={`${keyPrefix}-p-${idx}`}>
+        {renderProseRun(
+          segment.value,
+          mentionMatcher,
+          matchedMentionKeys,
+          `${keyPrefix}-p-${idx}`,
+          metrics,
+        )}
+      </Fragment>
+    );
+  });
 }
 
 interface TextBlock {
@@ -459,6 +542,8 @@ export interface SafeTextProps {
   readonly text: string;
   readonly mentions?: readonly ResolvedMention[];
   readonly className?: string;
+  /** Optional test seam for asserting bounded linear scanner steps. */
+  readonly _scanMetrics?: SafeTextScanMetrics;
 }
 
 /**
@@ -469,8 +554,14 @@ export interface SafeTextProps {
  *   and bidi/control characters rejected back to plain text.
  * - Bidirectional control characters rendered visibly inert as `[U+XXXX]`.
  */
-export function SafeText({ text, mentions = [], className }: SafeTextProps) {
+export function SafeText({
+  text,
+  mentions = [],
+  className,
+  _scanMetrics,
+}: SafeTextProps) {
   const blocks = splitCodeFences(text);
+  const mentionMatcher = compileMentionMatcher(mentions);
   const matchedMentionKeys = new Set<string>();
 
   const renderedBlocks = blocks.map((block, index) => {
@@ -493,9 +584,10 @@ export function SafeText({ text, mentions = [], className }: SafeTextProps) {
       >
         {renderInlineCodeAndProse(
           block.value,
-          mentions,
+          mentionMatcher,
           matchedMentionKeys,
           `b-${index}`,
+          _scanMetrics,
         )}
       </div>
     );

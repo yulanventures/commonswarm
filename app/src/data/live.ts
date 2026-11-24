@@ -121,39 +121,240 @@ function isDocumentVisible(
   return doc.visibilityState !== 'hidden';
 }
 
-function disconnectClientRealtime(client: RealtimeCapableClient | null): void {
-  if (!client) return;
+type OwnedChannel = Parameters<FeedPushChannelClient['removeChannel']>[0] & {
+  teardown?(): void;
+};
+
+interface OwnedRealtimeSession {
+  readonly owner: symbol;
+  readonly client: RealtimeCapableClient;
+  readonly channels: Set<OwnedChannel>;
+  retired: boolean;
+  cleaned: boolean;
+  cleanupPromise: Promise<void> | null;
+}
+
+/**
+ * Single per-client lifecycle coordinator that serializes channel/socket cleanup
+ * against successor setup on the same realtime client.
+ *
+ * In the pinned `@supabase/realtime-js` (2.111.0):
+ * - `RealtimeClient.channel(topic)` (RealtimeClient.ts:452-465) returns the EXISTING
+ *   channel instance while it is still registered in `this.channels`.
+ * - `RealtimeClient.removeAllChannels()` (RealtimeClient.ts:384-394) awaits every
+ *   channel's `unsubscribe()` and then unconditionally calls `await this.disconnect()`.
+ * - `RealtimeClient.connect()` (RealtimeClient.ts:296-300) returns without connecting
+ *   while `this.isDisconnecting()` is true.
+ *
+ * Serializing teardown and setup through one owner per client prevents a successor from
+ * reusing a retiring channel or being disconnected when a predecessor's teardown finishes.
+ * Tracking `activeOwner` ensures a stale/already-superseded manager can never call
+ * `removeAllChannels()` or `disconnect()` on a successor's socket.
+ * When idle, the first task starts synchronously so teardown immediately initiates leave /
+ * disconnect (e.g. synchronously inside a `pagehide` handler).
+ */
+class RealtimeClientCoordinator {
+  private tail: Promise<void> = Promise.resolve();
+  private inFlight = 0;
+  private activeOwner: symbol | null = null;
+
+  claimOwner(owner: symbol): void {
+    this.activeOwner = owner;
+  }
+
+  isOwner(owner: symbol | null): boolean {
+    return owner !== null && this.activeOwner === owner;
+  }
+
+  releaseOwner(owner: symbol | null): void {
+    if (owner !== null && this.activeOwner === owner) {
+      this.activeOwner = null;
+    }
+  }
+
+  enqueue<T>(task: () => Promise<T> | T): Promise<T> {
+    if (this.inFlight === 0) {
+      this.inFlight += 1;
+      let resultPromise: Promise<T>;
+      try {
+        resultPromise = Promise.resolve(task());
+      } catch (err) {
+        resultPromise = Promise.reject(err);
+      }
+      const done = resultPromise
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .finally(() => {
+          this.inFlight -= 1;
+        });
+      this.tail = done;
+      return resultPromise;
+    }
+
+    this.inFlight += 1;
+    const resultPromise = this.tail.then(() => task());
+    const done = resultPromise
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        this.inFlight -= 1;
+      });
+    this.tail = done;
+    return resultPromise;
+  }
+}
+
+const clientCoordinators = new WeakMap<object, RealtimeClientCoordinator>();
+
+function coordinatorForClient(
+  client: RealtimeCapableClient,
+): RealtimeClientCoordinator {
+  const key = (client.realtime ?? client) as object;
+  let coordinator = clientCoordinators.get(key);
+  if (!coordinator) {
+    coordinator = new RealtimeClientCoordinator();
+    clientCoordinators.set(key, coordinator);
+  }
+  return coordinator;
+}
+
+function getClientChannels(client: RealtimeCapableClient): unknown[] | null {
   const rt = client.realtime;
-  const channels =
-    typeof client.getChannels === 'function'
-      ? client.getChannels()
-      : typeof rt?.getChannels === 'function'
-        ? rt.getChannels()
-        : null;
-  const knownIdle =
+  if (typeof client.getChannels === 'function') {
+    return client.getChannels();
+  }
+  if (typeof rt?.getChannels === 'function') {
+    return rt.getChannels();
+  }
+  return null;
+}
+
+function isClientKnownIdle(client: RealtimeCapableClient): boolean {
+  const rt = client.realtime;
+  const channels = getClientChannels(client);
+  return (
     channels !== null &&
     channels.length === 0 &&
     typeof rt?.connectionState === 'function' &&
     rt.connectionState() === 'closed' &&
     !rt.isConnected?.() &&
-    !rt.isConnecting?.();
-  if (knownIdle) return;
+    !rt.isConnecting?.()
+  );
+}
 
-  try {
-    if (typeof client.removeAllChannels === 'function') {
-      void Promise.resolve(client.removeAllChannels()).catch(() => undefined);
-      return;
-    }
-    if (typeof rt?.removeAllChannels === 'function') {
-      void Promise.resolve(rt.removeAllChannels()).catch(() => undefined);
-      return;
-    }
-    if (typeof rt?.disconnect === 'function') {
-      void Promise.resolve(rt.disconnect()).catch(() => undefined);
-    }
-  } catch {
-    // Isolate teardown errors so synchronous retirement always completes.
+async function removeOwnedChannelsOnly(
+  client: RealtimeCapableClient,
+  coordinator: RealtimeClientCoordinator,
+  owner: symbol | null,
+  uniqueChannels: readonly OwnedChannel[],
+): Promise<void> {
+  if (uniqueChannels.length === 0) {
+    return;
   }
+
+  await Promise.allSettled(
+    uniqueChannels.map((ch) => {
+      try {
+        return Promise.resolve(client.removeChannel(ch));
+      } catch {
+        return Promise.resolve();
+      }
+    }),
+  );
+
+  // In pinned `RealtimeClient.removeChannel` (RealtimeClient.ts:369-377), non-'ok'
+  // unsubscribe skips `channel.teardown()`. Ensure none of our owned channels stay
+  // registered to poison a subsequent `channel(topic)` call.
+  const remaining = getClientChannels(client);
+  if (remaining && uniqueChannels.some((ch) => remaining.includes(ch))) {
+    for (const ch of uniqueChannels) {
+      if (remaining.includes(ch)) {
+        try {
+          ch.teardown?.();
+        } catch {
+          // Ignore teardown errors.
+        }
+      }
+    }
+    const stillRegistered = getClientChannels(client);
+    if (
+      coordinator.isOwner(owner) &&
+      stillRegistered &&
+      uniqueChannels.some((ch) => stillRegistered.includes(ch))
+    ) {
+      coordinator.releaseOwner(owner);
+      const rt = client.realtime;
+      try {
+        if (typeof client.removeAllChannels === 'function') {
+          await Promise.resolve(client.removeAllChannels());
+        } else if (typeof rt?.removeAllChannels === 'function') {
+          await Promise.resolve(rt.removeAllChannels());
+        }
+      } catch {
+        // Isolate cleanup errors.
+      }
+    }
+  }
+}
+
+async function cleanupClientRealtime(
+  client: RealtimeCapableClient,
+  coordinator: RealtimeClientCoordinator,
+  owner: symbol | null,
+  channels: Iterable<OwnedChannel>,
+  disconnectSocket: boolean,
+): Promise<void> {
+  const uniqueChannels = [...new Set(channels)];
+  const rt = client.realtime;
+  const ownsClient = coordinator.isOwner(owner);
+
+  if (disconnectSocket) {
+    if (!ownsClient) {
+      // A successor already owns this client/socket: NEVER call removeAllChannels() or
+      // disconnect(). Only clean up any channels still belonging to this retired session.
+      await removeOwnedChannelsOnly(client, coordinator, owner, uniqueChannels);
+      return;
+    }
+
+    coordinator.releaseOwner(owner);
+
+    if (uniqueChannels.length === 0 && isClientKnownIdle(client)) {
+      return;
+    }
+    try {
+      if (typeof client.removeAllChannels === 'function') {
+        await Promise.resolve(client.removeAllChannels());
+        return;
+      }
+      if (typeof rt?.removeAllChannels === 'function') {
+        await Promise.resolve(rt.removeAllChannels());
+        return;
+      }
+      if (uniqueChannels.length > 0) {
+        await Promise.allSettled(
+          uniqueChannels.map((ch) => {
+            try {
+              return Promise.resolve(client.removeChannel(ch));
+            } catch {
+              return Promise.resolve();
+            }
+          }),
+        );
+      }
+      if (typeof rt?.disconnect === 'function') {
+        await Promise.resolve(rt.disconnect());
+      }
+    } catch {
+      // Isolate teardown errors so queued successor setup can proceed.
+    }
+    return;
+  }
+
+  await removeOwnedChannelsOnly(client, coordinator, owner, uniqueChannels);
 }
 
 /**
@@ -168,9 +369,10 @@ function disconnectClientRealtime(client: RealtimeCapableClient | null): void {
  *   fenced, coalesced refreshes (one in flight, at most one queued).
  * - Falls back to `FEED_POLL_MS` (2s) polling and `FEED_PUSH_BACKOFF_MS` resubscribe
  *   backoff whenever either topic is not `SUBSCRIBED`; reconciles at `FEED_RECONCILE_MS` (30s).
- * - Synchronous teardown on login change, workspace change, access loss, gate closure,
- *   `pagehide`, tab hide, or dispose; any late hint or settlement for a retired
- *   generation is discarded with zero reads and zero socket retention.
+ * - Synchronous callback retirement and single-owner serialized cleanup on login change,
+ *   workspace change, access loss, gate closure, `pagehide`, tab hide, partial attach,
+ *   or dispose; any late hint for a retired generation is discarded with zero reads, and
+ *   no successor reuses a retiring channel or gets disconnected by an old teardown.
  */
 export function createWorkspaceLiveManager(
   options: WorkspaceLiveManagerOptions,
@@ -187,7 +389,8 @@ export function createWorkspaceLiveManager(
 
   let disposed = false;
   let activeGeneration = 0;
-  let activeSub: FeedPushSubscription | null = null;
+  let activeSession: OwnedRealtimeSession | null = null;
+  let activeOwner: symbol | null = null;
   let activeClient: RealtimeCapableClient | null = null;
   let activeFence: Fence | null = null;
 
@@ -202,6 +405,47 @@ export function createWorkspaceLiveManager(
       requireActiveWorkspace: true,
       requireActiveConversation: false,
     });
+  };
+
+  const scheduleSessionCleanup = (
+    client: RealtimeCapableClient | null,
+    session: OwnedRealtimeSession | null,
+    owner: symbol | null,
+    disconnectSocket: boolean,
+  ): Promise<void> => {
+    if (session) {
+      session.retired = true;
+      const coordinator = coordinatorForClient(session.client);
+      if (session.cleaned) {
+        if (!disconnectSocket) {
+          return session.cleanupPromise ?? Promise.resolve();
+        }
+        return coordinator.enqueue(() =>
+          cleanupClientRealtime(session.client, coordinator, session.owner, [], true),
+        );
+      }
+      session.cleaned = true;
+      const cleanup = coordinator.enqueue(() =>
+        cleanupClientRealtime(
+          session.client,
+          coordinator,
+          session.owner,
+          session.channels,
+          disconnectSocket,
+        ),
+      );
+      session.cleanupPromise = cleanup;
+      return cleanup;
+    }
+
+    if (disconnectSocket && client && owner) {
+      const coordinator = coordinatorForClient(client);
+      return coordinator.enqueue(() =>
+        cleanupClientRealtime(client, coordinator, owner, [], true),
+      );
+    }
+
+    return Promise.resolve();
   };
 
   const controller = new FeedPushController({
@@ -228,131 +472,142 @@ export function createWorkspaceLiveManager(
       // Fence check before acquiring token.
       const auth = await sessionGate.acquireAccessToken();
 
-      // Fence check after acquiring token, before setAuth / subscribe.
-      if (
-        disposed ||
-        capturedGen !== activeGeneration ||
-        !auth ||
-        sessionGate.isHidden ||
-        !isDocumentVisible(doc) ||
-        !sessionGate.fenceTracker.isCurrent(capturedFence, {
-          loginIdentity: auth.identity,
+      const isCapturedStillCurrent = (): boolean =>
+        !disposed &&
+        capturedGen === activeGeneration &&
+        Boolean(auth) &&
+        !sessionGate.isHidden &&
+        isDocumentVisible(doc) &&
+        sessionGate.fenceTracker.isCurrent(capturedFence, {
+          loginIdentity: auth!.identity,
           requireActiveWorkspace: true,
           requireActiveConversation: false,
-        })
-      ) {
+        });
+
+      // Fence check after acquiring token, before entering the client coordinator.
+      if (!isCapturedStillCurrent() || !auth) {
         throw new Error('live_fence_retired_after_token');
       }
 
-      if (typeof rawClient.realtime?.setAuth === 'function') {
-        await rawClient.realtime.setAuth(auth.accessToken);
-      }
+      const coordinator = coordinatorForClient(rawClient);
 
-      // Fence check again immediately after setAuth, before attaching channels.
-      if (
-        disposed ||
-        capturedGen !== activeGeneration ||
-        sessionGate.isHidden ||
-        !isDocumentVisible(doc) ||
-        !sessionGate.fenceTracker.isCurrent(capturedFence, {
-          loginIdentity: auth.identity,
-          requireActiveWorkspace: true,
-          requireActiveConversation: false,
-        })
-      ) {
-        throw new Error('live_fence_retired_after_set_auth');
-      }
-
-      const attachedChannels: Parameters<FeedPushChannelClient['removeChannel']>[0][] = [];
-      const trackingClient: FeedPushChannelClient = {
-        channel(name, opts) {
-          const ch = rawClient.channel(name, opts);
-          attachedChannels.push(ch);
-          return ch;
-        },
-        removeChannel(ch) {
-          return rawClient.removeChannel(ch);
-        },
-      };
-
-      const sub = attachFeedChannels(
-        trackingClient,
-        wsId,
-        auth.identity.userId,
-        () => {
-          // Hint only: zero payload read; strictly fenced to captured generation & login.
-          if (
-            disposed ||
-            capturedGen !== activeGeneration ||
-            sessionGate.isHidden ||
-            !isDocumentVisible(doc) ||
-            !sessionGate.fenceTracker.isCurrent(capturedFence, {
-              loginIdentity: auth.identity,
-              requireActiveWorkspace: true,
-              requireActiveConversation: false,
-            })
-          ) {
-            return;
-          }
-          onEvent();
-        },
-        (status) => {
-          if (
-            disposed ||
-            capturedGen !== activeGeneration ||
-            sessionGate.isHidden ||
-            !isDocumentVisible(doc) ||
-            !sessionGate.fenceTracker.isCurrent(capturedFence, {
-              loginIdentity: auth.identity,
-              requireActiveWorkspace: true,
-              requireActiveConversation: false,
-            })
-          ) {
-            return;
-          }
-          onStatus(status);
-        },
-      );
-
-      let syncCleaned = false;
-      const syncUnsubscribe = (): void => {
-        if (syncCleaned) return;
-        syncCleaned = true;
-        for (const ch of attachedChannels) {
-          try {
-            void Promise.resolve(rawClient.removeChannel(ch)).catch(() => undefined);
-          } catch {
-            // Isolate channel removal errors.
-          }
+      return await coordinator.enqueue(async () => {
+        if (!isCapturedStillCurrent()) {
+          throw new Error('live_fence_retired_before_setup');
         }
-        void sub.unsubscribe().catch(() => undefined);
-      };
 
-      // Re-verify synchronously in case teardown ran re-entrantly during subscribe().
-      if (
-        disposed ||
-        capturedGen !== activeGeneration ||
-        sessionGate.isHidden ||
-        !isDocumentVisible(doc) ||
-        !sessionGate.fenceTracker.isCurrent(capturedFence, {
-          loginIdentity: auth.identity,
-          requireActiveWorkspace: true,
-          requireActiveConversation: false,
-        })
-      ) {
-        syncUnsubscribe();
-        throw new Error('live_fence_retired_during_attach');
-      }
+        if (typeof rawClient.realtime?.setAuth === 'function') {
+          await rawClient.realtime.setAuth(auth.accessToken);
+        }
 
-      const wrappedSub: FeedPushSubscription = {
-        async unsubscribe() {
-          syncUnsubscribe();
-        },
-      };
+        // Fence check again immediately after setAuth, before attaching channels.
+        if (!isCapturedStillCurrent()) {
+          throw new Error('live_fence_retired_after_set_auth');
+        }
 
-      activeSub = wrappedSub;
-      activeClient = rawClient;
-      return wrappedSub;
+        // Own the session and every channel from the moment each channel is created.
+        const owner = Symbol('workspace-live-owner');
+        const session: OwnedRealtimeSession = {
+          owner,
+          client: rawClient,
+          channels: new Set<OwnedChannel>(),
+          retired: false,
+          cleaned: false,
+          cleanupPromise: null,
+        };
+        coordinator.claimOwner(owner);
+        activeSession = session;
+        activeOwner = owner;
+        activeClient = rawClient;
+
+        const trackingClient: FeedPushChannelClient = {
+          channel(name, opts) {
+            if (session.retired || !isCapturedStillCurrent()) {
+              throw new Error('live_fence_retired_during_attach');
+            }
+            const ch = rawClient.channel(name, opts) as OwnedChannel;
+            session.channels.add(ch);
+            return ch;
+          },
+          removeChannel() {
+            // Cleanup is owned exclusively by the coordinator, never by duplicate channel-level calls.
+            return Promise.resolve();
+          },
+        };
+
+        try {
+          attachFeedChannels(
+            trackingClient,
+            wsId,
+            auth.identity.userId,
+            () => {
+              // Hint only: zero payload read; strictly fenced to captured generation & login.
+              if (session.retired || !isCapturedStillCurrent()) {
+                return;
+              }
+              onEvent();
+            },
+            (status) => {
+              if (session.retired || !isCapturedStillCurrent()) {
+                return;
+              }
+              onStatus(status);
+            },
+          );
+        } catch (attachError) {
+          // Clean up any already-created channels immediately within this serialized turn
+          // so a partial attach (e.g. failure of the second attach) cannot outlive a retry.
+          session.retired = true;
+          if (activeSession === session) {
+            activeSession = null;
+          }
+          if (!session.cleaned) {
+            session.cleaned = true;
+            const cleanup = cleanupClientRealtime(
+              rawClient,
+              coordinator,
+              session.owner,
+              session.channels,
+              false,
+            );
+            session.cleanupPromise = cleanup;
+            await cleanup;
+          }
+          throw attachError;
+        }
+
+        // Re-verify synchronously in case teardown ran re-entrantly during subscribe().
+        if (session.retired || !isCapturedStillCurrent()) {
+          session.retired = true;
+          if (activeSession === session) {
+            activeSession = null;
+          }
+          if (!session.cleaned) {
+            session.cleaned = true;
+            const cleanup = cleanupClientRealtime(
+              rawClient,
+              coordinator,
+              session.owner,
+              session.channels,
+              false,
+            );
+            session.cleanupPromise = cleanup;
+            await cleanup;
+          }
+          throw new Error('live_fence_retired_during_attach');
+        }
+
+        const wrappedSub: FeedPushSubscription = {
+          unsubscribe() {
+            if (activeSession === session) {
+              activeSession = null;
+            }
+            return scheduleSessionCleanup(rawClient, session, session.owner, false);
+          },
+        };
+
+        return wrappedSub;
+      });
     },
     refresh: async () => {
       const capturedGen = activeGeneration;
@@ -364,22 +619,25 @@ export function createWorkspaceLiveManager(
   });
 
   const teardown = (opts: { disconnectSocket?: boolean } = {}): void => {
+    const disconnectSocket = Boolean(opts.disconnectSocket);
     activeGeneration += 1;
     activeFence = null;
-    const subToDrop = activeSub;
-    const clientToDrop =
-      activeClient ??
-      (sessionGate.client as (SupabaseClient & RealtimeCapableClient) | null);
-    activeSub = null;
-    activeClient = null;
+    const sessionToDrop = activeSession;
+    const ownerToDrop = sessionToDrop?.owner ?? activeOwner;
+    const clientToDrop = sessionToDrop?.client ?? activeClient;
+    activeSession = null;
+    if (disconnectSocket) {
+      activeOwner = null;
+      activeClient = null;
+    }
 
     controller.stop();
-    if (subToDrop) {
-      void subToDrop.unsubscribe().catch(() => undefined);
-    }
-    if (opts.disconnectSocket) {
-      disconnectClientRealtime(clientToDrop);
-    }
+    void scheduleSessionCleanup(
+      clientToDrop,
+      sessionToDrop,
+      ownerToDrop,
+      disconnectSocket,
+    ).catch(() => undefined);
   };
 
   const startIfEligible = (): void => {

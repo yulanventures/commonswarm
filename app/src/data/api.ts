@@ -593,6 +593,18 @@ export async function readConversationHistory(
     throw new StaleFenceError();
   }
 
+  // Classify a current 404 from its HTTP status alone before awaiting or decoding the body
+  // so a stalled or malformed 404 body immediately retires the conversation with the
+  // existing uniform unavailable outcome.
+  if (response.status === 404) {
+    try {
+      void response.body?.cancel().catch(() => undefined);
+    } catch {
+      // Ignore stream cancellation failures; status alone retires the conversation.
+    }
+    throw new ConversationNotFoundError();
+  }
+
   let raw: unknown;
   try {
     raw = await response.json();
@@ -607,12 +619,8 @@ export async function readConversationHistory(
     throw new ApiDecodeError('conversation_history_malformed');
   }
 
-  if (response.status === 404 || raw.error === 'conversation_not_found') {
-    throw new ConversationNotFoundError(
-      typeof raw.message === 'string' && raw.message.trim()
-        ? raw.message.trim()
-        : undefined,
-    );
+  if (raw.error === 'conversation_not_found') {
+    throw new ConversationNotFoundError();
   }
 
   if (response.status !== 200) {
