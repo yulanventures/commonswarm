@@ -306,6 +306,14 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         return;
       }
 
+      if (pathname === "/bfcache-control") {
+        // Match production /next HTML Cache-Control ("no-cache", never "no-store") so the
+        // plain-page control proves the harness + header policy can perform a persisted restore.
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+        res.end("<!doctype html><html><head><meta charset=\"utf-8\"><title>BFCache Control</title></head><body><h1>Plain Control</h1></body></html>");
+        return;
+      }
+
       if (pathname === "/away") {
         // Cache-Control must NOT be no-store so the browser stays eligible for back-forward cache.
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate" });
@@ -1660,16 +1668,167 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
 
     // ═══════════════════════════════════════════════════════════════════════════
     // (e) Back / history-cache (bfcache) restore in /next:
-    //     - Uses Chromium with --disable-back-forward-cache stripped via chrome.ts
-    //     - Must observe a REAL persisted pageshow (event.persisted === true);
-    //       fails explicitly with CDP notRestoredExplanations if reloaded instead
-    //     - Asserts zero old private content painted on pagehide, on pageshow
-    //       capture (before pageshow JS runs), and while revalidation is held
-    //     - Releases revalidation and asserts the fresh read paints
+    //     - Uses Chromium through chrome.ts with --disable-back-forward-cache stripped
+    //       and allowlisted --enable-bfcache enabled (enables headless_shell delegate)
+    //     - Navigates away cross-site to a second loopback server (`http://localhost:<port>/away`)
+    //       so Chromium swaps BrowsingInstances instead of reporting BrowsingInstanceNotSwapped
+    //     - First runs a PLAIN-PAGE control (`/bfcache-control`, served with production
+    //       `Cache-Control: no-cache`) to prove the harness can perform a persisted restore;
+    //       fails with a distinct "harness cannot perform a persisted restore" message if not
+    //     - Then proves `/next` observes a REAL persisted pageshow (`event.persisted === true`),
+    //       paints zero old private content on pagehide, pageshow capture, pageshow bubble, and
+    //       while revalidation is held, then paints the fresh read
+    //     - On any failure, dumps CDP `Page.getNavigationHistory` and `Page.backForwardCacheNotUsed`
     // ═══════════════════════════════════════════════════════════════════════════
     {
-      const bfcacheBrowser = await launchPlaywrightChromium(chromium, { enableBfcache: true });
+      const awayHandler = (req: IncomingMessage, res: ServerResponse) => {
+        const reqUrl = new URL(req.url ?? "/", "http://localhost");
+        if (reqUrl.pathname === "/away") {
+          // Separate site (`localhost` vs `127.0.0.1`) and non-`no-store` caching so Chromium
+          // swaps BrowsingInstances and keeps the prior document eligible for bfcache.
+          res.writeHead(200, {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "public, max-age=0, must-revalidate",
+          });
+          res.end('<!doctype html><html><head><meta charset="utf-8"><title>Away</title></head><body><h1>Away</h1></body></html>');
+          return;
+        }
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.end("not found");
+      };
+      const awayServer = createServer(awayHandler);
+      await new Promise<void>((r) => awayServer.listen(0, "127.0.0.1", r));
+      const awayPort = (awayServer.address() as AddressInfo).port;
+      // Best-effort IPv6 loopback listener on the same ephemeral port so `http://localhost:<awayPort>`
+      // connects immediately whether the runner resolves `localhost` to ::1 or 127.0.0.1 first.
+      let awayServerV6: ReturnType<typeof createServer> | null = null;
       try {
+        const v6 = createServer(awayHandler);
+        await new Promise<void>((resolveV6, rejectV6) => {
+          v6.once("error", rejectV6);
+          v6.listen({ host: "::1", port: awayPort, ipv6Only: true }, () => {
+            v6.off("error", rejectV6);
+            resolveV6();
+          });
+        });
+        awayServerV6 = v6;
+      } catch {
+        // IPv6 loopback unavailable or port occupied on ::1; IPv4 127.0.0.1 still serves localhost.
+      }
+      const awayOrigin = `http://localhost:${awayPort}`;
+
+      const bfcacheBrowser = await launchPlaywrightChromium(chromium, {
+        enableBfcache: true,
+        extraArgs: ["--enable-bfcache"],
+      });
+      try {
+        // ── (e0) Plain-page control: prove this harness can do a persisted bfcache restore ──
+        {
+          const controlContext = await bfcacheBrowser.newContext({ viewport: { width: 1280, height: 900 } });
+          await controlContext.routeWebSocket("wss://api.commonswarm.com/**", (ws) => {
+            ws.close();
+          });
+          await controlContext.route("https://api.commonswarm.com/**", async (route) => {
+            await route.fulfill({ status: 404, body: "" }).catch(() => undefined);
+          });
+          const controlPage = await controlContext.newPage();
+          const controlCdp = await controlContext.newCDPSession(controlPage);
+          const controlBfcacheNotUsed: Array<Record<string, unknown>> = [];
+          await controlCdp.send("Page.enable");
+          controlCdp.on("Page.backForwardCacheNotUsed", (ev) => {
+            controlBfcacheNotUsed.push(ev as unknown as Record<string, unknown>);
+          });
+          try {
+            await controlPage.goto(`${origin}/bfcache-control`, { waitUntil: "load" });
+            await controlPage.evaluate(() => {
+              const log: Array<{ type: string; persisted: boolean }> = [];
+              (window as unknown as { __bfcacheControlLog?: Array<{ type: string; persisted: boolean }> }).__bfcacheControlLog = log;
+              window.addEventListener("pagehide", (ev) => {
+                log.push({ type: "pagehide", persisted: (ev as PageTransitionEvent).persisted });
+              });
+              window.addEventListener("pageshow", (ev) => {
+                log.push({ type: "pageshow", persisted: (ev as PageTransitionEvent).persisted });
+              });
+            });
+
+            await controlPage.goto(`${awayOrigin}/away`, { waitUntil: "load" });
+            const controlAwayDeadline = Date.now() + 10_000;
+            while (Date.now() < controlAwayDeadline) {
+              const onAway = await controlPage
+                .evaluate((expected: string) => location.href.startsWith(expected), `${awayOrigin}/away`)
+                .catch(() => false);
+              if (onAway) break;
+              await new Promise((r) => setTimeout(r, 30));
+            }
+
+            const controlNavHistoryBeforeBack = await controlCdp.send("Page.getNavigationHistory");
+            const controlPrevEntry = controlNavHistoryBeforeBack.entries[controlNavHistoryBeforeBack.currentIndex - 1];
+            assert.ok(
+              controlPrevEntry && controlPrevEntry.url.startsWith(`${origin}/bfcache-control`),
+              `harness cannot perform a persisted restore: unexpected navigation history before Back:\n${JSON.stringify(
+                { controlNavHistoryBeforeBack, controlBfcacheNotUsed },
+                null,
+                2,
+              )}`,
+            );
+            await controlCdp.send("Page.navigateToHistoryEntry", { entryId: controlPrevEntry.id });
+
+            const controlBackDeadline = Date.now() + 15_000;
+            while (Date.now() < controlBackDeadline) {
+              const returned = await controlPage
+                .evaluate(() => {
+                  if (location.pathname !== "/bfcache-control") return false;
+                  const log = (window as unknown as { __bfcacheControlLog?: Array<{ type: string; persisted: boolean }> }).__bfcacheControlLog;
+                  if (Array.isArray(log)) {
+                    return log.some((entry) => entry.type === "pageshow");
+                  }
+                  return document.readyState === "complete";
+                })
+                .catch(() => false);
+              if (returned) break;
+              await new Promise((r) => setTimeout(r, 30));
+            }
+
+            const controlObservation = await controlPage.evaluate(() => {
+              const log = (window as unknown as { __bfcacheControlLog?: Array<{ type: string; persisted: boolean }> }).__bfcacheControlLog ?? null;
+              const nav = performance.getEntriesByType("navigation")[0] as
+                | (PerformanceNavigationTiming & { notRestoredReasons?: unknown })
+                | undefined;
+              return {
+                href: location.href,
+                log,
+                navType: nav?.type ?? null,
+                notRestoredReasons: nav?.notRestoredReasons ?? null,
+              };
+            });
+            const controlPageshow = controlObservation.log?.find((entry) => entry.type === "pageshow");
+            if (!Array.isArray(controlObservation.log) || controlPageshow?.persisted !== true) {
+              await new Promise((r) => setTimeout(r, 50));
+              const controlNavHistoryAfterBack = await controlCdp
+                .send("Page.getNavigationHistory")
+                .catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+              assert.fail(
+                `harness cannot perform a persisted restore (plain-page control did not observe pageshow.persisted === true):\n${JSON.stringify(
+                  {
+                    origin,
+                    awayOrigin,
+                    controlObservation,
+                    navHistoryBeforeBack: controlNavHistoryBeforeBack,
+                    navHistoryAfterBack: controlNavHistoryAfterBack,
+                    bfcacheNotUsed: controlBfcacheNotUsed,
+                  },
+                  null,
+                  2,
+                )}`,
+              );
+            }
+          } finally {
+            await controlCdp.detach().catch(() => undefined);
+            await controlContext.close();
+          }
+        }
+
+        // ── (e1) Real /next bfcache restore and revalidation witness ──
         const sidBf = "sid-e-bfcache";
         let readPass = 1;
         let holdRevalidateUser = false;
@@ -1748,13 +1907,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 async () => {
                   if (ctx.getInFlightApiRequests() > 0) return false;
                   const lockBusy = await tabB
-                    .evaluate(async (lockName: string) => {
+                    .evaluate(async () => {
                       const q = await navigator.locks.query();
-                      return (
-                        (q.held?.some((l) => l.name === lockName) ?? false) ||
-                        (q.pending?.some((l) => l.name === lockName) ?? false)
-                      );
-                    }, LOCK_NAME)
+                      return (q.held?.length ?? 0) > 0 || (q.pending?.length ?? 0) > 0;
+                    })
                     .catch(() => true);
                   return !lockBusy;
                 },
@@ -1800,12 +1956,16 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 }
               });
 
-              // Navigate away to a clean same-origin page (Cache-Control: public, max-age=0, must-revalidate).
-              ctx.setStep("e-navigate-away");
-              await tabB.goto(`${origin}/away`, { waitUntil: "load" });
+              // Navigate away cross-site (`http://localhost:<awayPort>/away` vs `http://127.0.0.1:<port>/next`)
+              // so Chromium swaps BrowsingInstances (top-level user-style navigation via page.goto).
+              ctx.setStep("e-navigate-away-cross-site");
+              await tabB.goto(`${awayOrigin}/away`, { waitUntil: "load" });
               await ctx.waitFor(
-                "Tab B landed on /away",
-                () => tabB.evaluate(() => location.pathname === "/away").catch(() => false),
+                "Tab B landed on cross-site /away",
+                () =>
+                  tabB
+                    .evaluate((expected: string) => location.href.startsWith(expected), `${awayOrigin}/away`)
+                    .catch(() => false),
                 pages,
               );
 
@@ -1814,12 +1974,20 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
               holdRevalidateUser = true;
 
               ctx.setStep("e-history-back-from-away");
-              await tabB.evaluate(() => {
-                window.history.back();
-              });
+              const navHistoryBeforeBack = await cdp.send("Page.getNavigationHistory");
+              const prevEntry = navHistoryBeforeBack.entries[navHistoryBeforeBack.currentIndex - 1];
+              assert.ok(
+                prevEntry && prevEntry.url.startsWith(`${origin}/next`),
+                `Expected /next history entry before Back:\n${JSON.stringify(
+                  { navHistoryBeforeBack, bfcacheNotUsed },
+                  null,
+                  2,
+                )}`,
+              );
+              await cdp.send("Page.navigateToHistoryEntry", { entryId: prevEntry.id });
 
               await ctx.waitFor(
-                "Tab B returned to /next via history.back()",
+                "Tab B returned to /next via Back",
                 () =>
                   tabB
                     .evaluate(() => {
@@ -1859,16 +2027,25 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 };
               });
 
-              const bfcacheDiag = async () =>
-                JSON.stringify(
+              const bfcacheDiag = async () => {
+                await new Promise((r) => setTimeout(r, 50));
+                const navHistoryAfterBack = await cdp
+                  .send("Page.getNavigationHistory")
+                  .catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+                return JSON.stringify(
                   {
+                    origin,
+                    awayOrigin,
                     backObservation,
+                    navHistoryBeforeBack,
+                    navHistoryAfterBack,
                     bfcacheNotUsed,
                     diagnostics: JSON.parse(await ctx.dumpDiagnostics(pages)),
                   },
                   null,
                   2,
                 );
+              };
 
               assert.ok(
                 Array.isArray(backObservation.log),
@@ -1964,6 +2141,12 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         );
       } finally {
         await bfcacheBrowser.close();
+        awayServer.closeAllConnections();
+        await new Promise<void>((r) => awayServer.close(() => r()));
+        if (awayServerV6) {
+          awayServerV6.closeAllConnections();
+          await new Promise<void>((r) => awayServerV6.close(() => r()));
+        }
       }
     }
   } finally {

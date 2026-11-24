@@ -5,6 +5,7 @@ import { extname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { transform as esbuildTransform } from "esbuild";
 import ts from "typescript";
+import { ALLOWED_PLAYWRIGHT_EXTRA_ARGS, buildPlaywrightLaunchOptions } from "./chrome.js";
 
 const repoRoot = resolve(import.meta.dirname, "../..");
 const launcher = join(repoRoot, "site/tests/chrome.ts");
@@ -532,5 +533,26 @@ test("Playwright page-evaluated callbacks in site tests contain no transpiled __
     violations,
     [],
     `page-evaluated callbacks must not contain transpiled __name helpers:\n${violations.join("\n")}`,
+  );
+});
+
+test("shared Playwright launcher extra-arg allowlist admits only reviewed navigation-cache flags", () => {
+  // Deliberately pinned allowlist: each flag changes only page-navigation caching (bfcache),
+  // never sandboxing, keychain/profile isolation, or network boundaries.
+  assert.deepEqual([...ALLOWED_PLAYWRIGHT_EXTRA_ARGS].sort(), [
+    "--enable-bfcache",
+    "--enable-features=BackForwardCache",
+  ]);
+  const bfcache = buildPlaywrightLaunchOptions({ enableBfcache: true, extraArgs: ["--enable-bfcache"] });
+  assert.deepEqual(bfcache.args, [
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--no-sandbox",
+    "--enable-bfcache",
+  ]);
+  assert.deepEqual(bfcache.ignoreDefaultArgs, ["--disable-back-forward-cache"]);
+  assert.throws(
+    () => buildPlaywrightLaunchOptions({ extraArgs: ["--disable-web-security"] }),
+    /disallowed Playwright launch arg/u,
   );
 });

@@ -259,6 +259,50 @@ async function launchAttempts(
   throw new Error(`${reason} (${details}); URL/flags: ${JSON.stringify(args)}${output ? `\n${output}` : ""}`);
 }
 
+/**
+ * Extra Chromium flags permitted through `launchPlaywrightChromium` for test scenarios.
+ * Each flag affects only page-navigation caching — never sandboxing, keychain/profile
+ * isolation, or network boundaries:
+ * - `--enable-bfcache`: enables HeadlessWebContentsImpl's back-forward cache delegate in
+ *   chromium-headless-shell (`IsBackForwardCacheSupported`), which otherwise returns false
+ *   and reports `BackForwardCacheDisabledForDelegate`.
+ * - `--enable-features=BackForwardCache`: explicitly enables Chromium's BackForwardCache
+ *   feature flag when needed without altering sandboxing or network behavior.
+ */
+export const ALLOWED_PLAYWRIGHT_EXTRA_ARGS: ReadonlySet<string> = new Set([
+  "--enable-bfcache",
+  "--enable-features=BackForwardCache",
+]);
+
+export interface PlaywrightChromiumOptions {
+  readonly enableBfcache?: boolean;
+  readonly extraArgs?: readonly string[];
+}
+
+export function buildPlaywrightLaunchOptions(
+  options?: PlaywrightChromiumOptions,
+): { args: string[]; ignoreDefaultArgs?: string[] } {
+  const extra = options?.extraArgs ?? [];
+  for (const flag of extra) {
+    if (!ALLOWED_PLAYWRIGHT_EXTRA_ARGS.has(flag)) {
+      throw new Error(
+        `AGENTS.md Browser work: disallowed Playwright launch arg ${JSON.stringify(flag)}; only allowlisted navigation-cache flags are permitted`,
+      );
+    }
+  }
+  const args = [
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--no-sandbox",
+    ...(options?.enableBfcache ? ["--enable-bfcache"] : []),
+    ...extra,
+  ];
+  return {
+    args: [...new Set(args)],
+    ...(options?.enableBfcache ? { ignoreDefaultArgs: ["--disable-back-forward-cache"] } : {}),
+  };
+}
+
 /** The interactive Playwright run (the mobile audit) launches through here: CI-gated, the checked
  *  bundled headless shell from findChrome(), the shared password-store, keychain and sandbox flags,
  *  and Playwright's own throwaway profile. Callers pass the dynamically imported `chromium`. */
@@ -271,13 +315,13 @@ export async function launchPlaywrightChromium<Browser>(
       ignoreDefaultArgs?: string[];
     }): Promise<Browser>;
   },
-  options?: { readonly enableBfcache?: boolean },
+  options?: PlaywrightChromiumOptions,
 ): Promise<Browser> {
   requireBrowserTests();
+  const launchOptions = buildPlaywrightLaunchOptions(options);
   return await chromium.launch({
     headless: true,
     executablePath: await findChrome(),
-    args: ["--password-store=basic", "--use-mock-keychain", "--no-sandbox"],
-    ...(options?.enableBfcache ? { ignoreDefaultArgs: ["--disable-back-forward-cache"] } : {}),
+    ...launchOptions,
   });
 }
