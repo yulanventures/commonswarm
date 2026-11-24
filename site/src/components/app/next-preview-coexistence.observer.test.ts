@@ -1764,6 +1764,8 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
 
               // Record pagehide and pageshow (capture BEFORE app's pageshow handler, and bubble AFTER).
               // Deliberately registers NO unload or beforeunload listener.
+              // Keep page-evaluated callbacks free of named inner functions/bindings so tsx's esbuild
+              // __name(...) helper is never serialized into the browser page.
               ctx.setStep("e-install-bfcache-transition-observer");
               await tabB.evaluate(() => {
                 type TransitionSnapshot = {
@@ -1775,30 +1777,27 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 };
                 const log: TransitionSnapshot[] = [];
                 (window as unknown as { __bfcacheLog?: TransitionSnapshot[] }).__bfcacheLog = log;
-                const record = (type: string, persisted: boolean) => {
-                  const root = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
-                  const checking = document.querySelector('[data-testid="session-checking-screen"]');
-                  log.push({
-                    type,
-                    persisted,
-                    hasVisiblePrivateRoot: Boolean(root && !root.hidden),
-                    hasCheckingScreen: Boolean(checking),
-                    bodyText: (document.body?.innerText ?? "").slice(0, 600),
-                  });
-                };
-                window.addEventListener("pagehide", (ev) => {
-                  record("pagehide", ev.persisted);
-                });
-                window.addEventListener(
-                  "pageshow",
-                  (ev) => {
-                    record("pageshow:capture", ev.persisted);
-                  },
-                  true,
-                );
-                window.addEventListener("pageshow", (ev) => {
-                  record("pageshow:bubble", ev.persisted);
-                });
+                for (const [eventName, label, capture] of [
+                  ["pagehide", "pagehide", false],
+                  ["pageshow", "pageshow:capture", true],
+                  ["pageshow", "pageshow:bubble", false],
+                ] as const) {
+                  window.addEventListener(
+                    eventName,
+                    (ev) => {
+                      const root = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+                      const checking = document.querySelector('[data-testid="session-checking-screen"]');
+                      log.push({
+                        type: label,
+                        persisted: (ev as PageTransitionEvent).persisted,
+                        hasVisiblePrivateRoot: Boolean(root && !root.hidden),
+                        hasCheckingScreen: Boolean(checking),
+                        bodyText: (document.body?.innerText ?? "").slice(0, 600),
+                      });
+                    },
+                    capture,
+                  );
+                }
               });
 
               // Navigate away to a clean same-origin page (Cache-Control: public, max-age=0, must-revalidate).

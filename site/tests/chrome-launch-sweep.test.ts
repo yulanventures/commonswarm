@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
+import { transform as esbuildTransform } from "esbuild";
 import ts from "typescript";
 
 const repoRoot = resolve(import.meta.dirname, "../..");
@@ -382,4 +383,154 @@ test("repository browser launches use the shared safety helpers and gated test r
   }
   assert.ok(browserFiles.size > 0, "the sweep must find browser callers");
   assert.deepEqual(violations, [], `browser safety violations:\n${violations.join("\n")}`);
+});
+
+const pageEvalCallbackArgIndex = new Map<string, number>([
+  ["evaluate", 0],
+  ["evaluateHandle", 0],
+  ["evaluateAll", 0],
+  ["addInitScript", 0],
+  ["waitForFunction", 0],
+  ["$eval", 1],
+  ["$$eval", 1],
+]);
+
+const pageEvalCallPattern = /\.(?:evaluate|evaluateHandle|evaluateAll|addInitScript|waitForFunction|\$eval|\$\$eval)\s*\(/u;
+
+/**
+ * Transpile TypeScript with esbuild `keepNames: true` (matching tsx) and fail if any function
+ * serialized into a browser page by Playwright contains a transpiled `__name(...)` call, which
+ * only exists in Node module scope and throws `ReferenceError: __name is not defined` in the page.
+ */
+async function pageEvalNameHelperViolations(source: string, filename = "observer.test.ts"): Promise<string[]> {
+  const { code } = await esbuildTransform(source, {
+    loader: extname(filename) === ".tsx" ? "tsx" : "ts",
+    format: "esm",
+    keepNames: true,
+    target: `node${process.versions.node}`,
+    sourcefile: filename,
+  });
+  const tree = ts.createSourceFile(filename, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const unwrap = (node: ts.Expression): ts.Expression => {
+    if (ts.isParenthesizedExpression(node)) return unwrap(node.expression);
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "__name" &&
+      node.arguments[0]
+    ) {
+      return unwrap(node.arguments[0]);
+    }
+    return node;
+  };
+  const namedFunctions = new Map<string, ts.FunctionLikeDeclaration[]>();
+  const recordFunction = (name: string, fn: ts.FunctionLikeDeclaration): void => {
+    const list = namedFunctions.get(name);
+    if (list) list.push(fn);
+    else namedFunctions.set(name, [fn]);
+  };
+  const collectFunctions = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      recordFunction(node.name.text, node);
+    } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const init = unwrap(node.initializer);
+      if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+        recordFunction(node.name.text, init);
+      }
+    }
+    ts.forEachChild(node, collectFunctions);
+  };
+  collectFunctions(tree);
+
+  const collectInnerNameHelpers = (fn: ts.FunctionLikeDeclaration): string[] => {
+    const names: string[] = [];
+    const scan = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "__name") {
+        const label = node.arguments[1] && ts.isStringLiteralLike(node.arguments[1])
+          ? node.arguments[1].text
+          : "<anonymous>";
+        names.push(label);
+      }
+      ts.forEachChild(node, scan);
+    };
+    for (const parameter of fn.parameters) scan(parameter);
+    if (fn.body) scan(fn.body);
+    return names;
+  };
+
+  const violations: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const method = node.expression.name.text;
+      const argIndex = pageEvalCallbackArgIndex.get(method);
+      if (argIndex !== undefined) {
+        const rawArg = node.arguments[argIndex];
+        if (rawArg) {
+          const arg = unwrap(rawArg);
+          const targets: ts.FunctionLikeDeclaration[] = [];
+          if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) {
+            targets.push(arg);
+          } else if (ts.isIdentifier(arg)) {
+            targets.push(...(namedFunctions.get(arg.text) ?? []));
+          }
+          for (const target of targets) {
+            const innerNames = collectInnerNameHelpers(target);
+            if (innerNames.length > 0) {
+              const { line } = tree.getLineAndCharacterOfPosition(rawArg.getStart(tree));
+              violations.push(
+                `transpiled line ${line + 1}: ${method}() callback references tsx __name helper (${innerNames.join(", ")})`,
+              );
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return violations;
+}
+
+test("the page-eval sweep rejects tsx __name helpers inside serialized callbacks and admits safe forms", async () => {
+  const cases = [
+    ["named arrow binding in evaluate", "await page.evaluate(() => { const record = () => 1; return record(); });", true],
+    ["function declaration in addInitScript", "await page.addInitScript(() => { function helper() { return 1; } return helper(); });", true],
+    ["class declaration in waitForFunction", "await page.waitForFunction(() => { class Box {} return Boolean(Box); });", true],
+    ["object property arrow in evaluateHandle", "await page.evaluateHandle(() => ({ run: () => 1 }));", true],
+    ["assigned arrow in $eval", 'await page.$eval("#app", (el) => { let read; read = () => el.textContent; return read(); });', true],
+    ["named arrow in $$eval", 'await page.$$eval("a", (els) => { const count = () => els.length; return count(); });', true],
+    ["function declaration in evaluateAll", "await loc.evaluateAll((els) => { function count() { return els.length; } return count(); });", true],
+    ["referenced helper with named inner arrow", "const cb = () => { const inner = () => 1; return inner(); }; await page.evaluate(cb);", true],
+    ["anonymous listener and array callbacks", 'await page.evaluate(() => { window.addEventListener("pageshow", (ev) => [ev.persisted].map((v) => Boolean(v))); });', false],
+    ["string script with named inner function", 'await page.evaluate("(() => { function ok() { return 1; } return ok(); })()");', false],
+    ["referenced helper without named inner functions", "const readTitle = () => document.title; await page.evaluate(readTitle);", false],
+    ["Node-side route handler with named helper", 'await context.route("https://api.example/**", async () => { const parse = () => ({}); return parse(); });', false],
+  ] as const;
+  for (const [name, snippet, rejected] of cases) {
+    const violations = await pageEvalNameHelperViolations(snippet);
+    assert.equal(violations.length > 0, rejected, `${name}: ${violations.join("; ")}`);
+  }
+});
+
+test("Playwright page-evaluated callbacks in site tests contain no transpiled __name helpers", async () => {
+  const siteTestFiles = (await sourceFiles(join(repoRoot, "site"))).filter(
+    (file) => /\.(?:test|observer\.test)\.tsx?$/u.test(file) && !browserFreeChecks.has(file),
+  );
+  const coexistenceFile = join(repoRoot, "site/src/components/app/next-preview-coexistence.observer.test.ts");
+  assert.ok(siteTestFiles.includes(coexistenceFile), "the sweep must cover next-preview-coexistence.observer.test.ts");
+  const violations: string[] = [];
+  let scanned = 0;
+  for (const file of siteTestFiles) {
+    const source = await readFile(file, "utf8");
+    if (!pageEvalCallPattern.test(source)) continue;
+    scanned += 1;
+    const found = await pageEvalNameHelperViolations(source, file);
+    violations.push(...found.map((v) => `${relative(repoRoot, file)}: ${v}`));
+  }
+  assert.ok(scanned > 0, "the sweep must scan Playwright test files");
+  assert.deepEqual(
+    violations,
+    [],
+    `page-evaluated callbacks must not contain transpiled __name helpers:\n${violations.join("\n")}`,
+  );
 });
