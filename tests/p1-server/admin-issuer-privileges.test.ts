@@ -134,6 +134,19 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.dismiss_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.restore_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)', 'EXECUTE', false],
+  // Sender ask withdrawal (20261125000001):
+  // - withdraw_ask: the only way a withdrawal row is written; exact-sender, access and completion checks inside; command role has no table access.
+  ['swarm_command', 'FUNCTION', 'swarm.withdraw_ask(uuid,text,uuid,uuid,uuid)', 'EXECUTE', false],
+  // - ask_is_withdrawn: lets answer, reply and re-raise refuse a withdrawn ask without reading the withdrawals table.
+  ['swarm_command', 'FUNCTION', 'swarm.ask_is_withdrawn(uuid,uuid)', 'EXECUTE', false],
+  // - ask_sender_can_access_placement: the one placement predicate for replacement destination checks; returns a boolean; replaces any direct read of conversation tables by the command role.
+  ['swarm_command', 'FUNCTION', 'swarm.ask_sender_can_access_placement(uuid,uuid,text,uuid)', 'EXECUTE', false],
+  // - ask_withdrawal_release_allowed: the final release check and replay reauthorization; boolean.
+  ['swarm_command', 'FUNCTION', 'swarm.ask_withdrawal_release_allowed(uuid,text,uuid,uuid,uuid,boolean)', 'EXECUTE', false],
+  // - ask_withdrawal_effective_channel_ids: returns channel ids only, for audit tagging; no actor, no content.
+  ['swarm_command', 'FUNCTION', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE', false],
+  // - restore_waiting_item (5-arg): restore bound to a dismissal instance; the four-argument form delegates to it.
+  ['swarm_command', 'FUNCTION', 'swarm.restore_waiting_item(uuid,uuid,text,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'DELETE', false],

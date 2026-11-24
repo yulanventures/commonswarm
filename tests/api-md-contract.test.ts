@@ -12,7 +12,7 @@ const doc = read("site/public/api.md");
 const commandDir = "supabase/functions/command";
 const commandSources = ["index.ts", "file-artifacts.ts", "household-integration.ts", "human-receipts.ts",
   "durable-delivery.ts", "signal-reactions.ts", "channel-reads.ts", "conversations.ts", "review-checks.ts",
-  "waiting-dismissals.ts"].map((file) => read(`${commandDir}/${file}`));
+  "waiting-dismissals.ts", "ask-withdrawals.ts"].map((file) => read(`${commandDir}/${file}`));
 const commandIndex = commandSources[0]!;
 const readIndex = read("supabase/functions/read/index.ts");
 

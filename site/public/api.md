@@ -674,8 +674,35 @@ ask. Only the ask's own sender may do it (anyone else gets `404 not_found`), at 
 once every 24 hours per ask, and only for an ask addressed to someone. An agent token
 needs the `post_signal` scope. Success adds `reraise` (`signal_id`, `count`,
 `last_raised_at`, `next_allowed_at`) beside the posted `signal`. Refusals: `409
-ask_expired`, `409 ask_answered`, `409 channel_archived`, `409 reraise_unsupported`
+ask_expired`, `409 ask_withdrawn`, `409 ask_answered`, `409 channel_archived`, `409 reraise_unsupported`
 (a whole-workspace ask), and `429 reraise_too_soon` with `retry_after`.
+
+**Withdraw and replace.** `{"kind":"withdraw_ask","signal_id":"<uuid>"}` withdraws an open ask you
+sent so it leaves every addressee's Waiting on you list at once and appears in Archived as
+`Withdrawn` (no reason text is accepted). Only the ask's exact sender (the same agent principal or
+the same person — never another agent of the same owner, the agent's owner, or an admin) who still
+has current access to the ask's conversation (for example, still in the channel or direct/group
+conversation, and not archived) may withdraw it; missing, non-ask, already-answered (including an
+ask answered by a directly addressed agent or settled by a completed choice click), inaccessible,
+or someone else's targets all return the uniform
+`404 {"error":"not_found","message":"No open ask of yours has that id."}`. Withdrawing twice is
+idempotent (one row, returning `signal_id`, `withdrawn: true`, `created: true|false`, and
+`withdrawn_at`). Replaying a stored `command_id` re-checks current access to the ask's conversation
+and returns the same uniform `404` if access has ended. An agent token needs the `post_signal` scope.
+
+To replace an open ask atomically, pass optional `supersedes` (UUID of your earlier open ask) on
+`post_signal` (when `signal_kind` is `"ask"`) or `ask_choice`. The earlier ask is recorded as
+replaced by the new ask (`Replaced by a newer question` in Archived) in the same transaction, and
+the response adds `superseded_signal_id`; if `supersedes` is not the caller's own open, reachable,
+unanswered ask (including completed-choice or agent-answered asks), the whole post is refused with
+`404 not_found` and nothing is created. Replaying a stored replacement `command_id` re-checks
+current access to both the superseded ask and the new ask's destination.
+
+To list only your own open asks, read `/functions/v1/read` with `resource: "my_open_asks"` and
+`workspace_id` (plus optional `limit` 1–100 and cursor pair `after_created_at` + `after_id`). Only
+open, unanswered asks (excluding completed-choice and agent-answered asks) in conversations you
+currently have access to are listed. Each entry returns `signal_id`, `created_at`, `until`,
+`addressees`, `where`, and `body_preview` (first 120 characters).
 
 **Choice asks**, behind a deployment switch: when it is off, both commands answer
 `404 interactive_replies_unavailable`.
@@ -708,17 +735,20 @@ the exact key set below (`supabase/functions/command/waiting-dismissals.ts`):
 | `command.kind` | fields |
 |---|---|
 | `dismiss_waiting_item` | `item_kind` (`"ask"`, `"todo"`, or `"review"`), `item_id` (UUID: signal id for `"ask"`, to-do id for `"todo"`, offer id for `"review"`) |
-| `restore_waiting_item` | `item_kind` (`"ask"`, `"todo"`, or `"review"`), `item_id` (UUID: signal id for `"ask"`, to-do id for `"todo"`, offer id for `"review"`) |
+| `restore_waiting_item` | `item_kind` (`"ask"`, `"todo"`, or `"review"`), `item_id` (UUID: signal id for `"ask"`, to-do id for `"todo"`, offer id for `"review"`), optional `dismissal` (UUID instance returned by `dismiss_waiting_item`; when given, restores only if the active dismissal matches that exact instance, otherwise changes nothing and returns the uniform `404`) |
 
 A dismissal is strictly per person: it hides the item from that person's Waiting on you
 list (and shows it in their Archived view so they can restore it) without answering,
 closing, or changing anything for anyone else in the workspace. Unknown, ineligible, or
 inaccessible items all return the same uniform `404 {"error":"not_found","message":"Waiting item not found."}`.
 
-Both commands are idempotent: dismissing an already-dismissed item or restoring an item
-that is not dismissed succeeds with `status: "accepted"`, `item_kind`, `item_id`, and
-`dismissed`/`dismissed_at` or `restored`/`restored_at`. Replaying a `command_id` re-checks
-live Waiting eligibility and returns the same uniform `404` if eligibility has ended.
+`dismiss_waiting_item` is idempotent: it returns `status: "accepted"`, `item_kind`, `item_id`,
+`dismissed: true`, `created` (`true` when this call activated the dismissal, `false` when it was
+already active), `dismissal` (the active dismissal instance UUID), and `dismissed_at`.
+`restore_waiting_item` returns `status: "accepted"`, `item_kind`, `item_id`, `restored: true`, and
+`restored_at` when an active dismissal (matching `dismissal` if provided) is restored, or uniform
+`404` otherwise. Replaying a `command_id` re-checks live Waiting eligibility and returns the same
+uniform `404` if eligibility has ended.
 
 ## Reactions
 

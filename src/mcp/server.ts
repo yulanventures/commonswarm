@@ -10,7 +10,7 @@ import { AgentSetupError, openProfileCredential, privatePath, profileSessionCont
 import { AGENT_CHECK_DIRECT_TIMEOUT_MS, checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from "../cloud/agent-check.js";
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
-import { mentionRosterFromDirectory, readAgentRoster, readAgentSignalDirectory, readReplyTarget, resolveSignalRecipient } from "../cloud/signals.js";
+import { mentionRosterFromDirectory, readAgentRoster, readAgentSignalDirectory, readMyOpenAsks, readReplyTarget, resolveSignalRecipient } from "../cloud/signals.js";
 import {
   addReplyAuthorMention, bodyMayMention, MentionResolutionError, replyAuthorMentionRefused, replyAuthorNotNotified, replyRetryCommandId, resolveMentions,
   withoutReplyAuthor, type WireMention,
@@ -894,6 +894,40 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           }
           break;
         }
+        case "withdraw": {
+          const { fetcher, token } = await authenticated();
+          const client = new ThinCommandClient(profileTarget(profile), fetcher);
+          try {
+            output = tool.mapResult(await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
+              command: { kind: "withdraw_ask", signal_id: args.signal_id!.toLowerCase() },
+              commandId: args.request_id!, signal: extra.signal }));
+            unknownOnce.delete(`withdraw:${args.request_id}`);
+          } catch (error) {
+            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) {
+              unknownOnce.delete(`withdraw:${args.request_id}`);
+              throw error;
+            }
+            output = unknownOutcome(`withdraw:${args.request_id}`);
+          }
+          break;
+        }
+        case "asks_open": {
+          const raw = selected.arguments as Record<string, unknown>;
+          const { fetcher, token } = await authenticated();
+          output = tool.mapResult(await readMyOpenAsks(
+            profileTarget(profile),
+            token,
+            profile.workspace_id,
+            {
+              ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}),
+              ...(typeof args.after_created_at === "string" && typeof args.after_id === "string"
+                ? { afterCreatedAt: args.after_created_at, afterId: args.after_id.toLowerCase() }
+                : {}),
+            },
+            { fetcher, signal: extra.signal },
+          ));
+          break;
+        }
         default: {
           const { fetcher, token } = await authenticated();
           /* Interactive replies: an ask with fixed choices (server flag SWARM_INTERACTIVE_REPLIES), to one
@@ -913,7 +947,8 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
               const sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
                 command: { kind: "ask_choice", body: args.body!, to_user_id: toUserId, about: args.about ?? null,
                   options: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}),
-                  ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }) },
+                  ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }),
+                  ...(args.supersedes === undefined ? {} : { supersedes: args.supersedes.toLowerCase() }) },
                 commandId: args.request_id!, signal: extra.signal });
               output = { ...tool.mapResult(sent), choices: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}) };
             } catch (error) {
@@ -973,6 +1008,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             ...(placement?.placement === "thread" ? { thread_root_id: placement.threadRootId } : {}),
             ...(mentions.length === 0 ? {} : { mentions }),
             ...(parentSignalId === undefined ? {} : { parent_signal_id: parentSignalId }),
+            ...(tool.name === "ask" && args.supersedes !== undefined ? { supersedes: args.supersedes.toLowerCase() } : {}),
             about: args.about ?? null,
             // "general" is unfiled: no channel key at all.
             ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }),

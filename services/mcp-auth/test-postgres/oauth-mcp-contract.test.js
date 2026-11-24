@@ -586,10 +586,10 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.equal(response.status, 200);
         const listed = await response.json();
         // Must match supabase/functions/mcp/tools.ts. Nothing guards this list automatically: update it whenever a hosted core tool is added.
-        const expectedTools = ['ask', 'channel_ls', 'channel_read', 'check', 'claim_seat', 'conversation_read', 'conversations', 'dm', 'file_get', 'file_ls', 'file_put', 'mark_read', 'members', 'note', 'react', 'reply', 'reraise', 'roster', 'seat_list', 'seat_release', 'thread', 'whoami', 'working_on'];
+        const expectedTools = ['ask', 'asks_open', 'channel_ls', 'channel_read', 'check', 'claim_seat', 'conversation_read', 'conversations', 'dm', 'file_get', 'file_ls', 'file_put', 'mark_read', 'members', 'note', 'react', 'reply', 'reraise', 'roster', 'seat_list', 'seat_release', 'thread', 'whoami', 'withdraw', 'working_on'];
         assert.equal(listed.result.tools.length, expectedTools.length);
         assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools,
-          'with the to-do/list switch OFF, hosted discovery exposes only the 23 core tools');
+          'with the to-do/list switch OFF, hosted discovery exposes only the 25 core tools');
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));
         const grant = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
         assert.equal(grant.rows[0]?.state, 'active', 'token and MCP success follows actual authority activation');

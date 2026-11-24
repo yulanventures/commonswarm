@@ -132,8 +132,8 @@ test('hosted inventory and unchanged local catalog match independently built pre
     plugins: [{ name: 'main-snapshot', setup(builder) { builder.onLoad({ filter: /household-tool-registry\.ts$/ }, () => ({ contents: `${expectedSnapshot}\nexport const HOUSEHOLD_DEFINITION_TOOLS = [];`, loader: 'ts', resolveDir: resolve('src/protocol') })); } }] });
   const baseline = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0]!.text).toString('base64')}`);
   assert.equal(JSON.stringify(MCP_TOOLS), JSON.stringify([...baseline.MCP_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS]));
-  // 41: the core table gained the local file_get (#366); 42: the local react. The household slice below is unchanged except #655's optional todo_create origin fields.
-  assert.equal(MCP_TOOLS.length, 42);
+  // 41: the core table gained the local file_get (#366); 42: the local react; 44: the local withdraw and asks_open (#736). The household slice below is unchanged except #655's optional todo_create origin fields.
+  assert.equal(MCP_TOOLS.length, 44);
   assert.equal(JSON.stringify(HOUSEHOLD_TOOLS), JSON.stringify(baseline.MCP_TOOLS.slice(-18)));
   assert.deepEqual(HOSTED_TODO_LIST_TOOLS.map(t => t.name), [...HOUSEHOLD_TOOLS.filter(t => t.name.startsWith('todo_') || t.name === 'comment_list').map(t => t.name), ...HOUSEHOLD_LIST_TOOL_REGISTRY.map(t => t.name),
     'definitions_search', 'definition_read', 'check_answerable', 'definition_create', 'definition_update']);

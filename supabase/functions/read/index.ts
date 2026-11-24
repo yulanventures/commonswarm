@@ -184,6 +184,14 @@ interface ReceiptReadRequest {
   signal_id: string;
 }
 
+interface MyOpenAsksReadRequest {
+  resource: "my_open_asks";
+  workspace_id: string;
+  limit: number;
+  after_created_at: string | null;
+  after_id: string | null;
+}
+
 interface RenewalGrantReadRequest {
   resource: "renewal_grants";
   workspace_id: string;
@@ -477,7 +485,7 @@ function parseBody(
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | SystemAlertsReadRequest | ChannelReadRequest | ChannelMembersReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | SeatAdminSelfReadRequest | {resource:"workspaces";workspace_id:string} |
-  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | ConversationReadRequest | ReviewCheckReadRequest | null {
+  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | ConversationReadRequest | ReviewCheckReadRequest | MyOpenAsksReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
@@ -603,6 +611,39 @@ function parseBody(
       resource: "delivery_receipts",
       workspace_id: body.workspace_id.toLowerCase(),
       signal_id: body.signal_id.toLowerCase(),
+    };
+  }
+  if (body.resource === "my_open_asks") {
+    const allowed = new Set(["resource", "workspace_id", "limit", "after_created_at", "after_id"]);
+    if (
+      Object.keys(body).some((key) => !allowed.has(key)) ||
+      typeof body.workspace_id !== "string" ||
+      !UUID_RE.test(body.workspace_id)
+    ) {
+      return null;
+    }
+    const limit = body.limit === undefined ? 50 : body.limit;
+    if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      return null;
+    }
+    const hasAfterCreatedAt = Object.hasOwn(body, "after_created_at") && body.after_created_at !== null;
+    const hasAfterId = Object.hasOwn(body, "after_id") && body.after_id !== null;
+    if (hasAfterCreatedAt !== hasAfterId) return null;
+    if (
+      hasAfterCreatedAt &&
+      (typeof body.after_created_at !== "string" || Number.isNaN(Date.parse(body.after_created_at)))
+    ) {
+      return null;
+    }
+    if (hasAfterId && (typeof body.after_id !== "string" || !UUID_RE.test(body.after_id))) {
+      return null;
+    }
+    return {
+      resource: "my_open_asks",
+      workspace_id: body.workspace_id.toLowerCase(),
+      limit,
+      after_created_at: hasAfterCreatedAt ? String(body.after_created_at) : null,
+      after_id: hasAfterId ? String(body.after_id).toLowerCase() : null,
     };
   }
   const modernShape = Object.hasOwn(body, "in_reply_to");
@@ -875,6 +916,7 @@ async function handle(
   }
   if (!agentCredential && body.resource !== "renewal_grants" &&
     body.resource !== "pending_access" && body.resource !== "system_alerts" &&
+    body.resource !== "my_open_asks" &&
     !adminRecovery && !conversationRead && !reviewCheckRead) {
     return json(401, { error: "unauthenticated" });
   }
@@ -932,6 +974,19 @@ async function handle(
         setPhase("query");
         const result = await executeReviewCheckRead(tx, body, { kind: "user", id: humanUserId });
         return json(result.status, result.body);
+      }
+      if (body.resource === "my_open_asks") {
+        const [row] = await tx<{ page: Record<string, unknown> | null }[]>`
+          SELECT swarm_read.my_open_asks(
+            ${body.workspace_id}::uuid,
+            ${body.limit}::integer,
+            ${body.after_created_at}::timestamptz,
+            ${body.after_id}::uuid,
+            NULL::bytea
+          ) AS page
+        `;
+        if (!row?.page) return json(403, { error: "forbidden" });
+        return json(200, row.page);
       }
       if (body.resource === "pending_access") {
         const pending = await tx<Record<string, unknown>[]>`
@@ -1058,6 +1113,15 @@ async function handle(
       if (body.resource === "delivery_receipts") {
         return json(200, { addressed: null, receipts: [], replies: [] });
       }
+      if (body.resource === "my_open_asks") {
+        return json(200, {
+          workspace_id: body.workspace_id,
+          generated_at: new Date().toISOString(),
+          total: 0,
+          truncated: false,
+          asks: [],
+        });
+      }
       if (body.resource === "renewal_grants") {
         return json(200, { grants: [] });
       }
@@ -1110,6 +1174,21 @@ async function handle(
         SELECT * FROM swarm.agent_wake_lease_for_token(${tokenHash!}, ${body.workspace_id}::uuid)
       `;
       return json(200, { lease: leases[0] ?? null });
+    }
+    if (body.resource === "my_open_asks") {
+      // No request.jwt.claims are installed yet, matching delivery_receipts:
+      // the absence selects swarm_read.my_open_asks's agent-token-hash branch.
+      const [row] = await tx<{ page: Record<string, unknown> | null }[]>`
+        SELECT swarm_read.my_open_asks(
+          ${body.workspace_id}::uuid,
+          ${body.limit}::integer,
+          ${body.after_created_at}::timestamptz,
+          ${body.after_id}::uuid,
+          ${tokenHash!}
+        ) AS page
+      `;
+      if (!row?.page) return json(403, { error: "forbidden" });
+      return json(200, row.page);
     }
     if (body.resource === "delivery_receipts") {
       // No request.jwt.claims are installed yet. That absence selects the
@@ -1964,6 +2043,13 @@ export type HostedReadInput =
       limit?: number;
     }
   | {
+      resource: "my_open_asks";
+      workspace_id: string;
+      limit?: number;
+      after_created_at?: string | null;
+      after_id?: string | null;
+    }
+  | {
       resource: "signals";
       workspace_id: string;
       after_created_at?: string | null;
@@ -2014,6 +2100,16 @@ function hostedReadInputValid(input: HostedReadInput): boolean {
       Number.isSafeInteger(offset) && offset >= 0 && offset <= HOSTED_FILE_MAX_OFFSET &&
       Number.isSafeInteger(limit) && limit >= 1 && limit <= HOSTED_FILE_PAGE_LIMIT;
   }
+  if (input.resource === "my_open_asks") {
+    const limit = input.limit ?? 50;
+    const cursorAbsent = input.after_created_at === undefined && input.after_id === undefined;
+    const cursorNull = input.after_created_at === null && input.after_id === null;
+    const cursorPresent = typeof input.after_created_at === "string" &&
+      !Number.isNaN(Date.parse(input.after_created_at)) &&
+      typeof input.after_id === "string" && UUID_RE.test(input.after_id);
+    return Number.isSafeInteger(limit) && limit >= 1 && limit <= 100 &&
+      (cursorAbsent || cursorNull || cursorPresent);
+  }
   if (input.resource !== "signals") return true;
   const limit = input.limit ?? 50;
   const cursorAbsent = input.after_created_at === undefined && input.after_id === undefined;
@@ -2053,6 +2149,7 @@ export async function handleHostedRead(
       (input.resource === "memory_search" && tool !== "memory_search") ||
       (input.resource === "memory_get" && tool !== "memory_get") ||
       (input.resource === "files" && tool !== "file_ls") ||
+      (input.resource === "my_open_asks" && tool !== "asks_open") ||
       (input.resource === "signals" && tool !== "check")) {
     return { status: 403, body: { error: "forbidden" } };
   }
@@ -2113,6 +2210,22 @@ export async function handleHostedRead(
     }
     if (input.resource === "roster") {
       return { status: 200, body: { ...await workspaceRoster(tx, seat.workspace_id), context } };
+    }
+    if (input.resource === "my_open_asks") {
+      const limit = input.limit ?? 50;
+      const afterCreatedAt = typeof input.after_created_at === "string" ? input.after_created_at : null;
+      const afterId = typeof input.after_id === "string" ? input.after_id.toLowerCase() : null;
+      const [row] = await tx<{ page: Record<string, unknown> | null }[]>`
+        SELECT swarm_read.my_open_asks(
+          ${seat.workspace_id}::uuid,
+          ${limit}::integer,
+          ${afterCreatedAt}::timestamptz,
+          ${afterId}::uuid,
+          NULL::bytea
+        ) AS page
+      `;
+      if (!row?.page) return { status: 403, body: { error: "forbidden" } };
+      return { status: 200, body: { ...row.page, context } };
     }
     if (input.resource === "reply_target") {
       /* A hosted reply to a message everyone in its channel can read goes in that message's thread.

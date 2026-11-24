@@ -173,6 +173,7 @@ export function hostedSignalCommand(
         ...(args.multi === true ? { multi: true } : {}),
         ...(typeof args.channel === "string" && args.channel.toLowerCase() !== "general"
           ? { channel: args.channel.toLowerCase() } : {}),
+        ...(typeof args.supersedes === "string" ? { supersedes: args.supersedes.toLowerCase() } : {}),
       },
     };
   }
@@ -204,6 +205,8 @@ export function hostedSignalCommand(
       ...(addressed === null ? {} : { to: addressed }),
       ...(mentions.length === 0 ? {} : { mentions: mentions.map((row) => ({ kind: row.kind, id: row.id })) }),
       ...(attached === null ? {} : { attachments: attached }),
+      ...(name === "ask" && typeof args.supersedes === "string"
+        ? { supersedes: args.supersedes.toLowerCase() } : {}),
     },
   };
 }

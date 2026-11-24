@@ -46,12 +46,34 @@ test("parseWaitingDismissalCommand validates kind, item_kind, UUID, and rejects 
     }
   }
 
+  const DISMISSAL_ID = "44444444-5555-4666-8777-888888888888";
+  assert.deepEqual(
+    parseWaitingDismissalCommand({
+      kind: "restore_waiting_item",
+      item_kind: "ask",
+      item_id: VALID_ID.toUpperCase(),
+      dismissal: DISMISSAL_ID.toUpperCase(),
+    }),
+    {
+      ok: true,
+      command: {
+        kind: "restore_waiting_item",
+        item_kind: "ask",
+        item_id: VALID_ID,
+        dismissal: DISMISSAL_ID,
+      },
+    },
+  );
+
   for (const bad of [
     { kind: "dismiss_waiting_item", item_kind: "alert", item_id: VALID_ID },
     { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "not-a-uuid" },
     { kind: "dismiss_waiting_item", item_kind: "ask" },
     { kind: "dismiss_waiting_item", item_kind: "ask", item_id: VALID_ID, extra: true },
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: VALID_ID, dismissal: DISMISSAL_ID },
     { kind: "restore_waiting_item", item_kind: "review", item_id: null },
+    { kind: "restore_waiting_item", item_kind: "ask", item_id: VALID_ID, dismissal: "not-a-uuid" },
+    { kind: "restore_waiting_item", item_kind: "ask", item_id: VALID_ID, dismissal: null },
     { kind: "unknown_kind", item_kind: "ask", item_id: VALID_ID },
   ]) {
     const parsed = parseWaitingDismissalCommand(bad as Record<string, unknown>);
@@ -72,11 +94,14 @@ test("reauthorizeWaitingDismissalReplay returns null when allowed and uniform 40
 });
 
 test("waitingDismissalReplayFields preserves only valid dismissal/restore fields", () => {
+  const DISMISSAL_ID = "44444444-5555-4666-8777-888888888888";
   assert.deepEqual(
     waitingDismissalReplayFields({
       item_kind: "ask",
       item_id: VALID_ID,
       dismissed: true,
+      created: true,
+      dismissal: DISMISSAL_ID,
       dismissed_at: "2026-11-23T12:00:00Z",
       audit_channel_id: "should-never-surface",
       ignored: "nope",
@@ -85,6 +110,8 @@ test("waitingDismissalReplayFields preserves only valid dismissal/restore fields
       item_kind: "ask",
       item_id: VALID_ID,
       dismissed: true,
+      created: true,
+      dismissal: DISMISSAL_ID,
       dismissed_at: "2026-11-23T12:00:00Z",
     },
   );
