@@ -123,6 +123,12 @@ export interface WaitingDismissedPlaceholder {
   pendingUndo?: true;
 }
 
+export type WaitingDismissBatchVM =
+  | { phase: "loading" }
+  | { phase: "confirm"; total: number }
+  | { phase: "running"; processed: number; total: number; stopping: boolean }
+  | { phase: "done"; doneCount: number; total: number };
+
 export interface WaitingArchivedItem {
   itemKey: string;
   kind: "ask" | "todo" | "review";
@@ -172,6 +178,7 @@ export interface WaitingTodoItem {
   placement?: WaitingTodoPlacement;
   channelId?: string | null;
   conversationId?: string | null;
+  offerId?: string | null;
   channelLabel?: string;
   pending?: true;
   error?: string;
@@ -197,6 +204,7 @@ export interface WaitingPanelVM {
   plainAsks?: WaitingPlainAskItem[];
   todos?: WaitingTodoItem[];
   dismissedPlaceholders?: WaitingDismissedPlaceholder[];
+  dismissBatch?: WaitingDismissBatchVM | null;
   archived?: WaitingArchivedVM | null;
   counts: WaitingPanelCounts;
   loading: boolean;
@@ -231,6 +239,10 @@ export interface WaitingPanelHandlers {
   onOpenTodo?: (item: WaitingTodoItem) => void;
   onDismissTodo?: (item: WaitingTodoItem) => void;
   onUndoDismiss?: (placeholder: WaitingDismissedPlaceholder) => void;
+  onDismissAllStart?: () => void;
+  onDismissAllConfirm?: () => void;
+  onDismissAllCancel?: () => void;
+  onDismissAllStop?: () => void;
   onOpenCatchUp?: (href: string) => void;
   onStartSurvey?: () => void;
   surveyHandlers?: WaitingSurveyHandlers;
@@ -1228,7 +1240,19 @@ export function renderWaitingPanel(
     reviewBtn.type = "button";
     reviewBtn.dataset.waitingReviewStart = "";
     reviewBtn.hidden = true;
-    controls.append(scope, reviewBtn);
+    const batchControls = node(doc, "div", "cs-waiting-panel__batch");
+    batchControls.dataset.waitingBatchControls = "";
+    batchControls.hidden = true;
+    controls.append(scope, reviewBtn, batchControls);
+
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const cancelBtn = root?.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-cancel]");
+      if (!cancelBtn || cancelBtn.hidden) return;
+      event.preventDefault();
+      event.stopPropagation();
+      cancelBtn.click();
+    });
 
     // Visible confirmation banner and polite live region: announces "Sent" and stays visible after the last answer.
     const status = node(doc, "p", "cs-waiting-panel__status");
@@ -1300,13 +1324,121 @@ export function renderWaitingPanel(
   const controlsEl = root.querySelector<HTMLElement>("[data-waiting-controls]");
   if (controlsEl) controlsEl.hidden = Boolean(vm.survey);
 
+  const activeBatch = activeTab === "active" && !vm.survey ? (vm.dismissBatch ?? null) : null;
+  const batchBusyHeader = activeBatch?.phase === "running";
   const reviewBtn = root.querySelector<HTMLButtonElement>("[data-waiting-review-start]");
   if (reviewBtn) {
-    const showReview = !vm.survey && activeTab === "active" && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
+    const showReview = !vm.survey && activeTab === "active" && !batchBusyHeader && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
     reviewBtn.hidden = !showReview;
     if (showReview) {
       reviewBtn.textContent = "Review questions";
       reviewBtn.onclick = () => handlers.onStartSurvey?.();
+    }
+  }
+
+  const batchControls = root.querySelector<HTMLElement>("[data-waiting-batch-controls]");
+  if (batchControls) {
+    const visibleItemCount = vm.items.length + (vm.plainAsks?.length ?? 0) + (vm.todos?.length ?? 0);
+    const canOfferDismissAll =
+      !vm.survey && activeTab === "active" && visibleItemCount >= 2 && Boolean(handlers.onDismissAllStart);
+    const headerMode =
+      activeBatch?.phase === "loading"
+        ? "loading"
+        : activeBatch?.phase === "confirm"
+          ? "confirm"
+          : activeBatch?.phase === "running"
+            ? "running"
+            : canOfferDismissAll
+              ? "button"
+              : "hidden";
+    batchControls.hidden = headerMode === "hidden";
+    batchControls.dataset.waitingBatchMode = headerMode;
+    if (headerMode === "hidden") {
+      if (batchControls.children.length > 0) batchControls.replaceChildren();
+    } else if (headerMode === "button" || headerMode === "loading") {
+      let btn = batchControls.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all]");
+      if (!btn) {
+        btn = node(doc, "button", "cs-waiting-panel__dismiss-all", "Dismiss all");
+        btn.type = "button";
+        btn.dataset.waitingDismissAll = "";
+        batchControls.replaceChildren(btn);
+      }
+      const busy = headerMode === "loading";
+      if (btn.textContent !== "Dismiss all") btn.textContent = "Dismiss all";
+      if (busy) {
+        btn.setAttribute("aria-busy", "true");
+        btn.setAttribute("aria-disabled", "true");
+      } else {
+        btn.removeAttribute("aria-busy");
+        btn.removeAttribute("aria-disabled");
+      }
+      btn.onclick = () => {
+        if (busy) return;
+        handlers.onDismissAllStart?.();
+      };
+    } else if (headerMode === "confirm") {
+      const total = activeBatch && activeBatch.phase === "confirm" ? activeBatch.total : 0;
+      const promptText = `Dismiss all ${total}?`;
+      const noteText = "You can restore items one by one from Archived.";
+      const confirmText = `Dismiss ${total}`;
+      let prompt = batchControls.querySelector<HTMLElement>("[data-waiting-batch-prompt]");
+      let note = batchControls.querySelector<HTMLElement>("[data-waiting-batch-note]");
+      let confirmBtn = batchControls.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-confirm]");
+      let cancelBtn = batchControls.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-cancel]");
+      if (!prompt || !note || !confirmBtn || !cancelBtn) {
+        prompt = node(doc, "span", "cs-waiting-batch__prompt", promptText);
+        prompt.dataset.waitingBatchPrompt = "";
+        note = node(doc, "p", "cs-waiting-batch__note", noteText);
+        note.dataset.waitingBatchNote = "";
+        const actions = node(doc, "div", "cs-waiting-batch__actions");
+        confirmBtn = node(doc, "button", "cs-waiting-card__todo-done cs-waiting-batch__confirm", confirmText);
+        confirmBtn.type = "button";
+        confirmBtn.dataset.waitingDismissAllConfirm = "";
+        cancelBtn = node(doc, "button", "cs-waiting-panel__action cs-waiting-batch__cancel", "Cancel");
+        cancelBtn.type = "button";
+        cancelBtn.dataset.waitingDismissAllCancel = "";
+        const onEsc = (event: KeyboardEvent) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopPropagation();
+          cancelBtn?.click();
+        };
+        confirmBtn.addEventListener("keydown", onEsc);
+        cancelBtn.addEventListener("keydown", onEsc);
+        actions.append(confirmBtn, cancelBtn);
+        batchControls.replaceChildren(prompt, note, actions);
+      } else {
+        if (prompt.textContent !== promptText) prompt.textContent = promptText;
+        if (note.textContent !== noteText) note.textContent = noteText;
+        if (confirmBtn.textContent !== confirmText) confirmBtn.textContent = confirmText;
+      }
+      confirmBtn.onclick = () => handlers.onDismissAllConfirm?.();
+      cancelBtn.onclick = () => handlers.onDismissAllCancel?.();
+    } else {
+      const running = activeBatch as Extract<WaitingDismissBatchVM, { phase: "running" }>;
+      const progressText = `Dismissing ${running.processed} of ${running.total}`;
+      const stopText = running.stopping ? "Stopping…" : "Stop";
+      let progress = batchControls.querySelector<HTMLElement>("[data-waiting-batch-progress]");
+      let stopBtn = batchControls.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-stop]");
+      if (!progress || !stopBtn) {
+        progress = node(doc, "span", "cs-waiting-batch__progress", progressText);
+        progress.setAttribute("role", "status");
+        progress.setAttribute("aria-live", "polite");
+        progress.dataset.waitingBatchProgress = "";
+        stopBtn = node(doc, "button", "cs-waiting-panel__action cs-waiting-batch__stop", stopText);
+        stopBtn.type = "button";
+        stopBtn.dataset.waitingDismissAllStop = "";
+        batchControls.replaceChildren(progress, stopBtn);
+      } else {
+        if (progress.textContent !== progressText) progress.textContent = progressText;
+        if (stopBtn.textContent !== stopText) stopBtn.textContent = stopText;
+      }
+      if (running.stopping) stopBtn.setAttribute("aria-disabled", "true");
+      else stopBtn.removeAttribute("aria-disabled");
+      stopBtn.onclick = () => {
+        if (running.stopping) return;
+        handlers.onDismissAllStop?.();
+      };
     }
   }
 
@@ -1364,7 +1496,16 @@ export function renderWaitingPanel(
   const plainAsks = vm.plainAsks ?? [];
   const todos = vm.todos ?? [];
   const dismissedPlaceholders = vm.dismissedPlaceholders ?? [];
-  if (vm.items.length === 0 && plainAsks.length === 0 && todos.length === 0 && dismissedPlaceholders.length === 0) {
+  const showBatchResult = activeBatch !== null && activeBatch.phase === "done";
+  const batchRunning = activeBatch !== null && activeBatch.phase === "running";
+  if (
+    vm.items.length === 0 &&
+    plainAsks.length === 0 &&
+    todos.length === 0 &&
+    dismissedPlaceholders.length === 0 &&
+    !showBatchResult &&
+    !batchRunning
+  ) {
     const emptyState = vm.failed ? "failed" : vm.truncated ? "truncated" : vm.loading || !vm.complete ? "loading" : "empty";
     const wsNum = formatScopeCount(vm.counts.workspace);
     const allNum = formatScopeCount(vm.counts.all);
@@ -1477,9 +1618,11 @@ export function renderWaitingPanel(
     else if (el.dataset.waitingPlainAsk) existing.set(`plain:${el.dataset.waitingPlainAsk}`, el);
     else if (el.dataset.waitingTodo) existing.set(`todo:${el.dataset.waitingTodo}`, el);
     else if (el.dataset.waitingDismissed) existing.set(`dismissed:${el.dataset.waitingDismissed}`, el);
+    else if (el.dataset.waitingBatchResult !== undefined) existing.set("batch-result", el);
   }
 
   type ActiveRenderSlot =
+    | { slotKind: "batch-result"; key: string; item: Extract<WaitingDismissBatchVM, { phase: "done" }> }
     | { slotKind: "ask"; key: string; item: WaitingAskItem }
     | { slotKind: "todo"; key: string; item: WaitingTodoItem }
     | { slotKind: "plain"; key: string; item: WaitingPlainAskItem }
@@ -1497,6 +1640,13 @@ export function renderWaitingPanel(
       slotKind: "dismissed",
       key: `dismissed:${placeholder.key}`,
       item: placeholder,
+    });
+  }
+  if (showBatchResult && activeBatch.phase === "done") {
+    orderedSlots.unshift({
+      slotKind: "batch-result",
+      key: "batch-result",
+      item: activeBatch,
     });
   }
 
@@ -1527,7 +1677,28 @@ export function renderWaitingPanel(
   for (const slot of orderedSlots) {
     const key = slot.key;
     let card = existing.get(key);
-    if (slot.slotKind === "ask") {
+    if (slot.slotKind === "batch-result") {
+      const batchRow = slot.item;
+      const labelText =
+        batchRow.doneCount === batchRow.total
+          ? `Dismissed ${batchRow.doneCount}`
+          : `Dismissed ${batchRow.doneCount} of ${batchRow.total}`;
+      if (!card) {
+        const built = node(doc, "div", "cs-waiting-card cs-waiting-card--dismissed cs-waiting-batch-result");
+        built.setAttribute("role", "status");
+        built.setAttribute("aria-live", "polite");
+        built.dataset.waitingBatchResult = batchRow.phase;
+        const label = node(doc, "span", "cs-waiting-dismissed__label", labelText);
+        label.dataset.waitingBatchResultLabel = "";
+        built.append(label);
+        list.insertBefore(built, cursor);
+        card = built;
+      } else {
+        card.dataset.waitingBatchResult = batchRow.phase;
+        const label = card.querySelector<HTMLElement>("[data-waiting-batch-result-label]");
+        if (label && label.textContent !== labelText) label.textContent = labelText;
+      }
+    } else if (slot.slotKind === "ask") {
       const sig = cardSignature(slot.item, vm.scope, canDismissAsk);
       if (card && card.dataset.waitingCardSig === sig) {
         const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
@@ -1641,6 +1812,7 @@ export interface WaitingSurface {
   isOpen(): boolean;
   isPhone(): boolean;
   controlsId(): string;
+  lifetime(): number;
   destroy(): void;
 }
 
@@ -1665,11 +1837,21 @@ export function createWaitingSurface(
   let mounted = false;
   let enabled = false;
   let expanded = false;
+  let wasOpen = false;
+  let lifetimeCounter = 0;
   let opener: HTMLElement | null = null;
 
   const isPhone = () => media.matches;
   const isOpen = () => enabled && (isPhone() ? dialog.open : expanded);
   const controlsId = () => (isPhone() ? WAITING_SHEET_ID : WAITING_PANEL_ID);
+  const trackLifetime = (): boolean => {
+    const nowOpen = isOpen();
+    if (nowOpen !== wasOpen) {
+      wasOpen = nowOpen;
+      lifetimeCounter += 1;
+    }
+    return nowOpen;
+  };
 
   const restorePanel = () => {
     if (panel && anchor.parentNode && panel.parentNode !== anchor.parentNode) {
@@ -1692,6 +1874,7 @@ export function createWaitingSurface(
       if (dialog.open) dialog.close();
       restorePanel();
       panel.hidden = true;
+      trackLifetime();
       options.onStateChange?.(false);
       return;
     }
@@ -1702,17 +1885,19 @@ export function createWaitingSurface(
       restorePanel();
       panel.hidden = !expanded;
     }
-    options.onStateChange?.(isOpen());
+    const openNow = trackLifetime();
+    options.onStateChange?.(openNow);
   };
 
   const close = (restoreFocus = true) => {
-    const wasOpen = isOpen();
+    const prevOpen = isOpen();
     if (dialog.open) dialog.close();
     restorePanel();
     if (!isPhone()) expanded = false;
     if (panel) panel.hidden = true;
+    trackLifetime();
     options.onStateChange?.(false);
-    if (restoreFocus && wasOpen) focusOpener();
+    if (restoreFocus && prevOpen) focusOpener();
   };
 
   const open = (trigger?: HTMLElement | null) => {
@@ -1725,12 +1910,14 @@ export function createWaitingSurface(
         dialog.append(panel);
         dialog.showModal();
       }
+      trackLifetime();
       options.onStateChange?.(true);
       panel.querySelector<HTMLElement>("[data-waiting-close]")?.focus({ preventScroll: true });
     } else {
       expanded = true;
       restorePanel();
       panel.hidden = false;
+      trackLifetime();
       options.onStateChange?.(true);
     }
   };
@@ -1754,6 +1941,11 @@ export function createWaitingSurface(
 
   const onCancel = (event: Event) => {
     event.preventDefault();
+    const cancelConfirm = panel?.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-cancel]");
+    if (cancelConfirm && !cancelConfirm.hidden) {
+      cancelConfirm.click();
+      return;
+    }
     close(true);
   };
 
@@ -1762,7 +1954,7 @@ export function createWaitingSurface(
   };
 
   const onKeydown = (event: KeyboardEvent) => {
-    if (event.key !== "Escape" || isPhone() || !isOpen()) return;
+    if (event.key !== "Escape" || event.defaultPrevented || isPhone() || !isOpen()) return;
     const active = doc.activeElement as (HTMLElement & { value?: string }) | null;
     if (!panel?.contains(active)) return;
     if (active?.tagName === "INPUT" && typeof active.value === "string" && active.value.trim() !== "") return;
@@ -1797,6 +1989,7 @@ export function createWaitingSurface(
     isOpen,
     isPhone,
     controlsId,
+    lifetime: () => lifetimeCounter,
     destroy() {
       if (!mounted) return;
       if (dialog.open) dialog.close();
@@ -1811,12 +2004,24 @@ export function createWaitingSurface(
       mounted = false;
       enabled = false;
       expanded = false;
+      trackLifetime();
     },
   };
 }
 
 export interface WaitingFocusHint {
-  kind: "retry-todo" | "completed-todo" | "retry-plain" | "completed-plain" | "completed-ask" | "dismissed" | "restored-dismissed";
+  kind:
+    | "retry-todo"
+    | "completed-todo"
+    | "retry-plain"
+    | "completed-plain"
+    | "completed-ask"
+    | "dismissed"
+    | "restored-dismissed"
+    | "batch-confirm"
+    | "batch-cancel"
+    | "batch-running"
+    | "batch-done";
   todoId?: string;
   signalId?: string;
   dismissedKey?: string;
@@ -1834,6 +2039,18 @@ export function focusWaitingPanelAfterAction(
     el.focus({ preventScroll: true });
     return el;
   };
+  if (hint.kind === "batch-confirm") {
+    const confirmBtn = container.querySelector<HTMLElement>("[data-waiting-dismiss-all-confirm]");
+    if (confirmBtn) return focusEl(confirmBtn);
+  }
+  if (hint.kind === "batch-cancel") {
+    const dismissAllBtn = container.querySelector<HTMLElement>("[data-waiting-dismiss-all]");
+    if (dismissAllBtn && !dismissAllBtn.hidden) return focusEl(dismissAllBtn);
+  }
+  if (hint.kind === "batch-running") {
+    const stopBtn = container.querySelector<HTMLElement>("[data-waiting-dismiss-all-stop]");
+    if (stopBtn) return focusEl(stopBtn);
+  }
   if (hint.kind === "dismissed" && hint.dismissedKey) {
     const undo = Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-undo]"))
       .find(el => el.dataset.waitingUndo === hint.dismissedKey);
