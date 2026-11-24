@@ -45,6 +45,13 @@ function installWaitingDismissalFenceFixture() {
   const genAsk2Id = "99999999-9999-4999-8999-000000000104";
   const triggerAsk1Id = "99999999-9999-4999-8999-000000000105";
   const triggerAsk2Id = "99999999-9999-4999-8999-000000000106";
+  const batchAskIds = [
+    "99999999-9999-4999-8999-000000000201",
+    "99999999-9999-4999-8999-000000000202",
+    "99999999-9999-4999-8999-000000000203",
+    "99999999-9999-4999-8999-000000000204",
+    "99999999-9999-4999-8999-000000000205",
+  ];
 
   const scenario = new URL(location.href).searchParams.get("case") || "dismiss-token-hold-retire";
   const recent = new Date(Date.now() - 60_000).toISOString();
@@ -76,6 +83,7 @@ function installWaitingDismissalFenceFixture() {
 
   const isQueueReadCase = scenario.startsWith("queue-read-");
   const isArchivedCase = scenario.startsWith("archived-restore-") || scenario === "control-archived-restore";
+  const isBatchCase = scenario.startsWith("batch-dismiss-");
   type HeldResponse = { status: number; body: Record<string, unknown> } | undefined;
   const heldDismisses: Array<{ itemId: string; resolve: (outcome?: HeldResponse) => void }> = [];
   const heldRestores: Array<{ itemId: string; resolve: (outcome?: HeldResponse) => void }> = [];
@@ -96,6 +104,7 @@ function installWaitingDismissalFenceFixture() {
     genAsk2Id,
     triggerAsk1Id,
     triggerAsk2Id,
+    batchAskIds,
     login1SessionId,
     login2SessionId,
     dmQuestion: "Private DM secret question?",
@@ -120,6 +129,7 @@ function installWaitingDismissalFenceFixture() {
     failDismiss401Once: false,
     failRestore401Once: false,
     holdNextDismissCommand: false,
+    holdDismissAtIndex: 0,
     holdNextRestoreCommand: false,
     holdNextChoiceCommand: false,
     heldDismisses,
@@ -193,7 +203,16 @@ function installWaitingDismissalFenceFixture() {
 
   const activeAsks = () => {
     const baseMs = Date.now() - 600_000;
-    const all = [
+    const all = isBatchCase
+      ? batchAskIds.map((signal_id, idx) => ({
+          signal_id,
+          from: { kind: "agent" as const, id: agent, name: "Scout" },
+          body: `Batch question ${idx + 1}?`,
+          offset: idx,
+          conversation_id: convGeneral,
+          conversation_kind: "general" as const,
+        }))
+      : [
       ...(!f.dropGroupSM && !f.history404GroupSM
         ? [{
             signal_id: dmAskId,
@@ -581,8 +600,9 @@ function installWaitingDismissalFenceFixture() {
         f.log.push("dismiss-401");
         return Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 });
       }
-      if (f.holdNextDismissCommand) {
+      if (f.holdNextDismissCommand || (f.holdDismissAtIndex > 0 && f.dismissCommands.length === f.holdDismissAtIndex)) {
         f.holdNextDismissCommand = false;
+        if (f.dismissCommands.length === f.holdDismissAtIndex) f.holdDismissAtIndex = 0;
         f.log.push("dismiss-held:" + itemId);
         const outcome = await new Promise<HeldResponse>((resolve) => {
           heldDismisses.push({ itemId, resolve });
@@ -1451,6 +1471,78 @@ async function observeWaitingDismissalFence() {
       return;
     }
 
+    // 9a. Batch "Dismiss all" of 5 items with the 3rd held -> same-person replacement login (NO SIGNED_OUT):
+    //     zero further dismisses dispatched (4 and 5 never sent) and nothing repaints.
+    if (f.scenario === "batch-dismiss-login-swap") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => f.batchAskIds.every((id: string) => shown(card(id))) && shown(panel()?.querySelector("[data-waiting-dismiss-all]")),
+        "5 asks and Dismiss all control rendered under login 1");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all]")!.click();
+      await wait(() =>
+        panel()?.querySelector("[data-waiting-batch-prompt]")?.textContent === "Dismiss all 5?" &&
+        panel()?.querySelector("[data-waiting-batch-note]")?.textContent === "You can restore items one by one from Archived." &&
+        panel()?.querySelector("[data-waiting-dismiss-all-confirm]")?.textContent === "Dismiss 5",
+        "in-place Dismiss all 5? confirm opened");
+      f.holdDismissAtIndex = 3;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-confirm]")!.click();
+      await wait(() =>
+        f.heldDismisses.length === 1 &&
+        f.dismissCommands.length === 3 &&
+        (panel()?.querySelector("[data-waiting-batch-progress]")?.textContent ?? "").includes("of 5"),
+        "batch dispatched first 3 with 3rd held in flight");
+      check(f.bearerHasSession(f.dismissCommands[2]!.bearer, f.login1SessionId), "held 3rd dismiss used login 1");
+
+      await swapToLogin2();
+      f.releaseHeldDismiss(0, { status: 500, body: { error: "server_error", message: "Stale batch error" } });
+      await settleTicks();
+
+      const login2Dismisses = f.dismissCommands.filter((c: { bearer: string }) => f.bearerHasSession(c.bearer, f.login2SessionId));
+      check(f.dismissCommands.length === 3, "retired batch must dispatch ZERO further dismisses after login swap: " + JSON.stringify(f.dismissCommands));
+      check(login2Dismisses.length === 0, "no batch dismiss may dispatch under replacement login 2");
+      check(f.logoutCalls === 0, "must not rely on SIGNED_OUT / logout");
+      check(!shown(panel()), "Waiting panel stays retired/closed after login swap");
+      check(!panel()?.querySelector("[data-waiting-batch-result]"), "retired batch must not paint a result row");
+      check(!panel()?.querySelector("[data-waiting-batch-progress]"), "retired batch must not paint progress");
+      check(!panel()?.querySelector('[role="alert"]'), "retired batch must not paint an error alert");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 9b. Clean control for Batch "Dismiss all": 5 dismissed -> "Dismissed 5", no Undo anywhere in panel, list empty.
+    if (f.scenario === "batch-dismiss-control") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => f.batchAskIds.every((id: string) => shown(card(id))) && shown(panel()?.querySelector("[data-waiting-dismiss-all]")),
+        "5 asks and Dismiss all control rendered");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all]")!.click();
+      await wait(() =>
+        panel()?.querySelector("[data-waiting-batch-prompt]")?.textContent === "Dismiss all 5?" &&
+        panel()?.querySelector("[data-waiting-batch-note]")?.textContent === "You can restore items one by one from Archived." &&
+        panel()?.querySelector("[data-waiting-dismiss-all-confirm]")?.textContent === "Dismiss 5" &&
+        panel()?.querySelector("[data-waiting-dismiss-all-cancel]")?.textContent === "Cancel",
+        "in-place Dismiss all 5? confirm opened");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-confirm]")!.click();
+      await wait(() =>
+        f.dismissCommands.length === 5 &&
+        shown(panel()?.querySelector("[data-waiting-batch-result]")),
+        "all 5 dismissed and batch result row shown");
+      const resultRow = panel()!.querySelector("[data-waiting-batch-result]")!;
+      check(resultRow.querySelector("[data-waiting-batch-result-label]")?.textContent === "Dismissed 5",
+        "expected Dismissed 5 result row");
+      check(resultRow.querySelectorAll("button").length === 0,
+        "batch result row must have no button");
+      check(!panel()?.querySelector("[data-waiting-batch-undo]") && !panel()?.querySelector("[data-waiting-undo]"),
+        "no Undo control may exist anywhere in the panel");
+      check(Array.from(panel()!.querySelectorAll("button")).every((btn) => !/undo/i.test(btn.textContent ?? "")),
+        "no button in the panel may read Undo");
+      check(f.batchAskIds.every((id: string) => !card(id)), "all 5 cards removed from list");
+      check(panel()!.querySelectorAll("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]").length === 0,
+        "list must be empty");
+      check(panel()!.querySelectorAll("[data-waiting-dismissed]").length === 0, "no per-item Dismissed rows for batch");
+      check(f.restoreCommands.length === 0, "batch dismiss must never call restore_waiting_item");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
     throw new Error("unknown scenario: " + f.scenario);
   } catch (error) {
     document.documentElement.dataset.fenceObservation = JSON.stringify({
@@ -1569,6 +1661,14 @@ test("Waiting dismissal C3 (mounted Dashboard): retired Dismiss, Undo, Archived 
     "undo-overlap-after-login-swap",
     "archived-restore-overlap-after-login-swap",
     "survey-overlap-after-login-swap",
+  ]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting dismissal batch (mounted Dashboard): Dismiss all stops with zero further dispatches on same-person replacement login, and clean control dismisses five with no batch Undo", { timeout: 180_000 }, async () => {
+  const outcomes = await runFenceScenarios([
+    "batch-dismiss-login-swap",
+    "batch-dismiss-control",
   ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

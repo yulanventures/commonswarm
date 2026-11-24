@@ -2621,3 +2621,1101 @@ test("waiting-dismissal controller (C3): attempt ownership prevents retired Dism
     assert.deepEqual(errors, []);
   }
 });
+
+test("Dismiss all: control visibility, paged exact count with busy state, Cancel and Escape focus restoration", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  const placeKey = "ws-1:general::::";
+
+  const makeAsk = (id, what) => ({
+    id,
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation: { kind: "general" },
+    channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent",
+    fromId: "a-1",
+    what,
+    when: "1m",
+    createdAt: "2026-11-23T12:00:00Z",
+    until: "2026-11-24T12:00:00Z",
+    choices: { multi: false, options: [{ id: "yes", label: "Yes" }] },
+  });
+
+  // Page 1 rendered locally (2 asks), while page 2 on server has 3 more asks (5 total).
+  let visibleAsks = [];
+  let resolvePageLoad = null;
+  let ctrl;
+
+  const render = () => {
+    renderWaitingPanel(host, {
+      tab: "active",
+      scope: "workspace",
+      place,
+      items: visibleAsks,
+      plainAsks: [],
+      todos: [],
+      dismissedPlaceholders: ctrl.placeholdersFor(placeKey, "workspace"),
+      dismissBatch: ctrl.batchState(),
+      counts: {
+        channel: { min: visibleAsks.length, complete: true },
+        workspace: { min: visibleAsks.length, complete: false },
+        all: { min: visibleAsks.length, complete: false },
+      },
+      loading: false,
+      complete: false,
+      failed: false,
+      statusMessage: "",
+      statusSeq: 0,
+    }, {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onDismissAllStart: () => {
+        void ctrl.beginBatchConfirm({
+          scope: "workspace",
+          placeKey,
+          workspaceIds: ["ws-1"],
+          loadTargets: () => new Promise((resolve) => { resolvePageLoad = resolve; }),
+        });
+      },
+      onDismissAllConfirm: () => void ctrl.confirmBatch(),
+      onDismissAllCancel: () => ctrl.cancelBatchConfirm(),
+      onDismissAllStop: () => ctrl.stopBatch(),
+    });
+  };
+
+  ctrl = createWaitingDismissalController({
+    sendDismiss: async () => ({ ok: true, itemKind: "ask", itemId: "", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" }),
+    sendRestore: async () => ({ ok: true, itemKind: "ask", itemId: "", restored: true, restoredAt: "2026-11-23T12:02:00Z" }),
+    isAlive: () => true,
+    removeCardFromClient: () => {},
+    reloadWaiting: () => {},
+    invalidateArchived: () => {},
+    setCardError: () => {},
+    setStatusError: () => {},
+    setArchivedError: () => {},
+    clearArchivedError: () => {},
+    render,
+    onBatchConfirmOpened: () => focusWaitingPanelAfterAction(host, { kind: "batch-confirm" }),
+    onBatchCancelled: () => focusWaitingPanelAfterAction(host, { kind: "batch-cancel" }),
+  });
+
+  // 0 items -> Dismiss all hidden.
+  render();
+  assert.equal(host.querySelector("[data-waiting-dismiss-all]"), null);
+
+  // 1 item -> Dismiss all hidden.
+  visibleAsks = [makeAsk("ask-1", "One?")];
+  render();
+  assert.equal(host.querySelector("[data-waiting-dismiss-all]"), null);
+
+  // 2 rendered items -> Dismiss all appears as a real button.
+  visibleAsks = [makeAsk("ask-1", "One?"), makeAsk("ask-2", "Two?")];
+  render();
+  const dismissAllBtn = host.querySelector("[data-waiting-dismiss-all]");
+  assert.ok(dismissAllBtn);
+  assert.equal(dismissAllBtn.tagName, "BUTTON");
+  assert.equal(dismissAllBtn.textContent, "Dismiss all");
+  assert.equal(dismissAllBtn.getAttribute("aria-busy"), null);
+
+  // Clicking Dismiss all while paged shows the control as busy while remaining pages load.
+  dismissAllBtn.click();
+  const busyBtn = host.querySelector("[data-waiting-dismiss-all]");
+  assert.ok(busyBtn);
+  assert.equal(busyBtn.getAttribute("aria-busy"), "true");
+  assert.equal(busyBtn.getAttribute("aria-disabled"), "true");
+  assert.equal(host.querySelector("[data-waiting-dismiss-all-confirm]"), null);
+
+  // Server finishes returning all 5 items across pages -> confirm shows exact count 5, deliberate one-line note, no other text, focus moves to "Dismiss 5".
+  const allFiveTargets = ["ask-1", "ask-2", "ask-3", "ask-4", "ask-5"].map((id) => ({
+    slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+    channelId: null, conversationId: null, placementKind: "general",
+  }));
+  resolvePageLoad(allFiveTargets);
+  await new Promise((r) => setTimeout(r, 0));
+
+  const batchControlsEl = host.querySelector("[data-waiting-batch-controls]");
+  const promptEl = host.querySelector("[data-waiting-batch-prompt]");
+  const noteEl = host.querySelector("[data-waiting-batch-note]");
+  const confirmBtn = host.querySelector("[data-waiting-dismiss-all-confirm]");
+  const cancelBtn = host.querySelector("[data-waiting-dismiss-all-cancel]");
+  assert.equal(promptEl?.textContent, "Dismiss all 5?");
+  assert.equal(noteEl?.textContent, "You can restore items one by one from Archived.");
+  assert.equal(confirmBtn?.textContent, "Dismiss 5");
+  assert.equal(cancelBtn?.textContent, "Cancel");
+  assert.equal(
+    batchControlsEl?.textContent,
+    "Dismiss all 5?You can restore items one by one from Archived.Dismiss 5Cancel",
+    "confirm contains only the prompt, the one deliberate line, and the two buttons",
+  );
+  assert.strictEqual(doc.activeElement, confirmBtn, "focus moves to Dismiss N on open");
+
+  // Pressing Cancel restores "Dismiss all" and moves focus back to it.
+  cancelBtn.click();
+  const restoredBtn = host.querySelector("[data-waiting-dismiss-all]");
+  assert.ok(restoredBtn);
+  assert.equal(host.querySelector("[data-waiting-dismiss-all-confirm]"), null);
+  assert.strictEqual(doc.activeElement, restoredBtn, "focus returns to Dismiss all on Cancel");
+
+  // Re-open confirm and cancel via Escape key -> restores control and focus.
+  restoredBtn.click();
+  resolvePageLoad(allFiveTargets);
+  await new Promise((r) => setTimeout(r, 0));
+  const confirmBtn2 = host.querySelector("[data-waiting-dismiss-all-confirm]");
+  assert.strictEqual(doc.activeElement, confirmBtn2);
+  let escPrevented = false;
+  confirmBtn2.dispatchEvent({
+    type: "keydown",
+    key: "Escape",
+    preventDefault() { escPrevented = true; this.defaultPrevented = true; },
+  });
+  assert.equal(escPrevented, true, "Escape during confirm is handled without closing panel");
+  const afterEscBtn = host.querySelector("[data-waiting-dismiss-all]");
+  assert.ok(afterEscBtn);
+  assert.strictEqual(doc.activeElement, afterEscBtn, "focus returns to Dismiss all on Escape");
+});
+
+test("Dismiss all: mixed kinds, max 3 in flight in list order, mid-batch arrivals untouched, partial failure + 404 rule, Stop, result row lifecycle with no batch Undo, no item text stored", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  const placeKey = "ws-1:general::::";
+
+  const makeAsk = (id, what) => ({
+    id, workspaceId: "ws-1", workspaceName: "Home", conversation: { kind: "general" }, channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent", fromId: "a-1", what, when: "1m", createdAt: "2026-11-23T12:00:00Z", until: "2026-11-24T12:00:00Z",
+    choices: { multi: false, options: [{ id: "yes", label: "Yes" }] },
+  });
+  const makePlain = (id, what) => ({
+    id, workspaceId: "ws-1", workspaceName: "Home", conversation: { kind: "general" }, channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent", fromId: "a-1", what, when: "1m", createdAt: "2026-11-23T12:00:00Z", until: "2026-11-24T12:00:00Z",
+  });
+  const makeTodo = (id, title, reason = "assigned") => ({
+    id, workspaceId: "ws-1", workspaceName: "Home", title, state: "open", dueOn: null, reason,
+    href: `/app?w=ws-1&todo=${id}`, canMarkDone: reason !== "request", placement: "general", channelId: null,
+  });
+
+  // 1. Mixed kinds (ask, todo, pinned review, plain) + 5 total items: verify concurrency <= 3, exact list order,
+  //    mid-batch arrival untouched, no per-item placeholders, no batch Undo, zero restore calls, no item text retained.
+  {
+    let serverAsks = [makeAsk("ask-1", "SECRET_ASK_ONE"), makeAsk("ask-2", "SECRET_ASK_TWO")];
+    let serverTodos = [makeTodo("todo-1", "SECRET_TODO", "assigned"), makeTodo("rev-todo-1", "SECRET_REVIEW", "request")];
+    let serverPlain = [makePlain("plain-1", "SECRET_PLAIN")];
+    let clientAsks = [...serverAsks];
+    let clientTodos = [...serverTodos];
+    let clientPlain = [...serverPlain];
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let resolveCalls = 0;
+    const sentDismisses = [];
+    const sentRestores = [];
+    const resolvers = [];
+    const errors = [];
+
+    let ctrl;
+    const render = () => {
+      renderWaitingPanel(host, {
+        tab: "active", scope: "workspace", place,
+        items: clientAsks, plainAsks: clientPlain, todos: clientTodos,
+        dismissedPlaceholders: ctrl.placeholdersFor(placeKey, "workspace"),
+        dismissBatch: ctrl.batchState(),
+        counts: {
+          channel: { min: clientAsks.length + clientTodos.length + clientPlain.length, complete: true },
+          workspace: { min: clientAsks.length + clientTodos.length + clientPlain.length, complete: true },
+          all: { min: clientAsks.length + clientTodos.length + clientPlain.length, complete: true },
+        },
+        loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+      }, {
+        onScopeChange: () => {}, onClose: () => {}, onRetryLoad: () => {},
+        onSubmitChoice: () => {}, onRetryChoice: () => {}, onDraftChoice: () => {},
+        onDismissAllStart: () => {},
+        onDismissAllConfirm: () => void ctrl.confirmBatch(),
+        onDismissAllCancel: () => ctrl.cancelBatchConfirm(),
+        onDismissAllStop: () => ctrl.stopBatch(),
+      });
+    };
+
+    ctrl = createWaitingDismissalController({
+      sendDismiss: (_ws, kind, id) => {
+        sentDismisses.push(`${kind}:${id}`);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise((resolve) => {
+          resolvers.push(() => {
+            inFlight -= 1;
+            serverAsks = serverAsks.filter((a) => a.id !== id);
+            serverPlain = serverPlain.filter((p) => p.id !== id);
+            serverTodos = serverTodos.filter((t) => t.id !== id && !(kind === "review" && id === "offer-for-rev-todo-1" && t.id === "rev-todo-1"));
+            resolve({ ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+          });
+        });
+      },
+      sendRestore: async (_ws, kind, id) => {
+        sentRestores.push(`${kind}:${id}`);
+        return { ok: true, itemKind: kind, itemId: id, restored: true, restoredAt: "2026-11-23T12:02:00Z" };
+      },
+      resolveReviewOfferId: async () => {
+        resolveCalls += 1;
+        return "should-never-be-looked-up";
+      },
+      isAlive: () => true,
+      removeCardFromClient: (target) => {
+        if (target.slotKind === "ask") clientAsks = clientAsks.filter((i) => i.id !== target.cardId);
+        else if (target.slotKind === "plain") clientPlain = clientPlain.filter((i) => i.id !== target.cardId);
+        else clientTodos = clientTodos.filter((i) => i.id !== target.cardId);
+      },
+      isItemListed: (_ws, slotKind, cardId) => {
+        if (slotKind === "ask") return clientAsks.some((i) => i.id === cardId);
+        if (slotKind === "plain") return clientPlain.some((i) => i.id === cardId);
+        return clientTodos.some((i) => i.id === cardId);
+      },
+      reloadWaitingBatch: async () => {
+        clientAsks = [...serverAsks];
+        clientTodos = [...serverTodos];
+        clientPlain = [...serverPlain];
+        render();
+      },
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: (_s, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render,
+    });
+
+    assert.equal("undoBatch" in ctrl, false, "controller exposes no undoBatch method");
+
+    // Pass extra secret text fields to prove batch record strips and retains zero item text.
+    const captured = [
+      { slotKind: "ask", itemKind: "ask", itemId: "ask-1", cardId: "ask-1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general", what: "SECRET_ASK_ONE" },
+      { slotKind: "ask", itemKind: "ask", itemId: "ask-2", cardId: "ask-2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general", what: "SECRET_ASK_TWO" },
+      { slotKind: "todo", itemKind: "todo", itemId: "todo-1", cardId: "todo-1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general", title: "SECRET_TODO" },
+      { slotKind: "todo", itemKind: "review", itemId: "offer-for-rev-todo-1", cardId: "rev-todo-1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general", title: "SECRET_REVIEW" },
+      { slotKind: "plain", itemKind: "ask", itemId: "plain-1", cardId: "plain-1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general", what: "SECRET_PLAIN" },
+    ];
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: captured });
+    assert.equal(JSON.stringify(ctrl.batchState()).includes("SECRET_"), false, "batchState holds no item text");
+
+    const batchPromise = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Only first 3 dispatched (at most 3 in flight, in exact list order).
+    assert.deepEqual(sentDismisses, ["ask:ask-1", "ask:ask-2", "todo:todo-1"]);
+    assert.equal(maxInFlight, 3);
+    const progressEl = host.querySelector("[data-waiting-batch-progress]");
+    assert.equal(progressEl?.getAttribute("role"), "status");
+    assert.equal(progressEl?.getAttribute("aria-live"), "polite");
+    assert.equal(progressEl?.textContent, "Dismissing 0 of 5");
+
+    // A brand-new ask arrives mid-batch!
+    const newcomer = makeAsk("ask-newcomer", "Brand new question?");
+    serverAsks.push(newcomer);
+    clientAsks.push(newcomer);
+
+    // Resolve chunk 1 (first 3).
+    resolvers[0]();
+    resolvers[1]();
+    resolvers[2]();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(host.querySelector("[data-waiting-batch-progress]")?.textContent, "Dismissing 3 of 5");
+    // Chunk 2 (review with pinned offer id + plain ask) now dispatched; newcomer NOT sent; zero offer lookups!
+    assert.deepEqual(sentDismisses, ["ask:ask-1", "ask:ask-2", "todo:todo-1", "review:offer-for-rev-todo-1", "ask:plain-1"]);
+    assert.equal(resolveCalls, 0, "batch dispatch must never look up review offer by to-do");
+    assert.equal(maxInFlight, 3);
+
+    // Resolve chunk 2.
+    resolvers[3]();
+    resolvers[4]();
+    await batchPromise;
+
+    assert.equal(sentDismisses.includes("ask:ask-newcomer"), false, "mid-batch arrival must not be dismissed");
+    assert.equal(host.querySelectorAll("[data-waiting-dismissed]").length, 0, "no per-item Dismissed rows for batch");
+    const resultRow = host.querySelector("[data-waiting-batch-result]");
+    assert.ok(resultRow);
+    assert.equal(resultRow.querySelector("[data-waiting-batch-result-label]").textContent, "Dismissed 5");
+    assert.equal(resultRow.textContent.includes("SECRET_"), false, "result row holds no item text");
+    assert.equal(resultRow.querySelectorAll("button").length, 0, "result row has no button");
+    assert.equal(host.querySelector("[data-waiting-batch-undo]"), null, "no batch Undo control");
+    assert.deepEqual(sentRestores, [], "batch path never calls restore");
+    assert.ok(host.querySelector('[data-waiting-card="ask-newcomer"]'), "newcomer stays listed after reload");
+    assert.deepEqual(errors, []);
+  }
+
+  // 2. Partial failure + 404 post-reload verification (gone 404 counts as done, still-listed 404 does NOT, 500 stays listed with no error wall).
+  {
+    const listedAfterReload = new Set(["ask-fail", "ask-404-still-here"]);
+    const restored = [];
+    const errors = [];
+    const ctrl = createWaitingDismissalController({
+      sendDismiss: async (_ws, kind, id) => {
+        if (id === "ask-ok-1" || id === "ask-ok-2") return { ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" };
+        if (id === "ask-404-gone" || id === "ask-404-still-here") return { ok: false, status: 404, error: "not_found", message: "Not found." };
+        return { ok: false, status: 500, error: "server_error", message: "Server busy." };
+      },
+      sendRestore: async (_ws, kind, id) => {
+        restored.push(`${kind}:${id}`);
+        return { ok: true, itemKind: kind, itemId: id, restored: true, restoredAt: "2026-11-23T12:02:00Z" };
+      },
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      isItemListed: (_ws, _slot, cardId) => listedAfterReload.has(cardId),
+      reloadWaitingBatch: async () => {},
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: (_s, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render: () => {},
+    });
+
+    const targets = ["ask-ok-1", "ask-ok-2", "ask-404-gone", "ask-404-still-here", "ask-fail"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets });
+    await ctrl.confirmBatch();
+
+    // 2 ok + 1 gone 404 = 3 of 5; still-listed 404 and 500 failure do NOT count.
+    assert.deepEqual(ctrl.batchState(), { phase: "done", doneCount: 3, total: 5 });
+    assert.deepEqual(errors, [], "no error wall on partial batch failure");
+    assert.deepEqual(restored, [], "no batch restore called");
+  }
+
+  // 3. Stop lets in-flight items finish and sends no further items; result row clears on leaving panel, dismissing something else, starting another batch, scope or login change.
+  {
+    const sent = [];
+    const resolvers = [];
+    const ctrl = createWaitingDismissalController({
+      sendDismiss: (_ws, _kind, id) => {
+        sent.push(id);
+        return new Promise((resolve) => {
+          resolvers.push(() => resolve({ ok: true, itemKind: "ask", itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" }));
+        });
+      },
+      sendRestore: async () => ({ ok: true, itemKind: "ask", itemId: "", restored: true, restoredAt: "2026-11-23T12:02:00Z" }),
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      isItemListed: () => false,
+      reloadWaitingBatch: async () => {},
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: () => {},
+      setStatusError: () => {},
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render: () => {},
+    });
+
+    const flushResolvers = () => {
+      while (resolvers.length > 0) resolvers.shift()();
+    };
+
+    const targets = ["a1", "a2", "a3", "a4", "a5"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets });
+    const p = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.deepEqual(sent, ["a1", "a2", "a3"]);
+
+    ctrl.stopBatch();
+    assert.equal(ctrl.batchState()?.stopping, true);
+    flushResolvers();
+    await p;
+
+    assert.deepEqual(sent, ["a1", "a2", "a3"], "Stop sends no further items after in-flight finish");
+    assert.deepEqual(ctrl.batchState(), { phase: "done", doneCount: 3, total: 5 });
+
+    // Result row disappears on: dismissing something else, leaving panel (retireBatch), starting another batch, workspace loss, retireAll.
+    const singleDismissP = ctrl.dismiss({
+      slotKind: "ask", itemKind: "ask", itemId: "a4", cardId: "a4", workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general", position: 0, placeKey, scope: "workspace",
+    });
+    assert.equal(ctrl.batchState(), null, "result row disappears when person dismisses something else");
+    flushResolvers();
+    await singleDismissP;
+
+    // Start batch, finish, then retireBatch (leaving panel) clears result row.
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets.slice(0, 2) });
+    const p2 = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    flushResolvers();
+    await p2;
+    assert.equal(ctrl.batchState()?.phase, "done");
+    ctrl.retireBatch();
+    assert.equal(ctrl.batchState(), null, "result row disappears on leaving panel");
+
+    // Starting another batch clears prior result row; workspace loss and login retirement also clear it.
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets.slice(0, 2) });
+    const p3 = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    flushResolvers();
+    await p3;
+    assert.equal(ctrl.batchState()?.phase, "done");
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets.slice(0, 2) });
+    assert.equal(ctrl.batchState()?.phase, "confirm", "starting another batch replaces prior result row");
+    const p4 = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    flushResolvers();
+    await p4;
+    assert.equal(ctrl.batchState()?.phase, "done");
+    ctrl.retireForWorkspace("ws-1");
+    assert.equal(ctrl.batchState(), null, "result row disappears on access scope change");
+
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets.slice(0, 2) });
+    const p5 = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    flushResolvers();
+    await p5;
+    assert.equal(ctrl.batchState()?.phase, "done");
+    ctrl.retireAll();
+    assert.equal(ctrl.batchState(), null, "result row disappears on login change");
+  }
+});
+
+test("Dismiss all C2: pins review offer at confirmation, ignores dispatch-time replacement, and excludes unpinnable reviews", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  const placeKey = "ws-1:general::::";
+
+  const makeAsk = (id) => ({
+    id, workspaceId: "ws-1", workspaceName: "Home", conversation: { kind: "general" }, channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent", fromId: "a-1", what: `Question ${id}?`, when: "1m", createdAt: "2026-11-23T12:00:00Z", until: "2026-11-24T12:00:00Z",
+    choices: { multi: false, options: [{ id: "yes", label: "Yes" }] },
+  });
+  const makeReviewTodo = (id, offerId) => ({
+    id, workspaceId: "ws-1", workspaceName: "Home", title: `Review ${id}`, state: "open", dueOn: null, reason: "request",
+    href: `/app?w=ws-1&todo=${id}`, canMarkDone: false, placement: "general", channelId: null, offerId,
+  });
+
+  // 1. Held later review slot while the offer on that to-do is replaced:
+  //    sends the pinned (old) offer id only, never calls resolveReviewOfferId, never sends the replacement's id,
+  //    and the replacement stays listed (count reads "Dismissed 3 of 4").
+  {
+    let activeOfferOnTodo = "offer-old-1";
+    let serverAsks = [makeAsk("a1"), makeAsk("a2"), makeAsk("a3")];
+    let serverTodos = [makeReviewTodo("rev-todo-1", activeOfferOnTodo)];
+    let clientAsks = [...serverAsks];
+    let clientTodos = [...serverTodos];
+    const sentDismisses = [];
+    let resolveLookups = 0;
+    const resolvers = [];
+    let ctrl;
+
+    const render = () => {
+      renderWaitingPanel(host, {
+        tab: "active", scope: "workspace", place,
+        items: clientAsks, plainAsks: [], todos: clientTodos,
+        dismissedPlaceholders: [],
+        dismissBatch: ctrl.batchState(),
+        counts: {
+          channel: { min: clientAsks.length + clientTodos.length, complete: true },
+          workspace: { min: clientAsks.length + clientTodos.length, complete: true },
+          all: { min: clientAsks.length + clientTodos.length, complete: true },
+        },
+        loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+      }, {
+        onScopeChange: () => {}, onClose: () => {}, onRetryLoad: () => {},
+        onSubmitChoice: () => {}, onRetryChoice: () => {}, onDraftChoice: () => {},
+        onDismissAllStart: () => {},
+        onDismissAllConfirm: () => void ctrl.confirmBatch(),
+        onDismissAllCancel: () => ctrl.cancelBatchConfirm(),
+        onDismissAllStop: () => ctrl.stopBatch(),
+      });
+    };
+
+    ctrl = createWaitingDismissalController({
+      sendDismiss: (_ws, kind, id) => {
+        sentDismisses.push(`${kind}:${id}`);
+        return new Promise((resolve) => {
+          resolvers.push(() => {
+            if (kind === "review") {
+              if (id === activeOfferOnTodo) {
+                serverTodos = serverTodos.filter((t) => t.id !== "rev-todo-1");
+                resolve({ ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+              } else {
+                resolve({ ok: false, status: 404, error: "not_found", message: "Offer not found." });
+              }
+              return;
+            }
+            serverAsks = serverAsks.filter((a) => a.id !== id);
+            resolve({ ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+          });
+        });
+      },
+      sendRestore: async () => { throw new Error("batch must never call restore"); },
+      resolveReviewOfferId: async () => {
+        resolveLookups += 1;
+        return activeOfferOnTodo;
+      },
+      isAlive: () => true,
+      removeCardFromClient: (target) => {
+        if (target.slotKind === "ask") clientAsks = clientAsks.filter((a) => a.id !== target.cardId);
+        else clientTodos = clientTodos.filter((t) => t.id !== target.cardId);
+      },
+      isItemListed: (_ws, slotKind, cardId) =>
+        slotKind === "ask" ? clientAsks.some((a) => a.id === cardId) : clientTodos.some((t) => t.id === cardId),
+      reloadWaitingBatch: async () => {
+        clientAsks = [...serverAsks];
+        clientTodos = [...serverTodos];
+        render();
+      },
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: () => {},
+      setStatusError: () => {},
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render,
+    });
+
+    const targets = [
+      { slotKind: "ask", itemKind: "ask", itemId: "a1", cardId: "a1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      { slotKind: "ask", itemKind: "ask", itemId: "a2", cardId: "a2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      { slotKind: "ask", itemKind: "ask", itemId: "a3", cardId: "a3", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      { slotKind: "todo", itemKind: "review", itemId: "offer-old-1", cardId: "rev-todo-1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+    ];
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets });
+    assert.deepEqual(ctrl.batchState(), { phase: "confirm", total: 4 });
+
+    const batchP = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    // Chunk 1 (3 asks) is held; review slot 4 has NOT dispatched yet.
+    assert.deepEqual(sentDismisses, ["ask:a1", "ask:a2", "ask:a3"]);
+
+    // While chunk 1 is held, replace the offer on rev-todo-1 with a brand new offer.
+    activeOfferOnTodo = "offer-replacement-2";
+    serverTodos = [makeReviewTodo("rev-todo-1", activeOfferOnTodo)];
+
+    // Release chunk 1 -> chunk 2 dispatches the pinned old offer id ONLY.
+    resolvers[0]();
+    resolvers[1]();
+    resolvers[2]();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.deepEqual(sentDismisses, ["ask:a1", "ask:a2", "ask:a3", "review:offer-old-1"]);
+    assert.equal(sentDismisses.includes("review:offer-replacement-2"), false, "must never dismiss replacement offer");
+    assert.equal(resolveLookups, 0, "must never look up offer by to-do at dispatch time");
+
+    // Release chunk 2 (404 for old offer) -> reload keeps rev-todo-1 listed.
+    resolvers[3]();
+    await batchP;
+    assert.deepEqual(ctrl.batchState(), { phase: "done", doneCount: 3, total: 4 });
+    assert.equal(host.querySelector("[data-waiting-batch-result-label]")?.textContent, "Dismissed 3 of 4");
+    assert.ok(host.querySelector('[data-waiting-todo="rev-todo-1"]'), "replacement offer on rev-todo-1 stays listed");
+  }
+
+  // 2. Unchanged-offer control: pinned review offer dismisses normally.
+  {
+    const activeOfferOnTodo = "offer-unchanged-1";
+    let serverAsks = [makeAsk("b1"), makeAsk("b2"), makeAsk("b3")];
+    let serverTodos = [makeReviewTodo("rev-todo-2", activeOfferOnTodo)];
+    let clientAsks = [...serverAsks];
+    let clientTodos = [...serverTodos];
+    const sentDismisses = [];
+    let resolveLookups = 0;
+    let ctrl;
+
+    const render = () => {
+      renderWaitingPanel(host, {
+        tab: "active", scope: "workspace", place,
+        items: clientAsks, plainAsks: [], todos: clientTodos,
+        dismissedPlaceholders: [],
+        dismissBatch: ctrl.batchState(),
+        counts: {
+          channel: { min: clientAsks.length + clientTodos.length, complete: true },
+          workspace: { min: clientAsks.length + clientTodos.length, complete: true },
+          all: { min: clientAsks.length + clientTodos.length, complete: true },
+        },
+        loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+      }, {
+        onScopeChange: () => {}, onClose: () => {}, onRetryLoad: () => {},
+        onSubmitChoice: () => {}, onRetryChoice: () => {}, onDraftChoice: () => {},
+        onDismissAllStart: () => {},
+        onDismissAllConfirm: () => void ctrl.confirmBatch(),
+        onDismissAllCancel: () => ctrl.cancelBatchConfirm(),
+        onDismissAllStop: () => ctrl.stopBatch(),
+      });
+    };
+
+    ctrl = createWaitingDismissalController({
+      sendDismiss: async (_ws, kind, id) => {
+        sentDismisses.push(`${kind}:${id}`);
+        if (kind === "review" && id === activeOfferOnTodo) {
+          serverTodos = [];
+          return { ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" };
+        }
+        serverAsks = serverAsks.filter((a) => a.id !== id);
+        return { ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" };
+      },
+      sendRestore: async () => { throw new Error("batch must never call restore"); },
+      resolveReviewOfferId: async () => {
+        resolveLookups += 1;
+        return activeOfferOnTodo;
+      },
+      isAlive: () => true,
+      removeCardFromClient: (target) => {
+        if (target.slotKind === "ask") clientAsks = clientAsks.filter((a) => a.id !== target.cardId);
+        else clientTodos = clientTodos.filter((t) => t.id !== target.cardId);
+      },
+      isItemListed: (_ws, slotKind, cardId) =>
+        slotKind === "ask" ? clientAsks.some((a) => a.id === cardId) : clientTodos.some((t) => t.id === cardId),
+      reloadWaitingBatch: async () => {
+        clientAsks = [...serverAsks];
+        clientTodos = [...serverTodos];
+        render();
+      },
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: () => {},
+      setStatusError: () => {},
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render,
+    });
+
+    await ctrl.beginBatchConfirm({
+      scope: "workspace",
+      placeKey,
+      workspaceIds: ["ws-1"],
+      targets: [
+        { slotKind: "ask", itemKind: "ask", itemId: "b1", cardId: "b1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "ask", itemKind: "ask", itemId: "b2", cardId: "b2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "ask", itemKind: "ask", itemId: "b3", cardId: "b3", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "todo", itemKind: "review", itemId: activeOfferOnTodo, cardId: "rev-todo-2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      ],
+    });
+    await ctrl.confirmBatch();
+
+    assert.deepEqual(sentDismisses, ["ask:b1", "ask:b2", "ask:b3", "review:offer-unchanged-1"]);
+    assert.equal(resolveLookups, 0);
+    assert.deepEqual(ctrl.batchState(), { phase: "done", doneCount: 4, total: 4 });
+    assert.equal(host.querySelector("[data-waiting-batch-result-label]")?.textContent, "Dismissed 4");
+    assert.equal(host.querySelector('[data-waiting-todo="rev-todo-2"]'), null);
+  }
+
+  // 3. Review with no pinnable offer is excluded at confirm time and N reflects it (both sync and async loadTargets).
+  {
+    const sentDismisses = [];
+    const ctrl = createWaitingDismissalController({
+      sendDismiss: async (_ws, kind, id) => {
+        sentDismisses.push(`${kind}:${id}`);
+        return { ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" };
+      },
+      sendRestore: async () => { throw new Error("batch must never call restore"); },
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      isItemListed: () => false,
+      reloadWaitingBatch: async () => {},
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: () => {},
+      setStatusError: () => {},
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render: () => {},
+    });
+
+    // 2 asks + 1 unpinnable review -> N is 2, not 3.
+    await ctrl.beginBatchConfirm({
+      scope: "workspace",
+      placeKey,
+      workspaceIds: ["ws-1"],
+      targets: [
+        { slotKind: "ask", itemKind: "ask", itemId: "c1", cardId: "c1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "todo", itemKind: "review", itemId: "", cardId: "rev-unpinned", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "ask", itemKind: "ask", itemId: "c2", cardId: "c2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      ],
+    });
+    assert.deepEqual(ctrl.batchState(), { phase: "confirm", total: 2 });
+    await ctrl.confirmBatch();
+    assert.deepEqual(sentDismisses, ["ask:c1", "ask:c2"], "unpinnable review is never dispatched");
+    assert.deepEqual(ctrl.batchState(), { phase: "done", doneCount: 2, total: 2 });
+
+    // 1 ask + 1 unpinnable review -> fewer than 2 pinnable items, confirm does not open.
+    ctrl.retireBatch(false);
+    await ctrl.beginBatchConfirm({
+      scope: "workspace",
+      placeKey,
+      workspaceIds: ["ws-1"],
+      targets: [
+        { slotKind: "ask", itemKind: "ask", itemId: "c3", cardId: "c3", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "todo", itemKind: "review", itemId: "   ", cardId: "rev-unpinned-2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      ],
+    });
+    assert.equal(ctrl.batchState(), null);
+
+    // Async loadTargets also excludes unpinnable review and reflects exact N.
+    await ctrl.beginBatchConfirm({
+      scope: "workspace",
+      placeKey,
+      workspaceIds: ["ws-1"],
+      loadTargets: async () => [
+        { slotKind: "ask", itemKind: "ask", itemId: "d1", cardId: "d1", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "todo", itemKind: "review", itemId: "", cardId: "rev-unpinned-3", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+        { slotKind: "ask", itemKind: "ask", itemId: "d2", cardId: "d2", workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general" },
+      ],
+    });
+    assert.deepEqual(ctrl.batchState(), { phase: "confirm", total: 2 });
+  }
+
+  // 4. parseWaitingTodosQueue preserves optional offer_id from waiting_todos_page when present.
+  {
+    const parsed = parseWaitingTodosQueue({
+      workspace_id: "ws-1",
+      generated_at: "2026-11-23T12:00:00Z",
+      total: 1,
+      truncated: false,
+      todos: [{
+        todo_id: "t-rev-1",
+        title: "Approve agent request",
+        state: "open",
+        due_on: null,
+        reason: "request",
+        agent_id: "agent-1",
+        state_at: "2026-11-23T12:00:00Z",
+        placement: "general",
+        channel_id: null,
+        conversation_id: null,
+        offer_id: "offer-from-projection-1",
+      }],
+    }, "ws-1");
+    assert.equal(parsed?.todos[0]?.offer_id, "offer-from-projection-1");
+  }
+});
+
+test("Dismiss all C3: panel lifetime counter and exact settlement owner through the final reload", async () => {
+  // 1. WaitingSurface lifetime counter increments on every open and close.
+  {
+    const { doc } = makeFakeDoc(false);
+    const app = doc.createElement("div");
+    const opener = doc.createElement("button");
+    opener.dataset.waitingOpen = "";
+    const panel = doc.createElement("aside");
+    panel.dataset.waitingPanel = "";
+    panel.hidden = true;
+    app.append(opener, panel);
+    doc.root.append(app);
+
+    const surface = createWaitingSurface(app);
+    surface.setEnabled(true);
+    const l0 = surface.lifetime();
+    surface.open(opener);
+    const l1 = surface.lifetime();
+    assert.equal(l1, l0 + 1, "opening panel increments lifetime");
+    surface.open(opener);
+    assert.equal(surface.lifetime(), l1, "re-calling open while open does not change lifetime");
+    surface.close(false);
+    const l2 = surface.lifetime();
+    assert.equal(l2, l1 + 1, "closing panel increments lifetime");
+    surface.close(false);
+    assert.equal(surface.lifetime(), l2, "re-calling close while closed does not change lifetime");
+    surface.open(opener);
+    const l3 = surface.lifetime();
+    assert.equal(l3, l2 + 1, "reopening panel increments lifetime again");
+    surface.setEnabled(false);
+    assert.equal(surface.lifetime(), l3 + 1, "disabling an open panel increments lifetime");
+  }
+
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  const placeKey = "ws-1:general::::";
+
+  const makeAsk = (id) => ({
+    id, workspaceId: "ws-1", workspaceName: "Home", conversation: { kind: "general" }, channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent", fromId: "a-1", what: `Question ${id}?`, when: "1m", createdAt: "2026-11-23T12:00:00Z", until: "2026-11-24T12:00:00Z",
+    choices: { multi: false, options: [{ id: "yes", label: "Yes" }] },
+  });
+
+  // 2. Old batch's final reload settling after panel closed and reopened AND after a successor batch started
+  //    in the SAME login: moves no focus, paints no result row, announces nothing, leaves successor intact.
+  {
+    const { doc } = makeFakeDoc(false);
+    const host = doc.createElement("aside");
+    doc.root.append(host);
+    let panelLifetime = 1;
+    let currentScope = "workspace";
+    let currentWorkspaceId = "ws-1";
+    let renders = 0;
+    let focusCallbacks = 0;
+    const reloadResolvers = [];
+    let visibleAsks = [makeAsk("e1"), makeAsk("e2")];
+    let ctrl;
+
+    const render = () => {
+      renders += 1;
+      renderWaitingPanel(host, {
+        tab: "active", scope: currentScope, place: { ...place, workspaceId: currentWorkspaceId },
+        items: visibleAsks, plainAsks: [], todos: [],
+        dismissedPlaceholders: [],
+        dismissBatch: ctrl.batchState(),
+        counts: {
+          channel: { min: visibleAsks.length, complete: true },
+          workspace: { min: visibleAsks.length, complete: true },
+          all: { min: visibleAsks.length, complete: true },
+        },
+        loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+      }, {
+        onScopeChange: () => {}, onClose: () => {}, onRetryLoad: () => {},
+        onSubmitChoice: () => {}, onRetryChoice: () => {}, onDraftChoice: () => {},
+        onDismissAllStart: () => {},
+        onDismissAllConfirm: () => void ctrl.confirmBatch(),
+        onDismissAllCancel: () => ctrl.cancelBatchConfirm(),
+        onDismissAllStop: () => ctrl.stopBatch(),
+      });
+    };
+
+    ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => () => true, // Same login throughout!
+      getPanelLifetime: () => panelLifetime,
+      isBatchScopeCurrent: (batchScope) =>
+        batchScope.scope === currentScope && batchScope.workspaceIds.has(currentWorkspaceId),
+      sendDismiss: async (_ws, kind, id) => ({ ok: true, itemKind: kind, itemId: id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" }),
+      sendRestore: async () => { throw new Error("batch must never call restore"); },
+      isAlive: () => true,
+      removeCardFromClient: (target) => { visibleAsks = visibleAsks.filter((a) => a.id !== target.cardId); },
+      isItemListed: () => false,
+      reloadWaitingBatch: () => new Promise((resolve) => { reloadResolvers.push(resolve); }),
+      reloadWaiting: async () => {},
+      invalidateArchived: () => {},
+      setCardError: () => {},
+      setStatusError: () => {},
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render,
+      onBatchFinished: () => {
+        focusCallbacks += 1;
+        focusWaitingPanelAfterAction(host, { kind: "batch-done" });
+      },
+    });
+
+    const targets1 = ["e1", "e2"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets1 });
+    const batch1P = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(reloadResolvers.length, 1, "batch 1 is awaiting its final reload");
+
+    // Panel closes (lifetime 1 -> 2), reopens (lifetime 2 -> 3), and a successor batch 2 opens in the SAME login.
+    panelLifetime += 1;
+    ctrl.retireBatch(false);
+    panelLifetime += 1;
+    visibleAsks = [makeAsk("f1"), makeAsk("f2")];
+    const targets2 = ["f1", "f2"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets2 });
+    const sentinelFocus = host.querySelector("[data-waiting-dismiss-all-confirm]");
+    assert.ok(sentinelFocus);
+    sentinelFocus.focus();
+
+    const rendersBeforeOldReload = renders;
+    const focusBeforeOldReload = focusCallbacks;
+
+    // Now old batch 1's final reload resolves!
+    reloadResolvers[0]();
+    await batch1P;
+
+    assert.equal(focusCallbacks, focusBeforeOldReload, "old batch reload must not invoke onBatchFinished");
+    assert.strictEqual(doc.activeElement, sentinelFocus, "old batch reload must not move focus");
+    assert.equal(renders, rendersBeforeOldReload, "old batch reload must not repaint");
+    assert.equal(host.querySelector("[data-waiting-batch-result]"), null, "old batch reload must paint no result row and announce nothing");
+    assert.deepEqual(ctrl.batchState(), { phase: "confirm", total: 2 }, "successor batch stays intact");
+
+    // 3. Even WITHOUT calling retireBatch explicitly, panel close+reopen (panel lifetime change alone)
+    //    AND scope/workspace change fence the final reload settlement!
+    const batch2P = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(reloadResolvers.length, 2, "batch 2 is awaiting its final reload");
+    const closeBtn = host.querySelector("[data-waiting-close]");
+    closeBtn.focus();
+    panelLifetime += 2; // close + reopen without retireBatch
+    const rendersBefore2 = renders;
+    reloadResolvers[1]();
+    await batch2P;
+    assert.equal(focusCallbacks, 0, "panel lifetime change alone must block focus callback");
+    assert.strictEqual(doc.activeElement, closeBtn, "panel lifetime change alone must not move focus");
+    assert.equal(renders, rendersBefore2, "panel lifetime change alone must not repaint");
+    assert.equal(host.querySelector("[data-waiting-batch-result]"), null, "panel lifetime change alone must paint no result row");
+    assert.equal(ctrl.batchState(), null, "stale batch silently retired");
+
+    // Scope/workspace change during final reload without retireBatch.
+    visibleAsks = [makeAsk("g1"), makeAsk("g2")];
+    const targets3 = ["g1", "g2"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets3 });
+    const batch3P = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(reloadResolvers.length, 3);
+    closeBtn.focus();
+    currentWorkspaceId = "ws-2"; // switched workspace while final reload was awaiting
+    const rendersBefore3 = renders;
+    reloadResolvers[2]();
+    await batch3P;
+    assert.equal(focusCallbacks, 0, "workspace/scope change must block focus callback");
+    assert.strictEqual(doc.activeElement, closeBtn, "workspace/scope change must not move focus");
+    assert.equal(renders, rendersBefore3, "workspace/scope change must not repaint");
+    assert.equal(host.querySelector("[data-waiting-batch-result]"), null, "workspace/scope change must paint no result row");
+    assert.equal(ctrl.batchState(), null);
+
+    // 4. Control where nothing changed: paints result row ("Dismissed 2", role="status", no button) and focuses normally.
+    currentWorkspaceId = "ws-1";
+    visibleAsks = [makeAsk("h1"), makeAsk("h2")];
+    const targets4 = ["h1", "h2"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: targets4 });
+    const batch4P = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(reloadResolvers.length, 4);
+    doc.activeElement = null;
+    reloadResolvers[3]();
+    await batch4P;
+    assert.equal(focusCallbacks, 1, "unchanged control invokes onBatchFinished");
+    const resultRow = host.querySelector("[data-waiting-batch-result]");
+    assert.ok(resultRow, "unchanged control paints result row");
+    assert.equal(resultRow.getAttribute("role"), "status");
+    assert.equal(resultRow.getAttribute("aria-live"), "polite");
+    assert.equal(resultRow.querySelector("[data-waiting-batch-result-label]")?.textContent, "Dismissed 2");
+    assert.equal(resultRow.querySelectorAll("button").length, 0);
+    assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-scope]"), "unchanged control moves focus inside panel");
+  }
+});
+
+test("Dismiss all retirement mid-batch: same-person new sign-in (no sign-out) and workspace loss send zero further requests and paint nothing", async () => {
+  // 1. Same-person replacement login (captureAccountGuard flips false + retireAll) mid-batch.
+  {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    const errors = [];
+    const sent = [];
+    const resolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinned = loginGen;
+        return () => loginGen === pinned;
+      },
+      sendDismiss: (_ws, _kind, id) => {
+        sent.push({ loginGen, id });
+        return new Promise((resolve) => { resolvers.push(resolve); });
+      },
+      sendRestore: async () => ({ ok: true, itemKind: "ask", itemId: "", restored: true, restoredAt: "2026-11-23T12:02:00Z" }),
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaitingBatch: () => { reloads += 1; },
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => {},
+      setCardError: (_s, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    const targets = ["a1", "a2", "a3", "a4", "a5"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey: "ws-1:general", workspaceIds: ["ws-1"], targets });
+    const batchP = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(sent.length, 3);
+
+    // Same-person replacement login with NO SIGNED_OUT event.
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.batchState(), null, "batch dropped synchronously on login swap");
+
+    const rendersAfterRetire = renders;
+    const reloadsAfterRetire = reloads;
+    resolvers[0]({ ok: true, itemKind: "ask", itemId: "a1", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+    resolvers[1]({ ok: true, itemKind: "ask", itemId: "a2", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+    resolvers[2]({ ok: false, status: 500, error: "server_error", message: "Stale error" });
+    await batchP;
+
+    assert.equal(sent.length, 3, "zero further dismisses dispatched after login swap");
+    assert.equal(renders, rendersAfterRetire, "no stale repaint after login swap");
+    assert.equal(reloads, reloadsAfterRetire, "no stale reload after login swap");
+    assert.deepEqual(errors, [], "no error shown after login swap");
+    assert.equal(ctrl.batchState(), null);
+  }
+
+  // 2. Workspace loss mid-batch retires matching batch synchronously; unrelated workspace loss does not.
+  {
+    let renders = 0;
+    let reloads = 0;
+    const errors = [];
+    const sent = [];
+    const resolvers = [];
+    const ctrl = createWaitingDismissalController({
+      sendDismiss: (_ws, _kind, id) => {
+        sent.push(id);
+        return new Promise((resolve) => { resolvers.push(resolve); });
+      },
+      sendRestore: async () => ({ ok: true, itemKind: "ask", itemId: "", restored: true, restoredAt: "2026-11-23T12:02:00Z" }),
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaitingBatch: () => { reloads += 1; },
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => {},
+      setCardError: (_s, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: () => {},
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    const targets = ["w1", "w2", "w3", "w4", "w5"].map((id) => ({
+      slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
+      channelId: null, conversationId: null, placementKind: "general",
+    }));
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey: "ws-1:general", workspaceIds: ["ws-1"], targets });
+    const batchP = ctrl.confirmBatch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(sent.length, 3);
+
+    // Unrelated workspace loss leaves ws-1 batch alive.
+    ctrl.retireForWorkspace("ws-other");
+    assert.equal(ctrl.batchState()?.phase, "running");
+
+    // Losing ws-1 retires the batch synchronously.
+    ctrl.retireForWorkspace("ws-1");
+    assert.equal(ctrl.batchState(), null);
+
+    const rendersAfterLoss = renders;
+    const reloadsAfterLoss = reloads;
+    resolvers[0]({ ok: true, itemKind: "ask", itemId: "w1", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+    resolvers[1]({ ok: true, itemKind: "ask", itemId: "w2", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+    resolvers[2]({ ok: false, status: 500, error: "server_error", message: "Stale ws error" });
+    await batchP;
+
+    assert.equal(sent.length, 3, "zero further dismisses dispatched after workspace loss");
+    assert.equal(renders, rendersAfterLoss, "no stale repaint after workspace loss");
+    assert.equal(reloads, reloadsAfterLoss, "no stale reload after workspace loss");
+    assert.deepEqual(errors, [], "no error shown after workspace loss");
+    assert.equal(ctrl.batchState(), null);
+  }
+});
