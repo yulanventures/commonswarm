@@ -13,6 +13,7 @@ final class Composer: ObservableObject {
         guard read >= lastRead else { return false }
         lastRead = read
         if newAccess == .preview || newAccess == .unavailable {
+            replyTarget = nil
             text = ""
             attachments = []
             outgoing = []
@@ -21,10 +22,39 @@ final class Composer: ObservableObject {
         return true
     }
 
+    @Published private var conversation: ConversationSummary?
+
+    @discardableResult
+    func apply(_ row: ConversationSummary?, read: Int) -> Bool {
+        guard apply(row?.access ?? .unavailable, read: read) else { return false }
+        conversation = row
+        return true
+    }
+
+    func canReply(to message: Message) -> Bool {
+        access == .joined && conversation.map { message.allowsThread(in: $0) } == true
+    }
+
+    struct ReplyTarget {
+        let message: Message
+        var unavailable = false
+        var id: UUID { message.id }
+        var excerpt: String { String(message.body.prefix(100)) }
+    }
+    @Published var replyTarget: ReplyTarget?
+
+    func reply(to message: Message) {
+        guard canReply(to: message) else { return }
+        replyTarget = ReplyTarget(message: message)
+    }
+
     @Published var text = ""
     @Published var attachments: [UploadIntent] = []
+    var replyUnavailable: Bool {
+        replyTarget.map { $0.unavailable || !canReply(to: $0.message) } ?? false
+    }
     var canSend: Bool {
-        access == .joined && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
+        access == .joined && !replyUnavailable && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
     }
 
     func stage(_ file: StagedFile) throws {
@@ -36,6 +66,7 @@ final class Composer: ObservableObject {
 
     struct Outgoing: Identifiable {
         let post: Post
+        var replyTarget: ReplyTarget?
         let files: [UploadIntent]
         let createdAt = Date()
         var delivery: Delivery = .sending
@@ -54,8 +85,9 @@ final class Composer: ObservableObject {
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
         guard canSend else { return nil }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? attachments.map { $0.file.name }.joined(separator: ", ") : text
-        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: body)
-        outgoing.append(Outgoing(post: post, files: attachments))
+        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: body, threadRootID: replyTarget?.id)
+        outgoing.append(Outgoing(post: post, replyTarget: replyTarget, files: attachments))
+        replyTarget = nil
         attachments = []
         text = ""
         return post
@@ -72,12 +104,13 @@ final class Composer: ObservableObject {
     }
 
     func editRefused(_ id: UUID) {
-        guard text.isEmpty, attachments.isEmpty, let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        guard text.isEmpty, attachments.isEmpty, replyTarget == nil, let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
         switch outgoing[i].delivery {
         case .refused, .uploadFailed: break
         default: return
         }
         let row = outgoing.remove(at: i)
+        replyTarget = row.replyTarget
         attachments = row.files
         text = row.post.body ?? ""
     }
@@ -105,6 +138,7 @@ final class Composer: ObservableObject {
         // A refusal before receipt lookup cannot settle a previous uncertain attempt.
         if case .sending = outgoing[i].delivery, case APIError.refused(let status) = error,
            (400..<500).contains(status), status != 408 {
+            if status == 404 { outgoing[i].replyTarget?.unavailable = true }
             outgoing[i].delivery = .refused
         } else {
             outgoing[i].delivery = .unconfirmed

@@ -102,7 +102,7 @@ extension ConversationAPI {
                 limit: Self.pageSize, before_created_at: before?.created_at, before_id: before?.id)))
             guard result.conversation.id == id else { throw APIError.invalidResponse }
             let access = result.conversation.access
-            guard await draft.apply(access, read: read) else { throw CancellationError() }
+            guard await draft.apply(result.conversation, read: read) else { throw CancellationError() }
             guard access != .unavailable else { throw APIError.refused(403) }
             return result.messages
         } catch APIError.refused(let status) where [401, 403, 404].contains(status) {

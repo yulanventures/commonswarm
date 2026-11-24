@@ -257,7 +257,7 @@ final class HumanSession {
         let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         for (key, draft) in drafts where key.workspace == workspace {
             if case .thread(let id) = key.conversation {
-                draft.apply(byID[id]?.access ?? .unavailable, read: read)
+                draft.apply(byID[id], read: read)
             }
         }
     }

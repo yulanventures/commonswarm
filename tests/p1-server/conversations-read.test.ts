@@ -569,11 +569,17 @@ test("4. DM & group-DM thread replies unblock, security fences, SQL privilege de
   const rootAB = await posted(ann.jwt, { conversation_id: dmAB, body: "DM root" });
   const rootAC = await posted(ann.jwt, { conversation_id: dmAC, body: "Other DM root" });
 
-  // Reply in 1:1 DM thread using conversation_id + thread_root_id -> 200!
-  const replyAB = await posted(ben.jwt, {
-    conversation_id: dmAB, thread_root_id: String(rootAB.id), body: "DM thread reply",
-  });
+  // Bind only the two fixture IDs in the captured iPhone command to this workspace.
+  const nativeReply = JSON.parse(readFileSync(new URL("../../ios/Development/thread-reply.json", import.meta.url), "utf8")) as Row;
+  assert.equal(nativeReply.thread_root_id, "00000000-0000-4000-8000-000000000092");
+  assert.equal(nativeReply.conversation_id, "00000000-0000-4000-8000-000000000024");
+  const command = { ...nativeReply, conversation_id: dmAB, thread_root_id: rootAB.id };
+  const commandId = randomUUID();
+  const replyAB = ok(await send(ben.jwt, command, workspace, commandId), "iPhone DM thread reply").signal as Row;
+  const replay = ok(await send(ben.jwt, command, workspace, commandId), "iPhone thread retry").signal as Row;
   assert.equal(replyAB.thread_root_id, rootAB.id);
+  assert.equal(replay.id, replyAB.id);
+  assert.equal(replay.thread_root_id, rootAB.id);
 
   // Verify reply appears in dmAB conversation_history with thread_root_id!
   const histAB = ok(await readResource(ann.jwt, {
