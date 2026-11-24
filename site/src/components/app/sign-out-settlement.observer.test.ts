@@ -16,6 +16,12 @@
  *      "Signed out on this device. Could not reach the server to confirm remote sign-out."
  *      survives the `SIGNED_OUT` event and the queued `boot()`, and clears on an explicit
  *      signed-out auth-entry switch.
+ *  (d) Delayed unrelated cross-tab notifications (unscoped `SIGNED_OUT`, and `SIGNED_IN`
+ *      naming a different login not in storage) while storage still holds the retired login:
+ *      the private view stays closed, the retry panel stays intact, and nothing of the
+ *      retired login is painted.
+ *  (e) Late sign-out settlement arriving after a verified successor has been shown changes
+ *      nothing on screen and clears nothing belonging to the successor.
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
@@ -986,6 +992,428 @@ test(
                 }),
               page,
             );
+            assert.equal(
+              ctx.consoleErrors.filter((line) => line.includes("pageerror")).length,
+              0,
+              `Expected zero pageerrors:\n${await ctx.dumpDiagnostics(page)}`,
+            );
+          },
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // Witness (d) C2b control: After a refused local removal leaves the retry
+      // panel active while storage still holds the retired login, delayed
+      // UNRELATED cross-tab notifications (an unscoped SIGNED_OUT, and a
+      // SIGNED_IN naming a different login NOT in storage) must NOT clear
+      // pendingSignOut or paint anything of the retired login; the private view
+      // stays closed and the retry panel stays intact.
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const sidRetired = "sid-c2b-delayed-retired";
+        const sidGhost = "sid-c2b-delayed-ghost";
+        await withScenario(
+          {
+            name: "c2b-d-delayed-unrelated-notifications-keep-retired-closed",
+            activeSessionIds: new Set([sidRetired]),
+            logoutStatus: 500,
+          },
+          async (ctx) => {
+            ctx.setStep("seed-and-open");
+            await ctx.seedStorage(makeSessionPayload({ sessionId: sidRetired, refreshToken: "rt-c2b-d-retired" }));
+            const page = await ctx.context.newPage();
+            ctx.attachDiagnostics("tabA", page);
+            await page.goto(`${origin}/app`);
+            await ctx.waitForAppSignedIn(page);
+
+            ctx.setStep("install-removeItem-refusal");
+            await page.evaluate((key: string) => {
+              const w = window as unknown as {
+                __csNativeRemoveItem?: typeof Storage.prototype.removeItem;
+                __csRefuseRemoval?: boolean;
+              };
+              w.__csNativeRemoveItem = Storage.prototype.removeItem;
+              w.__csRefuseRemoval = true;
+              Storage.prototype.removeItem = function (k: string) {
+                if (w.__csRefuseRemoval && k === key) {
+                  throw new DOMException("Fixture removal denial", "SecurityError");
+                }
+                return w.__csNativeRemoveItem!.call(this, k);
+              };
+            }, STORAGE_KEY);
+
+            ctx.setStep("click-signout-under-refusal");
+            await ctx.signOutFromApp(page);
+
+            await ctx.waitFor(
+              "retry panel shown after refused local removal",
+              () =>
+                page.evaluate(() => {
+                  const dash = document.querySelector<HTMLElement>("live-dashboard");
+                  const title = document.querySelector<HTMLElement>("#dashboard-workspace-error-title");
+                  const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+                  const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+                  const retryBtn = document.querySelector<HTMLElement>("[data-retry-workspaces]");
+                  return (
+                    dash?.dataset.state === "workspace-error" &&
+                    title?.textContent === "CommonSwarm could not sign you out on this device." &&
+                    Boolean(channel?.hidden) &&
+                    Boolean(signedOut?.hidden) &&
+                    Boolean(retryBtn && !retryBtn.hidden)
+                  );
+                }),
+              page,
+            );
+
+            // Observe every state transition on <live-dashboard> from this point forward.
+            await page.evaluate(() => {
+              const w = window as unknown as {
+                __csStateHistory?: string[];
+                __csStateObserver?: MutationObserver;
+              };
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              w.__csStateHistory = [dash?.dataset.state ?? ""];
+              if (dash) {
+                w.__csStateObserver = new MutationObserver(() => {
+                  w.__csStateHistory?.push(dash.dataset.state ?? "");
+                });
+                w.__csStateObserver.observe(dash, { attributes: true, attributeFilter: ["data-state"] });
+              }
+            });
+
+            const peer = await ctx.context.newPage();
+            await peer.goto(`${origin}/seed`);
+            try {
+              // 1) Delayed unscoped SIGNED_OUT broadcast while storage STILL holds the retired login.
+              ctx.setStep("deliver-delayed-unscoped-signed-out");
+              const checksBeforeSignedOut = ctx.counters.userChecks;
+              await peer.evaluate((key: string) => {
+                const bc = new BroadcastChannel(key);
+                bc.postMessage({ event: "SIGNED_OUT", session: null });
+                bc.close();
+              }, STORAGE_KEY);
+
+              await ctx.waitFor(
+                "boot revalidated storage after delayed unscoped SIGNED_OUT",
+                () => ctx.counters.userChecks > checksBeforeSignedOut,
+                page,
+              );
+              await page.evaluate(() => new Promise<void>((r) => setTimeout(r, 150)));
+
+              const afterDelayedSignedOut = await page.evaluate((key: string) => {
+                const dash = document.querySelector<HTMLElement>("live-dashboard");
+                const errPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+                const errSignOutBtn = errPanel?.querySelector<HTMLElement>("[data-signout]");
+                const title = document.querySelector<HTMLElement>("#dashboard-workspace-error-title");
+                const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+                const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+                const retryBtn = document.querySelector<HTMLElement>("[data-retry-workspaces]");
+                const w = window as unknown as { __csStateHistory?: string[] };
+                return {
+                  state: dash?.dataset.state ?? "",
+                  title: title?.textContent ?? "",
+                  channelHidden: Boolean(channel?.hidden),
+                  signedOutHidden: Boolean(signedOut?.hidden),
+                  retryVisible: Boolean(retryBtn && !retryBtn.hidden),
+                  errSignOutHidden: Boolean(errSignOutBtn?.hidden),
+                  credentialStillStored: Boolean(localStorage.getItem(key)),
+                  stateHistory: [...(w.__csStateHistory ?? [])],
+                  bodyText: document.body?.innerText ?? "",
+                };
+              }, STORAGE_KEY);
+
+              assert.equal(afterDelayedSignedOut.state, "workspace-error", `Must stay on retry panel after delayed SIGNED_OUT:\n${await ctx.dumpDiagnostics(page)}`);
+              assert.equal(afterDelayedSignedOut.title, "CommonSwarm could not sign you out on this device.");
+              assert.equal(afterDelayedSignedOut.channelHidden, true, "Private view must stay closed");
+              assert.equal(afterDelayedSignedOut.signedOutHidden, true, "Must not claim signed-out while retired login remains stored");
+              assert.equal(afterDelayedSignedOut.retryVisible, true, "Retry button must remain visible");
+              assert.equal(afterDelayedSignedOut.errSignOutHidden, true, "Sign-out button inside retry panel must stay hidden");
+              assert.equal(afterDelayedSignedOut.credentialStillStored, true, "Retired credential still stored");
+              assert.ok(
+                afterDelayedSignedOut.stateHistory.every((s) => s === "workspace-error"),
+                `Delayed SIGNED_OUT must never leave workspace-error or paint retired login (history=${JSON.stringify(afterDelayedSignedOut.stateHistory)})`,
+              );
+              assert.equal(afterDelayedSignedOut.bodyText.includes("Alpha Vault"), false, "Nothing of retired login painted");
+
+              // 2) Delayed SIGNED_IN naming a DIFFERENT login NOT in storage while storage STILL holds the retired login.
+              ctx.setStep("deliver-delayed-unrelated-signed-in");
+              const ghostPayload = makeSessionPayload({ sessionId: sidGhost, refreshToken: "rt-c2b-d-ghost" });
+              const checksBeforeGhost = ctx.counters.userChecks;
+              await peer.evaluate(
+                ({ key, payload }: { key: string; payload: ReturnType<typeof makeSessionPayload> }) => {
+                  const bc = new BroadcastChannel(key);
+                  bc.postMessage({ event: "SIGNED_IN", session: payload });
+                  bc.close();
+                },
+                { key: STORAGE_KEY, payload: ghostPayload },
+              );
+
+              await ctx.waitFor(
+                "boot revalidated storage after delayed unrelated SIGNED_IN",
+                () => ctx.counters.userChecks > checksBeforeGhost,
+                page,
+              );
+              await page.evaluate(() => new Promise<void>((r) => setTimeout(r, 150)));
+
+              const afterDelayedGhost = await page.evaluate((key: string) => {
+                const dash = document.querySelector<HTMLElement>("live-dashboard");
+                const errPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+                const errSignOutBtn = errPanel?.querySelector<HTMLElement>("[data-signout]");
+                const title = document.querySelector<HTMLElement>("#dashboard-workspace-error-title");
+                const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+                const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+                const retryBtn = document.querySelector<HTMLElement>("[data-retry-workspaces]");
+                const w = window as unknown as { __csStateHistory?: string[] };
+                return {
+                  state: dash?.dataset.state ?? "",
+                  title: title?.textContent ?? "",
+                  channelHidden: Boolean(channel?.hidden),
+                  signedOutHidden: Boolean(signedOut?.hidden),
+                  retryVisible: Boolean(retryBtn && !retryBtn.hidden),
+                  errSignOutHidden: Boolean(errSignOutBtn?.hidden),
+                  credentialStillStored: Boolean(localStorage.getItem(key)),
+                  stateHistory: [...(w.__csStateHistory ?? [])],
+                  bodyText: document.body?.innerText ?? "",
+                };
+              }, STORAGE_KEY);
+
+              assert.equal(afterDelayedGhost.state, "workspace-error", `Must stay on retry panel after delayed unrelated SIGNED_IN:\n${await ctx.dumpDiagnostics(page)}`);
+              assert.equal(afterDelayedGhost.title, "CommonSwarm could not sign you out on this device.");
+              assert.equal(afterDelayedGhost.channelHidden, true, "Private view must stay closed");
+              assert.equal(afterDelayedGhost.signedOutHidden, true, "Must not claim signed-out while retired login remains stored");
+              assert.equal(afterDelayedGhost.retryVisible, true, "Retry button must remain visible");
+              assert.equal(afterDelayedGhost.errSignOutHidden, true, "Sign-out button inside retry panel must stay hidden");
+              assert.equal(afterDelayedGhost.credentialStillStored, true, "Retired credential still stored");
+              assert.ok(
+                afterDelayedGhost.stateHistory.every((s) => s === "workspace-error"),
+                `Delayed unrelated SIGNED_IN must never leave workspace-error or paint retired login (history=${JSON.stringify(afterDelayedGhost.stateHistory)})`,
+              );
+              assert.equal(afterDelayedGhost.bodyText.includes("Alpha Vault"), false, "Nothing of retired login painted");
+              assert.equal(
+                ctx.apiLog.some((e) => e.path === "/auth/v1/user" && e.sid === sidGhost),
+                false,
+                "Unstored ghost notification must never be verified as active",
+              );
+            } finally {
+              await peer.close().catch(() => undefined);
+            }
+
+            // Allow removal and retry -> finishes signing out cleanly.
+            ctx.setStep("allow-removal-and-retry");
+            await page.evaluate(() => {
+              (window as unknown as { __csRefuseRemoval?: boolean }).__csRefuseRemoval = false;
+            });
+            await page.click("[data-retry-workspaces]");
+            await ctx.waitFor(
+              "retry completed local sign-out cleanly",
+              () =>
+                page.evaluate((key: string) => {
+                  const dash = document.querySelector<HTMLElement>("live-dashboard");
+                  return dash?.dataset.state === "signed-out" && localStorage.getItem(key) === null;
+                }, STORAGE_KEY),
+              page,
+            );
+            assert.equal(
+              ctx.consoleErrors.filter((line) => line.includes("pageerror")).length,
+              0,
+              `Expected zero pageerrors:\n${await ctx.dumpDiagnostics(page)}`,
+            );
+          },
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // Witness (e) C2b control: A late sign-out settlement arriving AFTER a
+      // verified successor has been shown changes nothing on screen (no
+      // signed-out screen, no retry panel, no notice) and clears nothing
+      // belonging to the successor.
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const sidOld = "sid-c2b-late-old";
+        const sidNew = "sid-c2b-late-new";
+        await withScenario(
+          {
+            name: "c2b-e-late-signout-settlement-after-verified-successor",
+            activeSessionIds: new Set([sidOld, sidNew]),
+            logoutStatus: 500,
+            workspacesForSid: (sid) =>
+              sid === sidNew
+                ? [{ id: WS_2, name: "Fresh Login Vault" }]
+                : [{ id: WS_1, name: "Alpha Vault" }],
+          },
+          async (ctx) => {
+            ctx.setStep("seed-old-login-and-open");
+            await ctx.seedStorage(makeSessionPayload({ sessionId: sidOld, refreshToken: "rt-c2b-late-old" }));
+            const page = await ctx.context.newPage();
+            ctx.attachDiagnostics("tabA", page);
+            await page.goto(`${origin}/app`);
+            await ctx.waitForAppSignedIn(page);
+
+            ctx.setStep("refuse-removal-and-click-signout");
+            await page.evaluate((key: string) => {
+              const w = window as unknown as {
+                __csNativeRemoveItem?: typeof Storage.prototype.removeItem;
+              };
+              w.__csNativeRemoveItem = Storage.prototype.removeItem;
+              Storage.prototype.removeItem = function (k: string) {
+                if (k === key) throw new DOMException("Fixture removal denial", "SecurityError");
+                return w.__csNativeRemoveItem!.call(this, k);
+              };
+            }, STORAGE_KEY);
+
+            await ctx.signOutFromApp(page);
+            await ctx.waitFor(
+              "retry panel shown after refused removal",
+              () =>
+                page.evaluate(() => {
+                  const dash = document.querySelector<HTMLElement>("live-dashboard");
+                  const title = document.querySelector<HTMLElement>("#dashboard-workspace-error-title");
+                  return (
+                    dash?.dataset.state === "workspace-error" &&
+                    title?.textContent === "CommonSwarm could not sign you out on this device."
+                  );
+                }),
+              page,
+            );
+
+            // Delay delivery of the NEXT Web Lock promise's return value (after the real lock
+            // callback has already finished and released the lock) so the Retry sign-out result
+            // settles AFTER the verified successor has been loaded and rendered on screen.
+            ctx.setStep("arm-delayed-retry-settlement-and-click-retry");
+            await page.evaluate(() => {
+              const w = window as unknown as {
+                __csHoldNextLockReturn?: boolean;
+                __csLateSignOutHeld?: boolean;
+                __csReleaseLateSignOut?: () => void;
+              };
+              const origRequest = navigator.locks.request.bind(navigator.locks);
+              w.__csHoldNextLockReturn = true;
+              w.__csLateSignOutHeld = false;
+              let releaseFn: (() => void) | null = null;
+              const gate = new Promise<void>((resolve) => {
+                releaseFn = resolve;
+              });
+              w.__csReleaseLateSignOut = () => {
+                releaseFn?.();
+              };
+              Object.defineProperty(navigator.locks, "request", {
+                configurable: true,
+                writable: true,
+                value(...args: unknown[]): Promise<unknown> {
+                  const promise = (origRequest as (...a: unknown[]) => Promise<unknown>)(...args);
+                  if (w.__csHoldNextLockReturn) {
+                    w.__csHoldNextLockReturn = false;
+                    return promise.then(async (value) => {
+                      w.__csLateSignOutHeld = true;
+                      await gate;
+                      return value;
+                    });
+                  }
+                  return promise;
+                },
+              });
+            });
+
+            await page.click("[data-retry-workspaces]");
+            await ctx.waitFor(
+              "retry sign-out finished under real lock and is held before settling",
+              () =>
+                page.evaluate(() => Boolean((window as unknown as { __csLateSignOutHeld?: boolean }).__csLateSignOutHeld)),
+              page,
+            );
+
+            // Now a genuine verified successor arrives in storage and boots normally while the
+            // earlier Retry sign-out result is still pending delivery.
+            ctx.setStep("deliver-verified-successor");
+            const newPayload = makeSessionPayload({ sessionId: sidNew, refreshToken: "rt-c2b-late-new" });
+            const peer = await ctx.context.newPage();
+            await peer.goto(`${origin}/seed`);
+            await peer.evaluate(
+              ({ key, value }: { key: string; value: string }) => {
+                localStorage.setItem(key, value);
+              },
+              { key: STORAGE_KEY, value: JSON.stringify(newPayload) },
+            );
+            await peer.close();
+
+            await page.evaluate(() => {
+              window.dispatchEvent(new Event("visibilitychange"));
+            });
+
+            await ctx.waitFor(
+              "verified successor loaded and rendered",
+              () =>
+                page.evaluate(() => {
+                  const dash = document.querySelector<HTMLElement>("live-dashboard");
+                  const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+                  const errPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+                  return (
+                    dash?.dataset.state === "channel" &&
+                    Boolean(channel && !channel.hidden) &&
+                    Boolean(errPanel?.hidden) &&
+                    (document.body?.innerText ?? "").includes("Fresh Login Vault")
+                  );
+                }),
+              page,
+            );
+
+            // Start recording state transitions and release the late sign-out settlement.
+            ctx.setStep("release-late-signout-settlement");
+            const userChecksBeforeLate = ctx.counters.userChecks;
+            const logoutsBeforeLate = ctx.counters.logouts;
+            await page.evaluate(() => {
+              const w = window as unknown as {
+                __csStateHistory?: string[];
+                __csStateObserver?: MutationObserver;
+                __csReleaseLateSignOut?: () => void;
+              };
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              w.__csStateHistory = [dash?.dataset.state ?? ""];
+              if (dash) {
+                w.__csStateObserver = new MutationObserver(() => {
+                  w.__csStateHistory?.push(dash.dataset.state ?? "");
+                });
+                w.__csStateObserver.observe(dash, { attributes: true, attributeFilter: ["data-state"] });
+              }
+              w.__csReleaseLateSignOut?.();
+            });
+
+            await page.evaluate(() => new Promise<void>((r) => setTimeout(r, 150)));
+
+            const afterLate = await page.evaluate((key: string) => {
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+              const errPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+              const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+              const authErr = document.querySelector<HTMLElement>("[data-auth-error]");
+              const storedRaw = localStorage.getItem(key);
+              const storedRt = storedRaw ? (JSON.parse(storedRaw) as { refresh_token?: string }).refresh_token ?? null : null;
+              const w = window as unknown as { __csStateHistory?: string[] };
+              return {
+                state: dash?.dataset.state ?? "",
+                channelHidden: Boolean(channel?.hidden),
+                errPanelHidden: Boolean(errPanel?.hidden),
+                signedOutHidden: Boolean(signedOut?.hidden),
+                authErrHidden: Boolean(authErr?.hidden),
+                storedRt,
+                stateHistory: [...(w.__csStateHistory ?? [])],
+                bodyText: document.body?.innerText ?? "",
+              };
+            }, STORAGE_KEY);
+
+            assert.equal(afterLate.state, "channel", `Late settlement must not leave successor view:\n${await ctx.dumpDiagnostics(page)}`);
+            assert.equal(afterLate.channelHidden, false, "Successor channel panel must stay visible");
+            assert.equal(afterLate.errPanelHidden, true, "Retry panel must not appear over successor");
+            assert.equal(afterLate.signedOutHidden, true, "Signed-out panel must not appear over successor");
+            assert.equal(afterLate.authErrHidden, true, "No sign-out notice may appear over successor");
+            assert.equal(afterLate.storedRt, "rt-c2b-late-new", "Successor stored credential must remain intact");
+            assert.equal(afterLate.bodyText.includes("Fresh Login Vault"), true, "Successor workspace must remain rendered");
+            assert.ok(
+              afterLate.stateHistory.every((s) => s === "channel"),
+              `Late sign-out settlement must not flicker or change dashboard state (history=${JSON.stringify(afterLate.stateHistory)})`,
+            );
+            assert.equal(ctx.counters.userChecks, userChecksBeforeLate, "Late settlement must not trigger extra auth checks");
+            assert.equal(ctx.counters.logouts, logoutsBeforeLate, "Late settlement must not trigger extra logouts");
             assert.equal(
               ctx.consoleErrors.filter((line) => line.includes("pageerror")).length,
               0,

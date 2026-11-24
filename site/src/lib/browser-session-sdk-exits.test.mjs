@@ -2768,10 +2768,18 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
             events.length = 0;
             logoutCalls = 0;
 
-            // Fail the first getItem read (when signOut consults the module's own view via readAuthItem)
-            // so the module falls back to stale authMemory (login1), then disk becomes readable (login2)
-            // for the locked durable ownership check.
+            // Fail a getItem read when the module's own view is consulted via getSession(),
+            // confirming the module falls back to stale authMemory (login1) while disk holds login2,
+            // then disk is readable (login2) for the locked durable ownership check inside signOut().
             failNextSessionReads = 1;
+            assert.equal(
+              (await session.client.auth.getSession()).data.session?.refresh_token,
+              "rt-c2a-unavail-1",
+              `${successorCase.name}: unavailable disk read left module local view on stale login1`,
+            );
+            base.ops.length = 0;
+            events.length = 0;
+            logoutCalls = 0;
             const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-unavail-1" } });
             assert.deepEqual(
               outcome,
@@ -2885,8 +2893,9 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
         getItem(k) {
           if (k === TEST_STORAGE_KEY && swapOnReadNumber > 0) {
             sessionReads += 1;
-            // Read 1: initialLocalCred; Read 2: durableBeforeLogout; Read 3: durableBeforeRemove;
-            // Read 4: signOutRemovalGuard inside authStorage.removeItem!
+            // Read 1: durableBeforeLogout; Read 2: durableBeforeRemove;
+            // Read 3: signOutRemovalGuard inside authStorage.removeItem!
+            // (An explicit pin never reads initialLocalCred from the current slot.)
             if (sessionReads === swapOnReadNumber) {
               base.entries.set(TEST_STORAGE_KEY, login2Stored);
             }
@@ -2915,7 +2924,7 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
 
           // Inject a durable successor right at the removal guard read inside authStorage.removeItem.
           sessionReads = 0;
-          swapOnReadNumber = 4;
+          swapOnReadNumber = 3;
           const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-guard-1" } });
           assert.deepEqual(outcome, { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false });
           assert.equal(base.entries.get(TEST_STORAGE_KEY), login2Stored, "removal guard preserved durable successor");
@@ -2932,19 +2941,296 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
     });
   });
 
-  await t.test("(g) LiveDashboard single-account sign-out paths both pass local scope, carry initiating login identity through pending sign-out state, render retryable error on local failure, and preserve unconfirmed remote sign-out notice across boot", async () => {
+  await t.test("(g) LiveDashboard single-account sign-out paths both pass local scope, carry initiating login identity including fallback refreshToken, guard late settlement, render retryable error on local failure, and keep pendingSignOut until verified loading", async () => {
     const dashboardPath = fileURLToPath(new URL("../components/app/LiveDashboard.astro", import.meta.url));
     const dashboardSrc = await readFile(dashboardPath, "utf8");
     assert.match(
       dashboardSrc,
-      /const attemptReauthSignOut = async[\s\S]*?pendingSignOut = pendingState;[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(pendingState\);[\s\S]*?pendingSignOutNotice =[\s\S]*?!signOutRes\.serverRevoked/,
-      "re-authentication sign-out path passes local scope, tracks pending sign-out login identity, surfaces retryable error on local failure, and preserves unconfirmed server revocation notice",
+      /const attemptReauthSignOut = async[\s\S]*?pendingSignOut = pendingState;[\s\S]*?refreshToken:\s*ownerExpectedRefreshToken \|\| null,[\s\S]*?scope:\s*"local"[\s\S]*?if \(pendingSignOut !== pendingState\) \{\s*return;\s*\}[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(pendingState\);[\s\S]*?pendingSignOutNotice =[\s\S]*?!signOutRes\.serverRevoked/,
+      "re-authentication sign-out path passes local scope + fallback refreshToken, guards late settlement, surfaces retryable error on local failure, and preserves unconfirmed server revocation notice",
     );
     assert.match(
       dashboardSrc,
-      /const attemptSingleSignOut = async[\s\S]*?pendingSignOut = pendingState;[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(pendingState\);[\s\S]*?pendingSignOutNotice =[\s\S]*?!signOutRes\.serverRevoked/,
-      "ordinary Sign out click passes local scope, tracks pending sign-out login identity, surfaces retryable error on local failure, and preserves unconfirmed server revocation notice",
+      /const attemptSingleSignOut = async[\s\S]*?pendingSignOut = pendingState;[\s\S]*?refreshToken:\s*signingOutRefreshToken \|\| null,[\s\S]*?scope:\s*"local"[\s\S]*?if \(pendingSignOut !== pendingState\) \{\s*return;\s*\}[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(pendingState\);[\s\S]*?pendingSignOutNotice =[\s\S]*?!signOutRes\.serverRevoked/,
+      "ordinary Sign out click passes local scope + fallback refreshToken, guards late settlement, surfaces retryable error on local failure, and preserves unconfirmed server revocation notice",
     );
+  });
+
+  await t.test("(h) C2a fallback pin (pinned client): explicit pin without session_id uses fixed initiating refreshToken, incomplete explicit pin is refused without touching storage, and Retry after refused removal leaves same-person successor untouched", async (st) => {
+    const makeNoSidJwt = ({ sub, sig }) => {
+      const b64 = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
+      const futureExp = Math.floor(Date.now() / 1000) + 3600;
+      return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub, aud: "authenticated", exp: futureExp })}.${sig}`;
+    };
+
+    await st.test("explicit pin with missing sessionId + fallback refreshToken against same-person replacement in storage returns replaced with zero logout, zero deletion, zero SIGNED_OUT", async () => {
+      for (const successorCase of [
+        {
+          label: "same user successor WITH session_id",
+          accessToken: makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-fb-succ-1", sig: "sig-fb-succ-1" }),
+          refreshToken: "rt-c2a-fb-succ-1",
+        },
+        {
+          label: "same user successor WITHOUT session_id",
+          accessToken: makeNoSidJwt({ sub: "user-1", sig: "sig-fb-succ-2" }),
+          refreshToken: "rt-c2a-fb-succ-2",
+        },
+      ]) {
+        const successorStored = makeStoredSession({
+          accessToken: successorCase.accessToken,
+          refreshToken: successorCase.refreshToken,
+          expired: false,
+          userId: "user-1",
+        });
+        const storage = memoryStorage({ [TEST_STORAGE_KEY]: successorStored });
+        const locks = createFifoLocks();
+        const events = [];
+        let logoutCalls = 0;
+
+        const fetchImpl = async (input) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.includes("/auth/v1/logout")) {
+            logoutCalls += 1;
+            return new Response(null, { status: 204 });
+          }
+          if (url.includes("/auth/v1/user")) {
+            return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          throw new Error(`Unexpected URL: ${url}`);
+        };
+
+        await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+          const session = makeRealSession();
+          session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+          try {
+            await session.client.auth.initialize();
+            await settleLockIdle(locks);
+            storage.ops.length = 0;
+            events.length = 0;
+            logoutCalls = 0;
+
+            const outcome = await session.signOut({
+              expected: { userId: "user-1", sessionId: null, refreshToken: "rt-c2a-fb-orig-1" },
+            });
+            assert.deepEqual(
+              outcome,
+              { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false },
+              `${successorCase.label}: fallback refreshToken mismatch reports replaced`,
+            );
+            assert.equal(logoutCalls, 0, `${successorCase.label}: zero server logout calls`);
+            assert.equal(
+              storage.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+              0,
+              `${successorCase.label}: zero removeItem calls`,
+            );
+            assert.equal(storage.entries.get(TEST_STORAGE_KEY), successorStored, `${successorCase.label}: successor intact in storage`);
+            assert.deepEqual(events, [], `${successorCase.label}: zero SIGNED_OUT announced`);
+
+            const verified = await session.verifiedSession();
+            assert.equal(verified?.refresh_token, successorCase.refreshToken, `${successorCase.label}: successor remains verifiable`);
+          } finally {
+            await session.quiesce();
+          }
+        });
+      }
+    });
+
+    await st.test("explicit pin with missing sessionId and NO fallback refreshToken (or missing userId, or explicit null) is refused as incomplete without completing from current slot", async () => {
+      const successorJwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-inc-succ", sig: "sig-inc-succ" });
+      const successorStored = makeStoredSession({
+        accessToken: successorJwt,
+        refreshToken: "rt-c2a-inc-succ",
+        expired: false,
+        userId: "user-1",
+      });
+
+      const incompletePins = [
+        { label: "userId only, sessionId null, no refreshToken", expected: { userId: "user-1", sessionId: null } },
+        { label: "userId only, empty sessionId and blank refreshToken", expected: { userId: "user-1", sessionId: "", refreshToken: "   " } },
+        { label: "missing userId despite sessionId", expected: { userId: "", sessionId: "sid-c2a-inc-succ", refreshToken: "rt-c2a-inc-succ" } },
+        { label: "explicit expected: null", expected: null },
+      ];
+
+      for (const pinCase of incompletePins) {
+        const storage = memoryStorage({ [TEST_STORAGE_KEY]: successorStored });
+        const locks = createFifoLocks();
+        const events = [];
+        let logoutCalls = 0;
+
+        const fetchImpl = async (input) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.includes("/auth/v1/logout")) {
+            logoutCalls += 1;
+            return new Response(null, { status: 204 });
+          }
+          throw new Error(`Unexpected URL: ${url}`);
+        };
+
+        await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+          const session = makeRealSession();
+          session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+          try {
+            await session.client.auth.initialize();
+            await settleLockIdle(locks);
+            storage.ops.length = 0;
+            events.length = 0;
+            logoutCalls = 0;
+
+            const outcome = await session.signOut({ expected: pinCase.expected });
+            assert.deepEqual(
+              outcome,
+              { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true },
+              `${pinCase.label}: refused with retryable local failure`,
+            );
+            assert.equal(logoutCalls, 0, `${pinCase.label}: zero server logout calls`);
+            assert.equal(
+              storage.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+              0,
+              `${pinCase.label}: zero removeItem calls`,
+            );
+            assert.equal(storage.entries.get(TEST_STORAGE_KEY), successorStored, `${pinCase.label}: slot untouched`);
+            assert.deepEqual(events, [], `${pinCase.label}: zero SIGNED_OUT announced`);
+          } finally {
+            await session.quiesce();
+          }
+        });
+      }
+    });
+
+    await st.test("Retry after refused removal when initiating login has NO session_id and a same-person successor arrives meanwhile leaves successor untouched; unchanged login control signs out cleanly", async () => {
+      const origJwt = makeNoSidJwt({ sub: "user-1", sig: "sig-retry-orig" });
+      const origStored = makeStoredSession({
+        accessToken: origJwt,
+        refreshToken: "rt-c2a-retry-orig",
+        expired: false,
+        userId: "user-1",
+      });
+      const succJwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-retry-succ", sig: "sig-retry-succ" });
+      const succStored = makeStoredSession({
+        accessToken: succJwt,
+        refreshToken: "rt-c2a-retry-succ",
+        expired: false,
+        userId: "user-1",
+      });
+
+      const base = memoryStorage({ [TEST_STORAGE_KEY]: origStored });
+      let refuseRemove = true;
+      const flakyStorage = {
+        ...base,
+        get length() { return base.length; },
+        key(i) { return base.key(i); },
+        getItem(k) { return base.getItem(k); },
+        setItem(k, v) { base.setItem(k, v); },
+        removeItem(k) {
+          if (refuseRemove && k === TEST_STORAGE_KEY) {
+            throw new DOMException("SecurityError", "SecurityError");
+          }
+          base.removeItem(k);
+        },
+      };
+      const locks = createFifoLocks();
+      const events = [];
+      const logoutAuthHeaders = [];
+
+      const fetchImpl = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/logout")) {
+          logoutAuthHeaders.push(new Headers(init?.headers).get("authorization"));
+          return new Response(JSON.stringify({ msg: "server unavailable" }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/auth/v1/user")) {
+          return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage: flakyStorage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          events.length = 0;
+
+          // Captured once at click time (no session_id in initiating JWT, fallback refreshToken captured).
+          const fixedPin = { userId: "user-1", sessionId: null, refreshToken: "rt-c2a-retry-orig" };
+
+          // 1) First attempt while removal is refused -> retryable failure, zero SIGNED_OUT.
+          const firstOutcome = await session.signOut({ expected: fixedPin, scope: "local" });
+          assert.deepEqual(firstOutcome, { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true });
+          assert.deepEqual(logoutAuthHeaders, [`Bearer ${origJwt}`]);
+          assert.deepEqual(events, []);
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), origStored);
+
+          // 2) Same-person successor arrives in storage before Retry, and removal becomes allowed.
+          base.entries.set(TEST_STORAGE_KEY, succStored);
+          refuseRemove = false;
+          base.ops.length = 0;
+          logoutAuthHeaders.length = 0;
+          events.length = 0;
+
+          // 3) Retry with the SAME fixed pin must NOT complete from the current slot and must NOT touch the successor.
+          const retryOutcome = await session.signOut({ expected: fixedPin, scope: "local" });
+          assert.deepEqual(retryOutcome, { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false });
+          assert.deepEqual(logoutAuthHeaders, [], "Retry sent zero logout calls for successor");
+          assert.equal(
+            base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+            0,
+            "Retry sent zero removeItem calls for successor",
+          );
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), succStored, "successor remains intact in storage");
+          assert.deepEqual(events, [], "zero SIGNED_OUT announced over successor");
+
+          const verified = await session.verifiedSession();
+          assert.equal(verified?.access_token, succJwt, "successor remains verifiable after Retry");
+        } finally {
+          await session.quiesce();
+        }
+      });
+
+      // Control: when the slot still holds the initiating no-sid login, the fallback refreshToken signs it out cleanly.
+      const controlStorage = memoryStorage({ [TEST_STORAGE_KEY]: origStored });
+      const controlLocks = createFifoLocks();
+      const controlEvents = [];
+      let controlLogouts = 0;
+      const controlFetch = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/logout")) {
+          controlLogouts += 1;
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+      await withBrowserEnv({ storage: controlStorage, locks: controlLocks, fetchImpl: controlFetch }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => controlEvents.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(controlLocks);
+          controlEvents.length = 0;
+
+          const outcome = await session.signOut({
+            expected: { userId: "user-1", sessionId: null, refreshToken: "rt-c2a-retry-orig" },
+            scope: "local",
+          });
+          assert.deepEqual(outcome, { signedOutLocally: true, serverRevoked: true, replaced: false, retry: false });
+          assert.equal(controlLogouts, 1);
+          assert.equal(controlStorage.entries.get(TEST_STORAGE_KEY) ?? null, null);
+          assert.deepEqual(controlEvents, [{ event: "SIGNED_OUT", sess: null }]);
+        } finally {
+          await session.quiesce();
+        }
+      });
+    });
   });
 });
 

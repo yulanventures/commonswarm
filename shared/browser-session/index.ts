@@ -354,10 +354,16 @@ export interface CreateBrowserSessionOptions {
 export interface BrowserSignOutOptions {
   /** Scope forwarded to `/auth/v1/logout` when a usable access token exists (defaults to `"local"`). */
   scope?: "global" | "local" | "others";
-  /** Optional initiating login identity captured at click time. */
+  /**
+   * Optional initiating login identity captured at click time.
+   * When provided, must be complete: `userId` AND (`sessionId` OR `refreshToken` as
+   * in-memory fallback discriminator). An incomplete explicit pin is never filled from
+   * the current slot and is refused with a retryable local failure.
+   */
   expected?: {
     userId?: string | null;
     sessionId?: string | null;
+    refreshToken?: string | null;
   } | null;
 }
 
@@ -1676,28 +1682,39 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     if (quiesced) {
       return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: false };
     }
-    deadSession = false;
     const scope = signOutOptions?.scope ?? "local";
     const targetKey = effectiveStorageKey();
-    // Capture the initiating login's identity before awaiting initialization or the lock.
-    // Never adopt a durable successor as the initiating login if this tab's local view is stale.
-    const initialLocalCred = savedSession(readAuthItem(targetKey));
-    const expectedUserId =
-      signOutOptions?.expected?.userId?.trim() || initialLocalCred?.user?.id?.trim() || null;
-    const expectedSessionId =
-      signOutOptions?.expected?.sessionId?.trim() ||
-      sessionIdFromAccessToken(initialLocalCred?.access_token) ||
-      null;
-    const initiatingRefreshToken =
-      initialLocalCred !== null &&
-      (expectedUserId === null || initialLocalCred.user?.id === expectedUserId) &&
-      (expectedSessionId === null || sessionIdFromAccessToken(initialLocalCred.access_token) === expectedSessionId)
-        ? initialLocalCred.refresh_token
-        : null;
+    // An explicit pin must be complete and fixed (`userId` AND `sessionId` OR in-memory
+    // fallback `refreshToken`): never complete an explicit pin from the current slot.
+    // Only a call with NO explicit `expected` pin at all reads the current local slot once.
+    const hasExplicitPin =
+      signOutOptions !== undefined &&
+      Object.prototype.hasOwnProperty.call(signOutOptions, "expected") &&
+      signOutOptions.expected !== undefined;
+    let expectedUserId: string | null;
+    let expectedSessionId: string | null;
+    let initiatingRefreshToken: string | null;
+    if (hasExplicitPin) {
+      const pin = signOutOptions.expected;
+      expectedUserId = pin?.userId?.trim() || null;
+      expectedSessionId = pin?.sessionId?.trim() || null;
+      initiatingRefreshToken = pin?.refreshToken?.trim() || null;
+      if (expectedUserId === null || (expectedSessionId === null && initiatingRefreshToken === null)) {
+        return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true };
+      }
+    } else {
+      // Capture the initiating login's identity before awaiting initialization or the lock.
+      // Never adopt a durable successor as the initiating login if this tab's local view is stale.
+      const initialLocalCred = savedSession(readAuthItem(targetKey));
+      expectedUserId = initialLocalCred?.user?.id?.trim() || null;
+      expectedSessionId = sessionIdFromAccessToken(initialLocalCred?.access_token) || null;
+      initiatingRefreshToken = initialLocalCred?.refresh_token?.trim() || null;
+    }
+    deadSession = false;
 
     const matchesInitiatingLogin = (cred: Session | null): boolean => {
       if (!cred) return false;
-      if (expectedUserId !== null && cred.user?.id !== expectedUserId) return false;
+      if (expectedUserId === null || cred.user?.id !== expectedUserId) return false;
       const credSid = sessionIdFromAccessToken(cred.access_token);
       if (expectedSessionId !== null) {
         return credSid === expectedSessionId;

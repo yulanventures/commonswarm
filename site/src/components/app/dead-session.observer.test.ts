@@ -511,7 +511,7 @@ test("saved web sessions survive transient verification/refresh and reload; term
               Storage.prototype.removeItem=function(){throw new DOMException('Fixture denial','SecurityError');};
               let signedOutDuringRefusal=false;
               const sub=api.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')signedOutDuringRefusal=true;});
-              const failedRes=await cs.signOut({userId:${JSON.stringify(userId)},loginId:'',sessionId:null,scope:'local'});
+              const failedRes=await cs.signOut({userId:${JSON.stringify(userId)},loginId:'22222222-2222-4222-8222-222222222222',sessionId:'22222222-2222-4222-8222-222222222222',refreshToken:'browser-refresh',scope:'local'});
               sub.data.subscription.unsubscribe();
               check(Boolean(failedRes)&&failedRes.signedOutLocally===false&&failedRes.retry===true&&failedRes.replaced===false,'denied persistent removal reports retryable local failure');
               check(!signedOutDuringRefusal,'denied persistent removal does not announce SIGNED_OUT');

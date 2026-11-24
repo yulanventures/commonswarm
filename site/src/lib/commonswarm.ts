@@ -1113,6 +1113,7 @@ export async function signOut(
     userId: string;
     loginId: string;
     sessionId?: string | null;
+    refreshToken?: string | null;
     scope?: BrowserSignOutOptions["scope"];
   } | null,
 ): Promise<BrowserSignOutResult | null> {
@@ -1124,12 +1125,15 @@ export async function signOut(
   if (!single) return null;
   return await single.signOut({
     ...(expected?.scope ? { scope: expected.scope } : {}),
-    ...(expected
+    ...(expected !== undefined
       ? {
-          expected: {
-            userId: expected.userId || null,
-            sessionId: expected.sessionId ?? (expected.loginId || null),
-          },
+          expected: expected
+            ? {
+                userId: expected.userId || null,
+                sessionId: expected.sessionId ?? (expected.loginId || null),
+                refreshToken: expected.refreshToken ?? null,
+              }
+            : null,
         }
       : {}),
   });
