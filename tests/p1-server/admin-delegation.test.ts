@@ -22,6 +22,7 @@ const scenarios = {
   limits: 'admin-request-audit: D3 init list read action and cached retries remain counted; surrender audit is atomic',
   expiry: 'admin-current-rights: rights loss narrowing and expiry refuse with human recovery and independent control',
   failure: 'admin rollback produces one failure card, no success event, and a replayable failure receipt',
+  stall_recovery: 'admin stall recovery preserves same-id retry for actual rollback and lost reply after commit',
   replay: 'edge-dpop-shared-replay: signed proofs across two SQL-backed instances restart rollback and cross-entry uniqueness',
   issuance: 'admin-access-issuance-required: signed unknown and mismatched JWTs refuse with committed issuance control',
   storage: 'admin migration preserves RLS, append-only audit, rollback, and account recovery after membership loss',

@@ -20,6 +20,13 @@ const postgresStub = moduleUrl(`
     probe.pools += 1;
     probe.max = options.max;
     probe.ssl = options.ssl;
+    probe.socket = options.socket;
+    probe.prepare = options.prepare;
+    probe.idle_timeout = options.idle_timeout;
+    probe.connect_timeout = options.connect_timeout;
+    probe.max_lifetime = options.max_lifetime;
+    probe.keep_alive = options.keep_alive;
+    probe.backoff = options.backoff;
     async function sql(strings, ...values) {
       const text = strings.join("?").replace(/\\s+/gu, " ").trim();
       probe.queries.push({ text, values });
@@ -100,11 +107,18 @@ try {
     assert.deepEqual(result, { status: 403, body: { error: "forbidden" } });
     assert.equal(probe.pools, 1);
     assert.equal(probe.max, 2, "management pool must cap at two connections");
+    assert.equal(probe.socket, undefined, "management pool must use stock postgres.js sockets, never a custom socket factory");
     assert.deepEqual(probe.ssl, {
       ca: readFileSync(process.env.MCP_OAUTH_DATABASE_TLS_CA_FILE, "utf8").trim(),
       servername: "db.commonswarm.internal",
       rejectUnauthorized: true,
     }, "real bundled postgres client must receive the CA and verified TLS servername");
+    assert.equal(probe.prepare, false, "management pool must keep prepare: false");
+    assert.equal(probe.idle_timeout, 3, "management pool must keep bounded idle_timeout");
+    assert.equal(probe.connect_timeout, 5, "management pool must keep bounded connect_timeout");
+    assert.equal(probe.max_lifetime, 300, "management pool must keep bounded max_lifetime");
+    assert.equal(probe.keep_alive, 5, "management pool must keep keep_alive");
+    assert.equal(probe.backoff(5), 0, "management pool must disable reconnect backoff poisoning");
     assert.deepEqual(probe.transactions, ["isolation level read committed"]);
     assert.ok(probe.queries.some(({ text }) => text.includes("'swarm_command'")));
     assert.ok(probe.queries.some(({ text, values }) => text.includes("INSERT INTO swarm.users") && values[0] === userId));

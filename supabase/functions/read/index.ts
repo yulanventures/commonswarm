@@ -7,10 +7,10 @@ import {
   withCommandCors,
 } from "../command/cors.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { isAdminReadResource, isAdminRecoveryRequest, adminReadRequest, readAdminRecovery, type AdminReadRequest } from "./admin-recovery.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
 import {
   extractSafeDiagnostics,
   formatReadFailureLog,
@@ -80,16 +80,15 @@ const authClient = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-const db = postgres(databaseUrl, withDatabaseTls({
+const db = createEdgeDatabase(databaseUrl, {
   /* Session-mode pooling measured EXHAUSTED (EMAXCONNSESSION, pool_size 38,
    * 2026-08-31): warm isolates pinning max*idle slots ate the pool and every
    * "episodic 500" this month was this. Keep the per-isolate footprint minimal;
    * the durable fix is SWARM_DATABASE_URL on the transaction pooler (6543). */
   max: 2,
-  prepare: false,
   idle_timeout: 3,
-  connect_timeout: 10,
-}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+  connect_timeout: 5,
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 

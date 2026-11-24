@@ -16,9 +16,10 @@
  * not apply. ack calls ackAgentDelivery and advances delivery state only there.
  * ackBatch closes the batch row and writes no delivery column.
  */
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
+import { COMMAND_REQUEST_BUDGET_MS, remainingFailureBudgetMs, runWithinFailureBudget } from "../_shared/failure-budget.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -109,12 +110,11 @@ function h0Database(): postgres.Sql {
       "h0 function requires SWARM_DATABASE_URL/SUPABASE_DB_URL",
     );
   }
-  database = postgres(databaseUrl, withDatabaseTls({
+  database = createEdgeDatabase(databaseUrl, {
     max: 1,
-    prepare: false,
     idle_timeout: 3,
-    connect_timeout: 10,
-  }, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+    connect_timeout: 5,
+  }, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
   return database;
 }
 
@@ -923,6 +923,7 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
   }
   const parsed = parseH0PollBody(await readBody(request));
   if (!parsed.ok) return json(400, { error: parsed.error, message: parsed.message });
+  const requestDeadlineAt = Date.now() + parsed.body.wait * 1_000 + COMMAND_REQUEST_BUDGET_MS;
   const tokenHash = await sha256(token);
   let held: { seat: Seat; holder: string } | null = null;
   try {
@@ -1076,9 +1077,13 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
     return json(200, responseBody);
   } finally {
     if (held !== null) {
-      try {
-        await releaseLock(held.seat, held.holder);
-      } catch {
+      const seat = held.seat;
+      const holder = held.holder;
+      const released = await runWithinFailureBudget(
+        remainingFailureBudgetMs(requestDeadlineAt),
+        () => releaseLock(seat, holder),
+      );
+      if (!released.ok) {
         console.error("h0 poll lock release failed");
       }
     }

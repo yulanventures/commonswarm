@@ -144,6 +144,7 @@ test("extractSafeDiagnostics classifies connection failures as retryable", () =>
       "CONNECTION_CLOSED",
       "CONNECTION_ENDED",
       "CONNECTION_DESTROYED",
+      "EDGE_DATABASE_STALLED",
     ]
   ) {
     const diag = extractSafeDiagnostics(

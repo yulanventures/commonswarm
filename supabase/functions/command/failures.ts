@@ -1,5 +1,90 @@
 /** Durable, secret-minimising records for command failures that escape a transaction. */
 
+/**
+ * End-to-end request budget (ms) for command/admin failure handling.
+ * Client requests time out at 30 s (src/cloud/command-client.ts, files.ts, delivery.ts);
+ * server-side edge-runtime idle timeout is 150 s (deploy/edge-runtime/main/router.ts) and
+ * Caddy response_header_timeout is 165 s. Leaving 2 s headroom below the 30 s client timeout
+ * gives a 28 s request budget.
+ */
+export const COMMAND_REQUEST_BUDGET_MS = 28_000;
+/** Maximum time (ms) any best-effort diagnostic/audit persistence may wait after a failure. */
+export const FAILURE_PERSISTENCE_MAX_MS = 2_500;
+
+export function remainingFailureBudgetMs(
+  requestDeadlineAt: number,
+  maxPersistenceMs: number = FAILURE_PERSISTENCE_MAX_MS,
+): number {
+  const remaining = requestDeadlineAt - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) return 0;
+  return Math.min(remaining, maxPersistenceMs);
+}
+
+/**
+ * Run a best-effort async failure write within a bounded time budget.
+ * When the budget is exhausted (<= 0 ms) or expires before settlement, the caller is released
+ * immediately and any late settlement or rejection from the abandoned operation is swallowed.
+ */
+export async function runWithinFailureBudget<T>(
+  budgetMs: number,
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0 || signal?.aborted) {
+    return { ok: false, error: new Error("failure persistence budget exhausted") };
+  }
+
+  let opPromise: Promise<T>;
+  try {
+    opPromise = Promise.resolve(operation());
+  } catch (syncError) {
+    return { ok: false, error: syncError };
+  }
+  opPromise.catch(() => {});
+
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let onAbort: (() => void) | null = null;
+
+  try {
+    const value = await new Promise<T>((resolve, reject) => {
+      const fail = (reason: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(reason);
+      };
+      timer = setTimeout(() => fail(new Error("failure persistence budget exceeded")), budgetMs);
+      if (typeof timer === "object" && timer !== null && "unref" in timer && typeof timer.unref === "function") {
+        timer.unref();
+      }
+      if (signal) {
+        onAbort = () => fail(new Error("failure persistence aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+      }
+      opPromise.then(
+        (res) => {
+          if (settled) return;
+          settled = true;
+          resolve(res);
+        },
+        (err) => fail(err),
+      );
+    });
+    return { ok: true, value };
+  } catch (error) {
+    return { ok: false, error };
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    if (signal && onAbort !== null) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
 export type CommandFailureReason =
   | "internal_error"
   | "lock_timeout"
@@ -88,31 +173,61 @@ export function durableCommandFailure(input: {
   };
 }
 
-/** Attempt one diagnostic insert without ever replacing the original response. */
+/** Attempt one diagnostic insert within the remaining request budget without ever replacing or delaying the response. */
 export async function finishCommandFailure(
   failure: DurableCommandFailure,
   insert: InsertCommandFailure,
   onInsertFailure: (error: unknown) => void = () => {},
+  budgetMs: number = FAILURE_PERSISTENCE_MAX_MS,
 ): Promise<CommandFailureResult> {
-  try {
-    await insert(failure);
-  } catch (error) {
+  const persisted = await runWithinFailureBudget(budgetMs, () => insert(failure));
+  if (!persisted.ok) {
     try {
-      onInsertFailure(error);
+      onInsertFailure(persisted.error);
     } catch {
       // Reporting a diagnostic failure must not mask the command failure either.
     }
   }
-  return failure.reason === "lock_timeout"
+  return failure.reason === "lock_timeout" || failure.db_code === "EDGE_DATABASE_STALLED"
     ? { status: 503, body: { error: "temporarily_unavailable" } }
     : { status: 500, body: { error: "internal_error" } };
 }
 
-/** An OAuth admin transaction that ended in SQLSTATE 40P01 rolled back in full, and its
- * failure card caches no result (recordAdminFailure), so the same command_id can run again.
+/** Whether a failed admin transaction is confirmed rolled back or its commit status is unknown. */
+export type AdminFailureOutcome = "rolled_back" | "unknown";
+
+/** Stable driver/holder/transport error codes where COMMIT may or may not have landed on Postgres. */
+const ADMIN_UNKNOWN_OUTCOME_CODES = new Set([
+  "EDGE_DATABASE_STALLED",
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
+  "CONNECT_TIMEOUT",
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ECONNABORTED",
+  "ENETRESET",
+  "57P01", // admin_shutdown
+  "57P02", // crash_shutdown
+]);
+
+/** Distinguish an unknown transaction outcome (stall / lost connection / connection error) from a
+ * confirmed rollback. Classified strictly by stable error code, never by message. */
+export function adminFailureOutcome(error: unknown): AdminFailureOutcome {
+  const code = dbCode(error);
+  if (code === null) return "rolled_back";
+  if (ADMIN_UNKNOWN_OUTCOME_CODES.has(code)) return "unknown";
+  if (code.length === 5 && code.startsWith("08")) return "unknown";
+  return "rolled_back";
+}
+
+/** An OAuth admin transaction that ended in SQLSTATE 40P01 (confirmed rollback) or an unknown
+ * outcome (stall / lost connection) caches no catch-generated failure receipt in recordAdminFailure,
+ * so the same command_id can recover cleanly (replaying a real commit or executing once).
  * Read by code, never by message. */
 export function adminFailureRetryable(error: unknown): boolean {
-  return dbCode(error) === "40P01";
+  return dbCode(error) === "40P01" || adminFailureOutcome(error) === "unknown";
 }
 
 /** OAuth admin failure response. A retryable failure adds `retryable: true` (the

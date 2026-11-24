@@ -6,9 +6,10 @@ import {
 } from "../_shared/protocol.js";
 import { householdRefusalDetails, householdRefusalNextStep } from "../../../src/protocol/household-next-steps.ts";
 import { householdReadProvenance, messageReadProvenance, withReadProvenance } from "../../../src/protocol/read-provenance.ts";
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
+import { FAILURE_PERSISTENCE_MAX_MS, runWithinFailureBudget } from "../_shared/failure-budget.ts";
 import {
   authenticateHostedSeatCapability,
   HOSTED_SEAT_READ_TOOLS,
@@ -143,21 +144,19 @@ const resource = exactContract("SWARM_MCP_RESOURCE", MCP_RESOURCE);
 exactContract("SWARM_MCP_JWKS_URL", MCP_JWKS_URL);
 const publicEnabled = Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1";
 
-const authDb = postgres(databaseUrl, withDatabaseTls({
+const authDb = createEdgeDatabase(databaseUrl, {
   max: 1,
-  prepare: false,
   idle_timeout: 3,
   connect_timeout: 5,
-}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
 // Capability authentication holds authDb while its shared resolver invokes the
 // provider-status callback. A separate single-slot pool prevents that nested
 // check from deadlocking the bounded authentication pool under concurrency.
-const statusDb = postgres(databaseUrl, withDatabaseTls({
+const statusDb = createEdgeDatabase(databaseUrl, {
   max: 1,
-  prepare: false,
   idle_timeout: 3,
   connect_timeout: 5,
-}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
 
 async function setRole(tx: Sql, role: "swarm_command" | "swarm_read"): Promise<void> {
   await tx`
@@ -305,8 +304,9 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     if (error instanceof HostedToolFailure) {
       const emitted = await reportHostedSeatRefused(error.code, call.token, providerStatus);
       if (emitted) {
-        try {
-          await authDb.begin("isolation level read committed", async (tx) => {
+        await runWithinFailureBudget(
+          FAILURE_PERSISTENCE_MAX_MS,
+          () => authDb.begin("isolation level read committed", async (tx) => {
             await setRole(tx, "swarm_command");
             await tx`SELECT set_config('lock_timeout', '250ms', true)`;
             await tx`
@@ -315,10 +315,9 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
                 ${call.token.subject}::uuid
               )
             `;
-          });
-        } catch {
-          // Alert recording must never change the tool refusal returned to the caller.
-        }
+          }),
+          call.signal,
+        );
       }
     }
     throw error;

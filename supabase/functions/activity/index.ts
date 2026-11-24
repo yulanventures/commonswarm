@@ -1,6 +1,6 @@
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -9,6 +9,7 @@ import {
 } from "../_shared/agent-auth.ts";
 import { parseAgentSessionProofHeaders } from "../../../src/cloud/session-wire.ts";
 import { activityFailureResult } from "../command/failures.ts";
+import { remainingFailureBudgetMs, runWithinFailureBudget } from "../_shared/failure-budget.ts";
 import {
   ACTIVITY_EVENT,
   ACTIVITY_REQUEST_MAX_BYTES,
@@ -25,12 +26,11 @@ if (!databaseUrl) {
   throw new Error("activity function requires SWARM_DATABASE_URL/SUPABASE_DB_URL");
 }
 
-const db = postgres(databaseUrl, withDatabaseTls({
+const db = createEdgeDatabase(databaseUrl, {
   max: 1,
-  prepare: false,
   idle_timeout: 3,
-  connect_timeout: 10,
-}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+  connect_timeout: 5,
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
 
 function json(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
@@ -105,6 +105,7 @@ async function handle(request: Request): Promise<Response> {
   const frame = status ?? activity;
   if (frame === null) return json(400, { error: "invalid_request" });
   const tokenHash = await sha256(token);
+  const requestDeadlineAt = Date.now() + 4_500;
 
   // One BEGIN with the isolation level and one statement for the local settings:
   // each round trip costs about 110 ms from the Falkenstein box to us-east-1.
@@ -262,11 +263,14 @@ async function handle(request: Request): Promise<Response> {
   }).catch(async error=>{
     if(error instanceof LocalActivityRefused) return error.response;
     if(error instanceof LocalCredentialDenied) {
-      await reportRevokedLocalCredential(async <T,>(run:(tx:postgres.TransactionSql<Record<string,unknown>>)=>Promise<T>):Promise<T> =>
-        await db.begin("isolation level read committed", async tx=>{
-          await tx`SELECT set_config('role','swarm_command',true), set_config('lock_timeout','250ms',true)`;
-          return await run(tx);
-        }) as unknown as T,tokenHash);
+      await runWithinFailureBudget(
+        remainingFailureBudgetMs(requestDeadlineAt, 1_000),
+        () => reportRevokedLocalCredential(async <T,>(run:(tx:postgres.TransactionSql<Record<string,unknown>>)=>Promise<T>):Promise<T> =>
+          await db.begin("isolation level read committed", async tx=>{
+            await tx`SELECT set_config('role','swarm_command',true), set_config('lock_timeout','250ms',true)`;
+            return await run(tx);
+          }) as unknown as T,tokenHash),
+      );
       return json(403,{error:'forbidden'});
     }
     throw error;
