@@ -23,6 +23,7 @@ import type {
   Uuid,
   WaitingArchivedEntry,
   WaitingArchivedKind,
+  KnownWaitingArchivedOutcomeKind,
   WaitingArchivedOutcomeKind,
   WaitingArchivedPage,
   WaitingArchivedPlacement,
@@ -281,12 +282,16 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     || !isoTime(value.state_at)
     || typeof value.placement !== 'string' || !WAITING_TODO_PLACEMENTS.has(value.placement as WaitingTodoPlacement)
     || (value.channel_id !== null && typeof value.channel_id !== 'string')
-    || (value.conversation_id !== undefined && value.conversation_id !== null && typeof value.conversation_id !== 'string')) {
+    || (value.conversation_id !== undefined && value.conversation_id !== null && typeof value.conversation_id !== 'string')
+    || (value.offer_id !== undefined && value.offer_id !== null && typeof value.offer_id !== 'string')) {
     throw new Error('home_waiting_todos_malformed');
   }
   const placement = value.placement as WaitingTodoPlacement;
   const rawConvId = typeof value.conversation_id === 'string' && value.conversation_id.trim()
     ? value.conversation_id.trim().toLowerCase()
+    : null;
+  const rawOfferId = typeof value.offer_id === 'string' && value.offer_id.trim()
+    ? value.offer_id.trim()
     : null;
   if (placement === 'channel' && (!value.channel_id || rawConvId !== null)) throw new Error('home_waiting_todos_malformed');
   if ((placement === 'dm' || placement === 'group_dm') && (!rawConvId || value.channel_id !== null)) {
@@ -303,6 +308,7 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     placement,
     channel_id: placement === 'channel' ? value.channel_id : null,
     conversation_id: (placement === 'dm' || placement === 'group_dm') ? rawConvId : null,
+    ...(rawOfferId !== null ? { offer_id: rawOfferId } : {}),
   };
 }
 
@@ -323,10 +329,14 @@ export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): Waitin
 }
 
 const WAITING_ARCHIVED_KINDS = new Set<WaitingArchivedKind>(['ask', 'todo', 'review']);
-const WAITING_ARCHIVED_OUTCOMES = new Set<WaitingArchivedOutcomeKind>(['answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed']);
+export const WAITING_ARCHIVED_OUTCOMES = new Set<KnownWaitingArchivedOutcomeKind>([
+  'answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed',
+  'agent_removed', 'sender_left', 'channel_archived', 'withdrawn', 'expired',
+]);
 const WAITING_ARCHIVED_PLACEMENTS = new Set<WaitingArchivedPlacement>(['channel', 'general', 'dm', 'group_dm', 'workspace', 'redacted']);
 
 function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
+  const outcomeKind = record(value) && typeof value.outcome_kind === 'string' ? value.outcome_kind.trim() : '';
   if (!record(value)
     || typeof value.item_key !== 'string' || !value.item_key
     || typeof value.kind !== 'string' || !WAITING_ARCHIVED_KINDS.has(value.kind as WaitingArchivedKind)
@@ -334,7 +344,7 @@ function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
     || (value.todo_id !== null && typeof value.todo_id !== 'string')
     || (value.ask_kind !== null && value.ask_kind !== 'choice' && value.ask_kind !== 'plain')
     || typeof value.title !== 'string'
-    || typeof value.outcome_kind !== 'string' || !WAITING_ARCHIVED_OUTCOMES.has(value.outcome_kind as WaitingArchivedOutcomeKind)
+    || !outcomeKind
     || typeof value.outcome_text !== 'string'
     || !isoTime(value.archived_at)
     || typeof value.placement !== 'string' || !WAITING_ARCHIVED_PLACEMENTS.has(value.placement as WaitingArchivedPlacement)
@@ -381,7 +391,7 @@ function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
     ask_kind: value.ask_kind,
     title: value.title,
     from,
-    outcome_kind: value.outcome_kind as WaitingArchivedOutcomeKind,
+    outcome_kind: outcomeKind as WaitingArchivedOutcomeKind,
     outcome_text: value.outcome_text,
     archived_at: value.archived_at,
     answered_by: answeredBy,
@@ -467,7 +477,7 @@ export function createHomeServer(
       return data as unknown as HomeOverview;
     },
 
-    async decisionQueue(workspaceId): Promise<DecisionQueue | null> {
+    async decisionQueue(workspaceId, options?: { maxPages?: number }): Promise<DecisionQueue | null> {
       const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
       if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
@@ -483,8 +493,8 @@ export function createHomeServer(
       let page = first;
       let truncated = true;
       let pages = 1;
-      const MAX_PAGES = 20;
-      while (truncated && pages < MAX_PAGES && page.asks.length > 0) {
+      const maxPages = Math.max(1, options?.maxPages ?? 20);
+      while (truncated && pages < maxPages && page.asks.length > 0) {
         if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.asks[page.asks.length - 1]!;
         let next: DecisionQueue | null = null;
@@ -529,10 +539,10 @@ export function createHomeServer(
       };
     },
 
-    async waitingTodos(workspaceId): Promise<WaitingTodosQueue | null> {
+    async waitingTodos(workspaceId, options?: { maxPages?: number }): Promise<WaitingTodosQueue | null> {
       const { c, pinned } = resolvePinnedClient();
       const PAGE_LIMIT = 50;
-      const MAX_PAGES = 20;
+      const maxPages = Math.max(1, options?.maxPages ?? 20);
       const { data, error } = await c.schema('swarm_read').rpc('waiting_todos_page', {
         p_workspace_id: workspaceId,
         p_limit: PAGE_LIMIT,
@@ -547,7 +557,7 @@ export function createHomeServer(
       let page = first;
       let truncated = true;
       let pages = 1;
-      while (truncated && pages < MAX_PAGES && page.todos.length > 0) {
+      while (truncated && pages < maxPages && page.todos.length > 0) {
         if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.todos[page.todos.length - 1]!;
         let next: WaitingTodosQueue | null = null;
