@@ -740,20 +740,31 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
     });
     assert.equal(withdrawPriv.status, 200, respDiag("withdrawPriv", withdrawPriv));
 
-    // Outside owner & admin see ZERO withdraw_ask audit rows for the private channel in swarm_read.audit_log.
+    // The private-channel withdrawal's audit row is tagged with its channel in the table, and the
+    // audit view (which exposes no channel column) hides exactly those rows from an owner and an admin
+    // who are not in the channel.
+    const privAuditRows = await sql<{ audit_id: string }[]>`
+      SELECT audit_id::text AS audit_id
+      FROM swarm.audit_log
+      WHERE workspace_id = ${wsId}::uuid
+        AND command_kind = 'withdraw_ask'
+        AND ${privChId}::uuid = ANY(channel_ids)
+    `;
+    assert.ok(privAuditRows.length >= 1, `private-channel withdraw_ask audit row must carry its channel tag, got ${JSON.stringify(privAuditRows)}`);
+    const privAuditIds = privAuditRows.map((row) => row.audit_id);
     for (const [label, auditor] of [["owner", owner], ["admin", adminUser]] as const) {
       const visible = await sql.begin(async (tx) => {
         await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: auditor.id })}, true)`;
         await tx`SET LOCAL ROLE authenticated`;
-        return tx<{ command_kind: string; channel_id: string | null }[]>`
-          SELECT command_kind, channel_id
+        return tx<{ audit_id: string }[]>`
+          SELECT audit_id::text AS audit_id
           FROM swarm_read.audit_log
           WHERE workspace_id = ${wsId}::uuid
             AND command_kind = 'withdraw_ask'
-            AND channel_id = ${privChId}::uuid
         `;
       });
-      assert.equal(visible.length, 0, `${label} must not see private-channel withdraw_ask audit rows: ${JSON.stringify(visible)}`);
+      const leaked = visible.filter((row) => privAuditIds.includes(row.audit_id));
+      assert.equal(leaked.length, 0, `${label} must not see private-channel withdraw_ask audit rows: ${JSON.stringify(leaked)}`);
     }
 
     // Addressee2 (not in privChId) sees nothing of privAskId in Archived.
