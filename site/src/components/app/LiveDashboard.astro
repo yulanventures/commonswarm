@@ -3275,6 +3275,7 @@ import "../../styles/kylon-image-viewer.css";
       event.preventDefault();
       window.history.replaceState(window.history.state, "", link.href);
       showAuthEntry(authEntryFromSearch(window.location.search));
+      pendingSignOutNotice = null;
       authError(null);
       authLinkError(null);
       one<HTMLInputElement>("#dashboard-email")?.focus();
@@ -3391,10 +3392,33 @@ import "../../styles/kylon-image-viewer.css";
       window.requestAnimationFrame(() => panel.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true }));
     };
 
-    let pendingSignOutRetry: (() => Promise<void>) | null = null;
+    interface PendingSignOutState {
+      readonly userId: string;
+      readonly sessionId: string;
+      readonly refreshToken: string;
+      readonly retry: () => Promise<void>;
+    }
+    // Held strictly in page memory (never persisted to storage) so a reload always
+    // follows the browser's true stored state and can never lock a person out.
+    let pendingSignOut: PendingSignOutState | null = null;
+    let pendingSignOutNotice: string | null = null;
+
+    const isPendingSignOutLogin = (targetSession: Session | null): boolean => {
+      if (!pendingSignOut || !targetSession) return false;
+      const targetUserId = targetSession.user?.id ?? "";
+      if (pendingSignOut.userId && targetUserId !== pendingSignOut.userId) return false;
+      const targetSessionId = authLoginIdFor(targetSession);
+      if (pendingSignOut.sessionId) {
+        return targetSessionId === pendingSignOut.sessionId;
+      }
+      if (pendingSignOut.refreshToken) {
+        return targetSession.refresh_token === pendingSignOut.refreshToken;
+      }
+      return Boolean(pendingSignOut.userId && targetUserId === pendingSignOut.userId);
+    };
 
     const resetWorkspaceErrorCopy = (): void => {
-      pendingSignOutRetry = null;
+      pendingSignOut = null;
       const target = panel("workspace-error");
       const eyebrow = target?.querySelector<HTMLElement>(".dashboard__eyebrow");
       if (eyebrow) {
@@ -3407,8 +3431,8 @@ import "../../styles/kylon-image-viewer.css";
       if (message) message.hidden = false;
     };
 
-    const renderSignOutError = (retryAction: () => Promise<void>): void => {
-      pendingSignOutRetry = retryAction;
+    const renderSignOutError = (state: PendingSignOutState): void => {
+      pendingSignOut = state;
       authRecoveryActive = false;
       const target = panel("workspace-error");
       const account = target?.querySelector<HTMLElement>(".dashboard__account-line");
@@ -11026,33 +11050,46 @@ import "../../styles/kylon-image-viewer.css";
             }
           } else {
             const ownerExpectedUserId = ownerRenderedUserId || session.user.id;
-            const ownerExpectedSessionId = ownerLoginId || sessionIdFromAccessToken(session.access_token);
+            const ownerExpectedSessionId = ownerLoginId || sessionIdFromAccessToken(session.access_token) || "";
+            const ownerExpectedRefreshToken = session.refresh_token ?? "";
+            bootGeneration += 1;
+            pendingSignOutNotice = null;
             const attemptReauthSignOut = async (): Promise<void> => {
+              const pendingState: PendingSignOutState = {
+                userId: ownerExpectedUserId,
+                sessionId: ownerExpectedSessionId,
+                refreshToken: ownerExpectedRefreshToken,
+                retry: attemptReauthSignOut,
+              };
+              pendingSignOut = pendingState;
               const signOutRes = await signOut({
                 userId: ownerExpectedUserId,
-                loginId: ownerLoginId,
-                sessionId: ownerExpectedSessionId,
+                loginId: ownerExpectedSessionId,
+                sessionId: ownerExpectedSessionId || null,
                 scope: "local",
               });
               session = null;
               if (signOutRes?.replaced) {
-                pendingSignOutRetry = null;
+                pendingSignOut = null;
+                pendingSignOutNotice = null;
                 if (!authReloadQueued) runBoot();
                 return;
               }
               if (signOutRes && !signOutRes.signedOutLocally) {
-                renderSignOutError(attemptReauthSignOut);
+                renderSignOutError(pendingState);
                 return;
               }
-              pendingSignOutRetry = null;
+              pendingSignOut = null;
+              pendingSignOutNotice =
+                signOutRes && !signOutRes.serverRevoked
+                  ? "Signed out on this device. Sign in again to confirm agent admin access."
+                  : null;
               showAuthView("choices");
               showPanel("signed-out");
               const emailInput = one<HTMLInputElement>("#dashboard-email");
               if (emailInput && userEmail) emailInput.value = userEmail;
               authError(
-                signOutRes && !signOutRes.serverRevoked
-                  ? "Signed out on this device. Sign in again to confirm agent admin access."
-                  : "Sign in again to confirm agent admin access.",
+                pendingSignOutNotice ?? "Sign in again to confirm agent admin access.",
               );
               window.requestAnimationFrame(() => {
                 const focusField =
@@ -20719,13 +20756,26 @@ import "../../styles/kylon-image-viewer.css";
       }
 
       authRecoveryActive = false;
-      pendingSignOutRetry = null;
+      const signOutRetryPending = !isMultiAccountEnabled() && pendingSignOut !== null;
       sampleMode = false;
       for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open], [data-password-open]")) button.hidden = false;
-      setLoading("Checking your sign-in…");
+      if (!signOutRetryPending) {
+        setLoading("Checking your sign-in…");
+      }
       try {
         const verified = await currentSession();
         if (version !== requestVersion || bootVersion !== bootGeneration) return;
+        if (!isMultiAccountEnabled() && pendingSignOut !== null) {
+          if (verified && isPendingSignOutLogin(verified)) {
+            session = null;
+            renderedAuthUserId = "";
+            renderedAuthLoginId = "";
+            renderSignOutError(pendingSignOut);
+            return;
+          }
+          pendingSignOut = null;
+          if (verified) pendingSignOutNotice = null;
+        }
         const previousAuthUserId = renderedAuthUserId;
         const previousAuthLoginId = renderedAuthLoginId;
         session = verified;
@@ -20744,7 +20794,9 @@ import "../../styles/kylon-image-viewer.css";
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
-          if (pendingSeatAdminReauthNotice && !returnedAuthError) {
+          if (pendingSignOutNotice && !returnedAuthError) {
+            authError(pendingSignOutNotice);
+          } else if (pendingSeatAdminReauthNotice && !returnedAuthError) {
             authError("Sign in again to confirm agent admin access.");
           } else if (returnedAuthError) {
             authLinkError(returnedAuthError);
@@ -20759,6 +20811,8 @@ import "../../styles/kylon-image-viewer.css";
           }
           return;
         }
+        pendingSignOut = null;
+        pendingSignOutNotice = null;
         pendingSeatAdminReauthNotice = false;
         pendingForcedNotice = null;
         passwordChangeNotice = null;
@@ -20836,6 +20890,17 @@ import "../../styles/kylon-image-viewer.css";
       } catch (error) {
         if (bootVersion !== bootGeneration) return;
         pendingSwitchFocusReturn = false;
+        if (!isMultiAccountEnabled() && pendingSignOut !== null) {
+          if (error instanceof SessionExpired) {
+            pendingSignOut = null;
+          } else {
+            session = null;
+            renderedAuthUserId = "";
+            renderedAuthLoginId = "";
+            renderSignOutError(pendingSignOut);
+            return;
+          }
+        }
         if (error instanceof AuthRecoveryRequired) {
           resetWorkspaceErrorCopy();
           authRecoveryActive = true;
@@ -20894,6 +20959,7 @@ import "../../styles/kylon-image-viewer.css";
       button.addEventListener("click", async () => {
         button.disabled = true;
         button.setAttribute("aria-busy", "true");
+        pendingSignOutNotice = null;
         authError(null);
         try {
           await signInWithProvider(
@@ -20956,6 +21022,7 @@ import "../../styles/kylon-image-viewer.css";
     for (const button of all<HTMLButtonElement>("[data-use-email]")) {
       button.addEventListener("click", () => {
         resetSignedOutOtp(true);
+        pendingSignOutNotice = null;
         authError(null);
         showAuthView("choices");
         one<HTMLInputElement>("#dashboard-email")?.focus();
@@ -20979,6 +21046,7 @@ import "../../styles/kylon-image-viewer.css";
     const sendSignedOutEmailCodeOrLink = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
       const myGen = ++signedOutOtpIntentGen;
       busy(trigger, true);
+      pendingSignOutNotice = null;
       authError(null);
       try {
         const started = await signInWithEmail(requestedEmail, new URL("/app", window.location.origin).href);
@@ -21054,6 +21122,7 @@ import "../../styles/kylon-image-viewer.css";
       const code = otpInput.value.trim();
       if (!code) { authError("Enter the emailed sign-in code."); otpInput.focus(); return; }
       busy(verifyBtn, true);
+      pendingSignOutNotice = null;
       authError(null);
       const myGen = signedOutOtpIntentGen;
       const attemptId = activeSignedOutOtpAttemptId;
@@ -21094,6 +21163,7 @@ import "../../styles/kylon-image-viewer.css";
       if (authEntry === "create") { one<HTMLButtonElement>("[data-email-link]")?.click(); return; }
       if (!email?.value.trim() || !password?.value) return;
       busy(button, true);
+      pendingSignOutNotice = null;
       authError(null);
       try {
         await signInWithPassword(email.value.trim(), password.value);
@@ -21202,8 +21272,10 @@ import "../../styles/kylon-image-viewer.css";
         const signingOutUserId = renderedAuthUserId || session?.user.id || "";
         const signingOutSessionId =
           renderedAuthLoginId || (session ? sessionIdFromAccessToken(session.access_token) ?? "" : "");
+        const signingOutRefreshToken = session?.refresh_token ?? "";
         pendingSeatAdminReauthNotice = false;
         pendingForcedNotice = null;
+        pendingSignOutNotice = null;
         passwordChangeNotice = null;
         authRecoveryActive = false;
         clearSeatAdminReauthIntent();
@@ -21213,6 +21285,13 @@ import "../../styles/kylon-image-viewer.css";
         }
         teardownActiveAccountView();
         const attemptSingleSignOut = async (): Promise<void> => {
+          const pendingState: PendingSignOutState = {
+            userId: signingOutUserId,
+            sessionId: signingOutSessionId,
+            refreshToken: signingOutRefreshToken,
+            retry: attemptSingleSignOut,
+          };
+          pendingSignOut = pendingState;
           const signOutRes = await signOut(
             signingOutUserId || signingOutSessionId
               ? {
@@ -21229,20 +21308,25 @@ import "../../styles/kylon-image-viewer.css";
                 },
           );
           if (signOutRes?.replaced) {
-            pendingSignOutRetry = null;
+            pendingSignOut = null;
+            pendingSignOutNotice = null;
             if (!authReloadQueued) runBoot();
             return;
           }
           session = null;
           if (signOutRes && !signOutRes.signedOutLocally) {
-            renderSignOutError(attemptSingleSignOut);
+            renderSignOutError(pendingState);
             return;
           }
-          pendingSignOutRetry = null;
+          pendingSignOut = null;
+          pendingSignOutNotice =
+            signOutRes && !signOutRes.serverRevoked
+              ? "Signed out on this device. Could not reach the server to confirm remote sign-out."
+              : null;
           showAuthView("choices");
           showPanel("signed-out");
-          if (signOutRes && !signOutRes.serverRevoked) {
-            authError("Signed out on this device. Could not reach the server to confirm remote sign-out.");
+          if (pendingSignOutNotice) {
+            authError(pendingSignOutNotice);
           }
         };
         await attemptSingleSignOut();
@@ -24290,8 +24374,8 @@ import "../../styles/kylon-image-viewer.css";
       if (activeWorkspaceId) void openWorkspace(activeWorkspaceId);
     });
     one<HTMLButtonElement>("[data-retry-workspaces]")?.addEventListener("click", async () => {
-      if (pendingSignOutRetry) {
-        const retry = pendingSignOutRetry;
+      if (pendingSignOut) {
+        const retry = pendingSignOut.retry;
         const retryBtn = one<HTMLButtonElement>("[data-retry-workspaces]");
         if (retryBtn) retryBtn.disabled = true;
         try {
@@ -24622,6 +24706,25 @@ import "../../styles/kylon-image-viewer.css";
     const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
       const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      if (!multi && typeof pendingSignOut !== "undefined" && pendingSignOut) {
+        if (signedOut) {
+          pendingSignOut = null;
+        } else if (
+          nextSession &&
+          typeof isPendingSignOutLogin === "function" &&
+          isPendingSignOutLogin(nextSession)
+        ) {
+          return;
+        } else if (nextSession) {
+          pendingSignOut = null;
+          if (typeof pendingSignOutNotice !== "undefined") pendingSignOutNotice = null;
+        } else {
+          return;
+        }
+      }
+      if (!multi && nextSession && !signedOut && typeof pendingSignOutNotice !== "undefined") {
+        pendingSignOutNotice = null;
+      }
       const currentRenderedLoginId = typeof renderedAuthLoginId !== "undefined" ? renderedAuthLoginId : "";
       const nextLoginId = typeof authLoginIdFor === "function"
         ? authLoginIdFor(nextSession)
@@ -24657,7 +24760,7 @@ import "../../styles/kylon-image-viewer.css";
         resetWorkspaceSessionState();
         requestVersion += 1;
         authRecoveryActive = false;
-        if (typeof pendingSignOutRetry !== "undefined") pendingSignOutRetry = null;
+        if (typeof pendingSignOut !== "undefined") pendingSignOut = null;
       }
       if (authReloadQueued) return;
       authReloadQueued = true;
@@ -24675,6 +24778,21 @@ import "../../styles/kylon-image-viewer.css";
       // A sign-out or a different account in any tab ends an open Password dialog.
       if (passwordGuard.observeAuth(event, nextSession?.user.id)) closePasswordDialog();
       const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      if (!multi && pendingSignOut) {
+        if (event === "SIGNED_OUT") {
+          pendingSignOut = null;
+          queueAuthReload(null, false, true);
+          return;
+        }
+        if (nextSession && isPendingSignOutLogin(nextSession)) {
+          return;
+        }
+        if (!nextSession) {
+          return;
+        }
+        pendingSignOut = null;
+        pendingSignOutNotice = null;
+      }
       const nextLoginId = authLoginIdFor(nextSession);
       const singleLoginChanged =
         !multi &&

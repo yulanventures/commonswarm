@@ -2545,18 +2545,405 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
     }
   });
 
-  await t.test("(f) LiveDashboard single-account sign-out paths both pass local scope, render retryable error on local failure, and distinguish unconfirmed remote sign-out", async () => {
+  await t.test("(f) C2a durable slot ownership under lock: stale local view (removedStorageKeys or pending write) and unavailable local view protect durable successor with zero removeItem and zero SIGNED_OUT; unreadable slot retries; empty slot reports local success with zero removeItem and zero duplicate SIGNED_OUT", async (st) => {
+    await st.test("stale local view via removedStorageKeys hides durable successor: successor survives, zero removeItem, zero SIGNED_OUT", async () => {
+      for (const successorCase of [
+        { name: "different user", userId: "user-2", sessionId: "sid-c2a-succ-u2", refreshToken: "rt-c2a-succ-u2" },
+        { name: "same user new session_id", userId: "user-1", sessionId: "sid-c2a-succ-u1", refreshToken: "rt-c2a-succ-u1" },
+      ]) {
+        const login1Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-orig-1", sig: "sig-c2a-orig-1" });
+        const login1Stored = makeStoredSession({ accessToken: login1Jwt, refreshToken: "rt-c2a-orig-1", expired: false, userId: "user-1" });
+        const login2Jwt = makeSignedJwt({ sub: successorCase.userId, sessionId: successorCase.sessionId, sig: "sig-c2a-succ" });
+        const login2Stored = makeStoredSession({
+          accessToken: login2Jwt,
+          refreshToken: successorCase.refreshToken,
+          expired: false,
+          userId: successorCase.userId,
+        });
+        for (const callMode of [
+          { label: "expected", opts: { expected: { userId: "user-1", sessionId: "sid-c2a-orig-1" } } },
+          { label: "default", opts: undefined },
+        ]) {
+          const storage = memoryStorage({ [TEST_STORAGE_KEY]: login1Stored });
+          const locks = createFifoLocks();
+          const events = [];
+          let logoutCalls = 0;
+
+          const fetchImpl = async (input) => {
+            const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            if (url.includes("/auth/v1/logout")) {
+              logoutCalls += 1;
+              return new Response(null, { status: 204 });
+            }
+            if (url.includes("/auth/v1/user")) {
+              return new Response(JSON.stringify({ id: successorCase.userId, aud: "authenticated" }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            throw new Error(`Unexpected URL: ${url}`);
+          };
+
+          await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+            const session = makeRealSession();
+            session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+            try {
+              await session.client.auth.initialize();
+              await settleLockIdle(locks);
+              // Perform an earlier removal so `removedStorageKeys` holds TEST_STORAGE_KEY
+              // and `readAuthItem(TEST_STORAGE_KEY)` returns null while ignoring disk.
+              const firstSignOut = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-orig-1" } });
+              assert.equal(firstSignOut.signedOutLocally, true);
+              assert.equal(storage.entries.get(TEST_STORAGE_KEY) ?? null, null);
+
+              // Peer writes durable successor directly to persistent storage without a storage event.
+              storage.entries.set(TEST_STORAGE_KEY, login2Stored);
+              storage.ops.length = 0;
+              events.length = 0;
+              logoutCalls = 0;
+
+              const outcome = await session.signOut(callMode.opts);
+              assert.deepEqual(
+                outcome,
+                { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false },
+                `${successorCase.name} (${callMode.label}): reported replaced`,
+              );
+              assert.equal(storage.entries.get(TEST_STORAGE_KEY), login2Stored, `${successorCase.name}: durable successor survived`);
+              assert.equal(
+                storage.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+                0,
+                `${successorCase.name}: zero removeItem calls reached persistent storage`,
+              );
+              assert.deepEqual(events, [], `${successorCase.name}: zero SIGNED_OUT announced`);
+              assert.equal(logoutCalls, 0, `${successorCase.name}: zero server logout calls`);
+
+              // Healed local view now verifies the durable successor cleanly.
+              const verified = await session.verifiedSession();
+              assert.equal(verified?.access_token, login2Jwt, `${successorCase.name}: durable successor remains verifiable`);
+            } finally {
+              await session.quiesce();
+            }
+          });
+        }
+      }
+    });
+
+    await st.test("stale local view via pendingStorageWrites (unknown pre-write snapshot) hides durable successor: successor survives, zero removeItem, zero SIGNED_OUT", async () => {
+      const b64 = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
+      const futureExp = Math.floor(Date.now() / 1000) + 3600;
+      const login1Jwt = `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: "user-1", session_id: "sid-c2a-pend-1", exp: futureExp })}.sig-c2a-pend-1`;
+      const login2Jwt = `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: "user-1", session_id: "sid-c2a-pend-2", exp: futureExp })}.sig-c2a-pend-2`;
+      const login2Stored = makeStoredSession({ accessToken: login2Jwt, refreshToken: "rt-c2a-pend-2", expired: false, userId: "user-1" });
+
+      const base = memoryStorage({ [TEST_STORAGE_KEY]: login2Stored });
+      let denyReads = true;
+      let denyWrites = true;
+      const flakyStorage = {
+        ...base,
+        get length() { return base.length; },
+        key(i) { return base.key(i); },
+        getItem(k) {
+          if (denyReads && k === TEST_STORAGE_KEY) throw new DOMException("SecurityError", "SecurityError");
+          return base.getItem(k);
+        },
+        setItem(k, v) {
+          if (denyWrites) throw new DOMException("QuotaExceededError", "QuotaExceededError");
+          base.setItem(k, v);
+        },
+        removeItem(k) { base.removeItem(k); },
+      };
+      const locks = createFifoLocks();
+      const events = [];
+      let logoutCalls = 0;
+
+      const fetchImpl = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/user")) {
+          return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/auth/v1/logout")) {
+          logoutCalls += 1;
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage: flakyStorage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          // Populate authMemory + pendingStorageWrites with expected===undefined for login1 while disk holds login2.
+          const setRes = await session.client.auth.setSession({
+            access_token: login1Jwt,
+            refresh_token: "rt-c2a-pend-1",
+          });
+          assert.equal(setRes.error, null);
+
+          // Disk is now readable and holds login2, yet the module's reconciled local view still returns login1!
+          denyReads = false;
+          const staleLocalView = await session.client.auth.getSession();
+          assert.equal(staleLocalView.data.session?.refresh_token, "rt-c2a-pend-1", "fixture precondition: local view is stale login1");
+
+          base.ops.length = 0;
+          events.length = 0;
+          logoutCalls = 0;
+
+          const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-pend-1" } });
+          assert.deepEqual(outcome, { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false });
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), login2Stored, "durable successor survived stale local view");
+          assert.equal(
+            base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+            0,
+            "zero removeItem calls reached persistent storage",
+          );
+          assert.deepEqual(events, [], "zero SIGNED_OUT announced");
+          assert.equal(logoutCalls, 0, "zero server logout calls");
+        } finally {
+          await session.quiesce();
+        }
+      });
+    });
+
+    await st.test("unavailable local view (disk read fails when module view is consulted, then readable with durable successor): successor survives, zero removeItem, zero SIGNED_OUT", async () => {
+      for (const successorCase of [
+        { name: "same user new session_id", userId: "user-1", sessionId: "sid-c2a-unavail-2", refreshToken: "rt-c2a-unavail-2" },
+        { name: "different user", userId: "user-2", sessionId: "sid-c2a-unavail-u2", refreshToken: "rt-c2a-unavail-u2" },
+      ]) {
+        const login1Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-unavail-1", sig: "sig-c2a-unavail-1" });
+        const login1Stored = makeStoredSession({ accessToken: login1Jwt, refreshToken: "rt-c2a-unavail-1", expired: false, userId: "user-1" });
+        const login2Jwt = makeSignedJwt({ sub: successorCase.userId, sessionId: successorCase.sessionId, sig: "sig-c2a-unavail-2" });
+        const login2Stored = makeStoredSession({
+          accessToken: login2Jwt,
+          refreshToken: successorCase.refreshToken,
+          expired: false,
+          userId: successorCase.userId,
+        });
+
+        const base = memoryStorage({ [TEST_STORAGE_KEY]: login1Stored });
+        let failNextSessionReads = 0;
+        const transientUnreadableStorage = {
+          ...base,
+          get length() { return base.length; },
+          key(i) { return base.key(i); },
+          getItem(k) {
+            if (k === TEST_STORAGE_KEY && failNextSessionReads > 0) {
+              failNextSessionReads -= 1;
+              throw new DOMException("SecurityError", "SecurityError");
+            }
+            return base.getItem(k);
+          },
+          setItem(k, v) { base.setItem(k, v); },
+          removeItem(k) { base.removeItem(k); },
+        };
+        const locks = createFifoLocks();
+        const events = [];
+        let logoutCalls = 0;
+
+        const fetchImpl = async (input) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.includes("/auth/v1/logout")) {
+            logoutCalls += 1;
+            return new Response(null, { status: 204 });
+          }
+          throw new Error(`Unexpected URL: ${url}`);
+        };
+
+        await withBrowserEnv({ storage: transientUnreadableStorage, locks, fetchImpl }, async () => {
+          const session = makeRealSession();
+          session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+          try {
+            await session.client.auth.initialize();
+            await settleLockIdle(locks);
+            // Confirm authMemory holds login1.
+            assert.equal((await session.client.auth.getSession()).data.session?.refresh_token, "rt-c2a-unavail-1");
+
+            // Peer writes durable successor to persistent storage without firing a storage event.
+            base.entries.set(TEST_STORAGE_KEY, login2Stored);
+            base.ops.length = 0;
+            events.length = 0;
+            logoutCalls = 0;
+
+            // Fail the first getItem read (when signOut consults the module's own view via readAuthItem)
+            // so the module falls back to stale authMemory (login1), then disk becomes readable (login2)
+            // for the locked durable ownership check.
+            failNextSessionReads = 1;
+            const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-unavail-1" } });
+            assert.deepEqual(
+              outcome,
+              { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false },
+              `${successorCase.name}: detected durable successor after transient local read failure`,
+            );
+            assert.equal(base.entries.get(TEST_STORAGE_KEY), login2Stored, `${successorCase.name}: durable successor survived`);
+            assert.equal(
+              base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+              0,
+              `${successorCase.name}: zero removeItem calls reached persistent storage`,
+            );
+            assert.deepEqual(events, [], `${successorCase.name}: zero SIGNED_OUT announced`);
+            assert.equal(logoutCalls, 0, `${successorCase.name}: zero server logout calls`);
+          } finally {
+            await session.quiesce();
+          }
+        });
+      }
+    });
+
+    await st.test("durable slot unreadable under lock (throws OR storage unavailable) returns retryable failure with zero removeItem and zero SIGNED_OUT; readable empty slot returns local success with zero removeItem and zero duplicate SIGNED_OUT", async () => {
+      const login1Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-unr-1", sig: "sig-c2a-unr-1" });
+      const login1Stored = makeStoredSession({ accessToken: login1Jwt, refreshToken: "rt-c2a-unr-1", expired: false, userId: "user-1" });
+      const base = memoryStorage({ [TEST_STORAGE_KEY]: login1Stored });
+      let denyReads = false;
+      const flakyStorage = {
+        ...base,
+        get length() { return base.length; },
+        key(i) { return base.key(i); },
+        getItem(k) {
+          if (denyReads && k === TEST_STORAGE_KEY) throw new DOMException("SecurityError", "SecurityError");
+          return base.getItem(k);
+        },
+        setItem(k, v) { base.setItem(k, v); },
+        removeItem(k) { base.removeItem(k); },
+      };
+      const locks = createFifoLocks();
+      const events = [];
+      let logoutCalls = 0;
+
+      const fetchImpl = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/logout")) {
+          logoutCalls += 1;
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage: flakyStorage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          assert.equal((await session.client.auth.getSession()).data.session?.refresh_token, "rt-c2a-unr-1");
+
+          // 1) Unreadable durable slot under lock -> retryable failure, zero removeItem, zero SIGNED_OUT.
+          denyReads = true;
+          base.ops.length = 0;
+          events.length = 0;
+          logoutCalls = 0;
+          const unreadableRes = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-unr-1" } });
+          assert.deepEqual(unreadableRes, { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true });
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), login1Stored, "slot untouched when unreadable");
+          assert.equal(base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length, 0, "zero removeItem calls");
+          assert.deepEqual(events, [], "zero SIGNED_OUT announced");
+          assert.equal(logoutCalls, 0, "zero server logout calls while durable slot unreadable");
+
+          // 2) Storage unavailable (localStorage set to null) -> retryable failure, zero removeItem, zero SIGNED_OUT.
+          denyReads = false;
+          Object.defineProperty(globalThis, "localStorage", { configurable: true, value: null });
+          const unavailableRes = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-unr-1" } });
+          Object.defineProperty(globalThis, "localStorage", { configurable: true, value: flakyStorage });
+          assert.deepEqual(unavailableRes, { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true });
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), login1Stored, "slot untouched when storage unavailable");
+          assert.equal(base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length, 0, "zero removeItem calls");
+          assert.deepEqual(events, [], "zero SIGNED_OUT announced");
+
+          // 3) Durable slot readable and EMPTY -> truthful local success with zero removeItem and zero duplicate SIGNED_OUT.
+          base.entries.delete(TEST_STORAGE_KEY);
+          base.ops.length = 0;
+          events.length = 0;
+          logoutCalls = 0;
+          const emptyRes = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-unr-1" } });
+          assert.deepEqual(emptyRes, { signedOutLocally: true, serverRevoked: false, replaced: false, retry: false });
+          assert.equal(base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length, 0, "zero removeItem calls on already-empty slot");
+          assert.deepEqual(events, [], "zero duplicate SIGNED_OUT on already-empty slot");
+          assert.equal(logoutCalls, 0, "zero server logout calls on already-empty slot");
+          assert.equal(await session.verifiedSession(), null, "verifiedSession sees empty slot");
+        } finally {
+          await session.quiesce();
+        }
+      });
+    });
+
+    await st.test("sign-out removal guard inside authStorage.removeItem re-checks durable storage directly against this sign-out's locked read before calling removeItem", async () => {
+      const login1Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-guard-1", sig: "sig-c2a-guard-1" });
+      const login1Stored = makeStoredSession({ accessToken: login1Jwt, refreshToken: "rt-c2a-guard-1", expired: true, userId: "user-1" });
+      const login2Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-c2a-guard-2", sig: "sig-c2a-guard-2" });
+      const login2Stored = makeStoredSession({ accessToken: login2Jwt, refreshToken: "rt-c2a-guard-2", expired: false, userId: "user-1" });
+
+      const base = memoryStorage({ [TEST_STORAGE_KEY]: login1Stored });
+      let swapOnReadNumber = 0;
+      let sessionReads = 0;
+      const raceStorage = {
+        ...base,
+        get length() { return base.length; },
+        key(i) { return base.key(i); },
+        getItem(k) {
+          if (k === TEST_STORAGE_KEY && swapOnReadNumber > 0) {
+            sessionReads += 1;
+            // Read 1: initialLocalCred; Read 2: durableBeforeLogout; Read 3: durableBeforeRemove;
+            // Read 4: signOutRemovalGuard inside authStorage.removeItem!
+            if (sessionReads === swapOnReadNumber) {
+              base.entries.set(TEST_STORAGE_KEY, login2Stored);
+            }
+          }
+          return base.getItem(k);
+        },
+        setItem(k, v) { base.setItem(k, v); },
+        removeItem(k) { base.removeItem(k); },
+      };
+      const locks = createFifoLocks();
+      const events = [];
+
+      const fetchImpl = async () => new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+        status: 429,
+        headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01" },
+      });
+
+      await withBrowserEnv({ storage: raceStorage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          base.ops.length = 0;
+          events.length = 0;
+
+          // Inject a durable successor right at the removal guard read inside authStorage.removeItem.
+          sessionReads = 0;
+          swapOnReadNumber = 4;
+          const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-c2a-guard-1" } });
+          assert.deepEqual(outcome, { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false });
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), login2Stored, "removal guard preserved durable successor");
+          assert.equal(
+            base.ops.filter((op) => op === `remove:${TEST_STORAGE_KEY}`).length,
+            0,
+            "removal guard aborted before any removeItem reached persistent storage",
+          );
+          assert.deepEqual(events, [], "removal guard aborted before SIGNED_OUT could be announced");
+        } finally {
+          await session.quiesce();
+        }
+      });
+    });
+  });
+
+  await t.test("(g) LiveDashboard single-account sign-out paths both pass local scope, carry initiating login identity through pending sign-out state, render retryable error on local failure, and preserve unconfirmed remote sign-out notice across boot", async () => {
     const dashboardPath = fileURLToPath(new URL("../components/app/LiveDashboard.astro", import.meta.url));
     const dashboardSrc = await readFile(dashboardPath, "utf8");
     assert.match(
       dashboardSrc,
-      /const attemptReauthSignOut = async[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(attemptReauthSignOut\);[\s\S]*?!signOutRes\.serverRevoked/,
-      "re-authentication sign-out path passes local scope, surfaces retryable error on local failure, and handles unconfirmed server revocation",
+      /const attemptReauthSignOut = async[\s\S]*?pendingSignOut = pendingState;[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(pendingState\);[\s\S]*?pendingSignOutNotice =[\s\S]*?!signOutRes\.serverRevoked/,
+      "re-authentication sign-out path passes local scope, tracks pending sign-out login identity, surfaces retryable error on local failure, and preserves unconfirmed server revocation notice",
     );
     assert.match(
       dashboardSrc,
-      /const attemptSingleSignOut = async[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(attemptSingleSignOut\);[\s\S]*?if \(signOutRes && !signOutRes\.serverRevoked\)/,
-      "ordinary Sign out click passes local scope, surfaces retryable error on local failure, and distinguishes unconfirmed server revocation",
+      /const attemptSingleSignOut = async[\s\S]*?pendingSignOut = pendingState;[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(pendingState\);[\s\S]*?pendingSignOutNotice =[\s\S]*?!signOutRes\.serverRevoked/,
+      "ordinary Sign out click passes local scope, tracks pending sign-out login identity, surfaces retryable error on local failure, and preserves unconfirmed server revocation notice",
     );
   });
 });

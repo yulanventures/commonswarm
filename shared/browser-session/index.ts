@@ -424,6 +424,12 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   let sessionStorageKey: string = defaultStorageKey;
   const effectiveStorageKey = (): string => sessionStorageKey;
   let removalSnapshot: string | null = null;
+  interface SignOutRemovalGuard {
+    readonly lockToken: symbol;
+    readonly expectedDurableRaw: string;
+    readonly matchesInitiating: (cred: Session | null) => boolean;
+  }
+  let signOutRemovalGuard: SignOutRemovalGuard | null = null;
   const authMemory = new Map<string, string>();
   const importedStorageKeys = new Set<string>();
   const diskSnapshots = new Map<string, string | null>();
@@ -556,16 +562,46 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     return persistentStorage ?? null;
   }
 
-  function hasPersistentStorage(): boolean {
-    try {
-      return Boolean(globalThis.localStorage);
-    } catch {
-      return true;
-    }
-  }
-
   function readPersistentAuthItem(key: string): string | null | undefined {
     try { return globalThis.localStorage?.getItem(key); } catch { return undefined; }
+  }
+
+  type DurableSlotRead =
+    | { readonly status: "unreadable" }
+    | { readonly status: "empty" }
+    | { readonly status: "present"; readonly raw: string; readonly session: Session | null };
+
+  /**
+   * Authoritative direct read of persistent browser storage (never `authMemory` or
+   * reconciled local state). Distinguishes unreadable/unavailable storage from an
+   * empty slot and a present slot.
+   */
+  function readDurableSlot(key: string): DurableSlotRead {
+    let storage: Storage | null | undefined;
+    try {
+      storage = globalThis.localStorage;
+    } catch {
+      persistentStorage = null;
+      return { status: "unreadable" };
+    }
+    if (!storage || typeof storage.getItem !== "function") {
+      persistentStorage = null;
+      return { status: "unreadable" };
+    }
+    let raw: string | null;
+    try {
+      raw = storage.getItem(key);
+    } catch {
+      persistentStorage = null;
+      return { status: "unreadable" };
+    }
+    if (raw === null) {
+      return { status: "empty" };
+    }
+    if (typeof raw !== "string") {
+      return { status: "unreadable" };
+    }
+    return { status: "present", raw, session: savedSession(raw) };
   }
 
   function parseBackoffRecord(raw: string | null): RefreshBackoffRecord | null {
@@ -914,7 +950,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       persistentStorage = null;
       return false;
     }
-    if (!storage) return true;
+    if (!storage) return !("localStorage" in globalThis);
     try {
       storage.removeItem(key);
     } catch {
@@ -922,7 +958,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       return false;
     }
     // Confirm durable removal by reading the slot back.
-    return readPersistentAuthItem(key) === null;
+    return readDurableSlot(key).status === "empty";
   }
 
   // Readable disk remains untouched when writes fail; memory holds the current
@@ -967,7 +1003,10 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         throw new AuthRetryableFetchError("Sign-in changed during storage save", 0);
       }
       const nextSession = savedSession(value);
-      if (key === effectiveStorageKey()) removalSnapshot = null;
+      if (key === effectiveStorageKey()) {
+        removalSnapshot = null;
+        signOutRemovalGuard = null;
+      }
       removedStorageKeys.delete(key);
       authMemory.set(key, value);
       pendingStorageWrites.set(key, { expected: pending ? pending.expected : disk === undefined ? diskSnapshots.get(key) : disk, value });
@@ -988,7 +1027,24 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       if (quiesced) {
         throw new AuthRetryableFetchError("Session quiesced", 0);
       }
-      if (key === effectiveStorageKey() && removalSnapshot !== null) {
+      if (key === effectiveStorageKey() && signOutRemovalGuard !== null) {
+        const guard = signOutRemovalGuard;
+        signOutRemovalGuard = null;
+        // Authoritatively re-read durable persistent storage directly (never the in-memory
+        // or reconciled view) and require it to still match the locked durable read and
+        // initiating login identity before calling persistent removeItem or broadcasting SIGNED_OUT.
+        if (activeLockToken === null || guard.lockToken !== activeLockToken) {
+          throw new AuthRetryableFetchError("Sign-out lock no longer active", 0);
+        }
+        const durableNow = readDurableSlot(key);
+        if (
+          durableNow.status !== "present" ||
+          durableNow.raw !== guard.expectedDurableRaw ||
+          !guard.matchesInitiating(durableNow.session)
+        ) {
+          throw new AuthRetryableFetchError("Sign-in changed or storage became unreadable before removal", 0);
+        }
+      } else if (key === effectiveStorageKey() && removalSnapshot !== null) {
         const expected = removalSnapshot;
         removalSnapshot = null;
         // Abort SDK cleanup before SIGNED_OUT can broadcast over a successor.
@@ -1479,6 +1535,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     if (event === "SIGNED_OUT") {
       deadSession = false;
       removalSnapshot = null;
+      signOutRemovalGuard = null;
       lastDiscardedRefreshToken = null;
       syncMemoryBackoffFromStorage(credentialGenerationKey(currentStoredSession()));
     } else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
@@ -1622,14 +1679,21 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     deadSession = false;
     const scope = signOutOptions?.scope ?? "local";
     const targetKey = effectiveStorageKey();
-    const initialDisk = readPersistentAuthItem(targetKey);
-    const initialRaw = readAuthItem(targetKey);
-    const initialCred = savedSession(initialRaw);
-    const expectedUserId = signOutOptions?.expected?.userId?.trim() || initialCred?.user?.id?.trim() || null;
+    // Capture the initiating login's identity before awaiting initialization or the lock.
+    // Never adopt a durable successor as the initiating login if this tab's local view is stale.
+    const initialLocalCred = savedSession(readAuthItem(targetKey));
+    const expectedUserId =
+      signOutOptions?.expected?.userId?.trim() || initialLocalCred?.user?.id?.trim() || null;
     const expectedSessionId =
       signOutOptions?.expected?.sessionId?.trim() ||
-      sessionIdFromAccessToken(initialCred?.access_token) ||
+      sessionIdFromAccessToken(initialLocalCred?.access_token) ||
       null;
+    const initiatingRefreshToken =
+      initialLocalCred !== null &&
+      (expectedUserId === null || initialLocalCred.user?.id === expectedUserId) &&
+      (expectedSessionId === null || sessionIdFromAccessToken(initialLocalCred.access_token) === expectedSessionId)
+        ? initialLocalCred.refresh_token
+        : null;
 
     const matchesInitiatingLogin = (cred: Session | null): boolean => {
       if (!cred) return false;
@@ -1638,18 +1702,11 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       if (expectedSessionId !== null) {
         return credSid === expectedSessionId;
       }
-      if (initialCred !== null) {
-        return cred.user?.id === initialCred.user?.id && cred.refresh_token === initialCred.refresh_token;
+      if (initiatingRefreshToken !== null) {
+        return cred.refresh_token === initiatingRefreshToken;
       }
-      return true;
+      return false;
     };
-
-    if (initialCred !== null && !matchesInitiatingLogin(initialCred)) {
-      return { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false };
-    }
-    if (initialCred === null && (initialDisk === null || !hasPersistentStorage())) {
-      return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false, retry: false };
-    }
 
     if (verifiedAuthClient.initializePromise) {
       await Promise.resolve(verifiedAuthClient.initializePromise).catch(() => undefined);
@@ -1662,25 +1719,34 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       if (quiesced) {
         return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: false };
       }
-      const diskBeforeLogout = readPersistentAuthItem(targetKey);
-      const rawBeforeLogout = readAuthItem(targetKey);
-      const credBeforeLogout = savedSession(rawBeforeLogout);
-      if (credBeforeLogout === null && (diskBeforeLogout === null || !hasPersistentStorage())) {
+
+      // Authoritatively identify the durable slot directly from persistent storage under the lock
+      // before any server logout or deletion. Never trust a stale in-memory or reconciled view.
+      const durableBeforeLogout = readDurableSlot(targetKey);
+      if (durableBeforeLogout.status === "unreadable") {
+        return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true };
+      }
+      if (durableBeforeLogout.status === "empty") {
+        acceptPersistentAuthItem(targetKey, null);
         clearBackoffRecordLocked();
         deadSession = false;
         return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false, retry: false };
       }
-      if (credBeforeLogout !== null && !matchesInitiatingLogin(credBeforeLogout)) {
+      if (durableBeforeLogout.session === null) {
+        return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true };
+      }
+      if (!matchesInitiatingLogin(durableBeforeLogout.session)) {
+        removedStorageKeys.delete(targetKey);
+        acceptPersistentAuthItem(targetKey, durableBeforeLogout.raw);
         return { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false };
       }
 
       let serverRevoked = false;
-      const accessToken = credBeforeLogout?.access_token;
+      const accessToken = durableBeforeLogout.session.access_token;
       if (
-        credBeforeLogout !== null &&
         typeof accessToken === "string" &&
         accessToken.length > 0 &&
-        isUnexpiredSession(credBeforeLogout)
+        isUnexpiredSession(durableBeforeLogout.session)
       ) {
         try {
           const { error } = await verifiedAuthClient.admin!.signOut!(accessToken, scope);
@@ -1699,43 +1765,73 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         return { signedOutLocally: false, serverRevoked, replaced: false, retry: false };
       }
 
-      const diskBeforeRemove = readPersistentAuthItem(targetKey);
-      const rawBeforeRemove = readAuthItem(targetKey);
-      const credBeforeRemove = savedSession(rawBeforeRemove);
-      if (credBeforeRemove === null && (diskBeforeRemove === null || !hasPersistentStorage())) {
+      // Re-identify the durable slot directly under the lock after the network logout call
+      // before touching persistent storage.
+      const durableBeforeRemove = readDurableSlot(targetKey);
+      if (durableBeforeRemove.status === "unreadable") {
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
+      }
+      if (durableBeforeRemove.status === "empty") {
+        acceptPersistentAuthItem(targetKey, null);
         clearBackoffRecordLocked();
         deadSession = false;
         return { signedOutLocally: true, serverRevoked, replaced: false, retry: false };
       }
-      if (credBeforeRemove !== null && !matchesInitiatingLogin(credBeforeRemove)) {
+      if (durableBeforeRemove.session === null) {
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
+      }
+      if (!matchesInitiatingLogin(durableBeforeRemove.session)) {
+        removedStorageKeys.delete(targetKey);
+        acceptPersistentAuthItem(targetKey, durableBeforeRemove.raw);
         return { signedOutLocally: false, serverRevoked, replaced: true, retry: false };
       }
+      if (activeLockToken === null) {
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
+      }
 
-      // Guard local removal with removalSnapshot so _removeSession aborts before
-      // mutating storage or announcing SIGNED_OUT if a peer replaces the slot,
-      // and confirm durable persistent removal on read-back before reporting local success.
-      removalSnapshot = rawBeforeRemove;
+      // Guard local removal with the durable read captured under this lock so authStorage.removeItem
+      // re-verifies persistent storage directly against this sign-out's durable bytes and identity
+      // before calling persistent removeItem or letting _removeSession announce SIGNED_OUT.
+      signOutRemovalGuard = {
+        lockToken: activeLockToken,
+        expectedDurableRaw: durableBeforeRemove.raw,
+        matchesInitiating: matchesInitiatingLogin,
+      };
       try {
         await verifiedAuthClient._removeSession!();
       } catch {
-        removalSnapshot = null;
-        const diskAfter = readPersistentAuthItem(targetKey);
-        const afterCred = savedSession(readAuthItem(targetKey));
-        if (afterCred !== null && !matchesInitiatingLogin(afterCred)) {
-          return { signedOutLocally: false, serverRevoked, replaced: true, retry: false };
-        }
-        const confirmedGone = afterCred === null && (diskAfter === null || !hasPersistentStorage());
-        if (confirmedGone) {
+        signOutRemovalGuard = null;
+        const durableAfter = readDurableSlot(targetKey);
+        if (durableAfter.status === "empty") {
+          acceptPersistentAuthItem(targetKey, null);
+          clearBackoffRecordLocked();
           deadSession = false;
           return { signedOutLocally: true, serverRevoked, replaced: false, retry: false };
         }
+        if (
+          durableAfter.status === "present" &&
+          durableAfter.session !== null &&
+          !matchesInitiatingLogin(durableAfter.session)
+        ) {
+          removedStorageKeys.delete(targetKey);
+          acceptPersistentAuthItem(targetKey, durableAfter.raw);
+          return { signedOutLocally: false, serverRevoked, replaced: true, retry: false };
+        }
         return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
+      } finally {
+        signOutRemovalGuard = null;
       }
-      const diskAfterRemove = readPersistentAuthItem(targetKey);
-      const confirmedGone =
-        savedSession(readAuthItem(targetKey)) === null &&
-        (diskAfterRemove === null || !hasPersistentStorage());
-      if (!confirmedGone) {
+      const durableAfterRemove = readDurableSlot(targetKey);
+      if (durableAfterRemove.status !== "empty") {
+        if (
+          durableAfterRemove.status === "present" &&
+          durableAfterRemove.session !== null &&
+          !matchesInitiatingLogin(durableAfterRemove.session)
+        ) {
+          removedStorageKeys.delete(targetKey);
+          acceptPersistentAuthItem(targetKey, durableAfterRemove.raw);
+          return { signedOutLocally: false, serverRevoked, replaced: true, retry: false };
+        }
         return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
       }
       deadSession = false;
@@ -1750,6 +1846,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     memoryBackoff = null;
     memoryBackoffWriteRefused = false;
     removalSnapshot = null;
+    signOutRemovalGuard = null;
     authListeners.clear();
     pendingStorageWrites.clear();
     if (storageRetryTimer !== undefined) {
