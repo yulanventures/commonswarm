@@ -142,6 +142,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__tab:focus-visible 
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__controls {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 0 16px 12px;
@@ -151,7 +152,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__controls[hidden] {
   display: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__scope {
-  flex: 1 1 auto;
+  flex: 1 1 130px;
   min-inline-size: 0;
   box-sizing: border-box;
   inline-size: 100%;
@@ -189,6 +190,77 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__review-btn:hover {
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__review-btn:focus-visible {
   outline: 2px solid var(--k-shell-focus);
   outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__batch[hidden] {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__batch[data-waiting-batch-mode="confirm"] {
+  flex: 1 0 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__batch[data-waiting-batch-mode="running"] {
+  flex: 1 0 100%;
+  justify-content: space-between;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-batch__note {
+  margin: 0;
+  font: 400 12.5px/1.4 var(--k-shell-font);
+  color: var(--k-shell-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__dismiss-all {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--k-shell-secondary);
+  font: 500 13px/1.3 var(--k-shell-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__dismiss-all:hover:not([aria-disabled="true"]) {
+  background: var(--k-shell-hover);
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__dismiss-all:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__dismiss-all[aria-disabled="true"] {
+  opacity: .55;
+  cursor: wait;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-batch__prompt,
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-batch__progress {
+  font: 600 13px/1.35 var(--k-shell-font);
+  color: var(--k-shell-ink);
+  font-variant-numeric: tabular-nums;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-batch__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-batch__stop[aria-disabled="true"] {
+  opacity: .55;
+  cursor: wait;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-batch-result .cs-waiting-dismissed__label {
+  font-variant-numeric: tabular-nums;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__scope:focus-visible {
   outline: 2px solid var(--k-shell-focus);
@@ -839,6 +911,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-sheet::backdrop {
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__tab,
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-archived__outcome,
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__scope,
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__dismiss-all,
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__status,
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__incomplete {
     border-color: CanvasText;
