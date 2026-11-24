@@ -54,6 +54,13 @@ export const PINNED_SUPABASE_JS_VERSION = "2.111.0";
 export const REFRESH_BACKOFF_FLOOR_MS = 1_000;
 export const REFRESH_BACKOFF_BASE_MS = 2_000;
 export const REFRESH_BACKOFF_CAP_MS = 60_000;
+/**
+ * Sanity ceiling for server-supplied `Retry-After` deadlines (15 minutes).
+ * `REFRESH_BACKOFF_CAP_MS` caps only the client exponential backoff; a valid
+ * server `Retry-After` longer than 60s gates the wire for its full duration up
+ * to this ceiling so a malformed header cannot lock a credential out indefinitely.
+ */
+export const REFRESH_RETRY_AFTER_CEILING_MS = 15 * 60 * 1_000;
 
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -339,6 +346,25 @@ export interface CreateBrowserSessionOptions {
   sdk: BrowserSessionSdk;
 }
 
+export interface BrowserSignOutOptions {
+  /** Scope forwarded to `/auth/v1/logout` when a usable access token exists (defaults to `"global"`). */
+  scope?: "global" | "local" | "others";
+  /** Optional initiating login identity captured at click time. */
+  expected?: {
+    userId?: string | null;
+    sessionId?: string | null;
+  } | null;
+}
+
+export interface BrowserSignOutResult {
+  /** True iff the initiating login's local browser credential is cleared (or was already absent). */
+  readonly signedOutLocally: boolean;
+  /** True iff GoTrue confirmed server-side logout (2xx) for the initiating login's access token. */
+  readonly serverRevoked: boolean;
+  /** True iff another login replaced the initiating login before sign-out ran; replacement left intact. */
+  readonly replaced: boolean;
+}
+
 export interface BrowserSession {
   readonly ok: true;
   readonly client: SupabaseClient;
@@ -346,7 +372,7 @@ export interface BrowserSession {
   currentSession(): Promise<Session | null>;
   verifiedSession(): Promise<Session | null>;
   boundedAuth<T>(operation: Promise<T>): Promise<T>;
-  signOut(): Promise<void>;
+  signOut(options?: BrowserSignOutOptions): Promise<BrowserSignOutResult>;
   /** Stop this instance's background auth work without modifying stored credentials or signing out. */
   quiesce(): Promise<void>;
 }
@@ -386,9 +412,10 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   let quiescePromise: Promise<void> | null = null;
   const quiesceController = new AbortController();
   const defaultStorageKey = sessionStorageKeyForDeployment(options.url);
+  const expectedLockName = `lock:${defaultStorageKey}`;
   const backoffStorageKey = refreshBackoffStorageKeyForDeployment(options.url);
-  let sessionStorageKey: string | null = null;
-  const effectiveStorageKey = (): string => sessionStorageKey ?? defaultStorageKey;
+  let sessionStorageKey: string = defaultStorageKey;
+  const effectiveStorageKey = (): string => sessionStorageKey;
   let removalSnapshot: string | null = null;
   const authMemory = new Map<string, string>();
   const importedStorageKeys = new Set<string>();
@@ -425,6 +452,11 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       data?: { session?: Session | null } | null;
       error?: unknown;
     }>;
+    _acquireLock?: <R>(acquireTimeout: number, fn: () => Promise<R>) => Promise<R>;
+    _removeSession?: () => Promise<void>;
+    admin?: {
+      signOut?: (jwt: string, scope?: "global" | "local" | "others") => Promise<{ data: null; error: unknown }>;
+    };
     onAuthStateChange?: typeof client.auth.onAuthStateChange;
     storageKey?: string;
     lockAcquired?: boolean;
@@ -439,6 +471,8 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
 
   let activeRefreshAttempt: RefreshAttemptScope | null = null;
   let authClientRef: InternalAuthClientShape | null = null;
+  let userCheckChain: Promise<void> = Promise.resolve();
+  let activeUserCheck: { verifiedAccessToken: string | null } | null = null;
 
   function retireRefreshAttempt(expected?: RefreshAttemptScope): void {
     if (!activeRefreshAttempt) return;
@@ -461,6 +495,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   }
 
   let memoryBackoff: RefreshBackoffRecord | null = null;
+  let memoryBackoffWriteRefused = false;
 
   function isSentinelString(value: unknown): boolean {
     return typeof value === "string" && value.startsWith(discardSentinelPrefix);
@@ -541,7 +576,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       }
       return {
         gen: parsed.gen,
-        nextAttemptAt: Math.min(parsed.nextAttemptAt, now + REFRESH_BACKOFF_CAP_MS),
+        nextAttemptAt: Math.min(parsed.nextAttemptAt, now + REFRESH_RETRY_AFTER_CEILING_MS),
         attempts: parsed.attempts,
       };
     } catch {
@@ -549,97 +584,155 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     }
   }
 
-  function clearBackoffRecord(): void {
+  function clampedMemoryBackoff(expectedGen: string | null, now: number): RefreshBackoffRecord | null {
+    if (!memoryBackoff) return null;
+    if (!expectedGen || memoryBackoff.gen !== expectedGen) {
+      memoryBackoff = null;
+      memoryBackoffWriteRefused = false;
+      return null;
+    }
+    return {
+      gen: memoryBackoff.gen,
+      nextAttemptAt: Math.min(memoryBackoff.nextAttemptAt, now + REFRESH_RETRY_AFTER_CEILING_MS),
+      attempts: memoryBackoff.attempts,
+    };
+  }
+
+  // Condition 1: ALL mutations of the shared durable backoff record happen ONLY under
+  // the tracked cross-tab lock (`activeLockToken !== null`). Read paths and event handlers
+  // never mutate `backoffStorageKey` on disk.
+  function clearBackoffRecordLocked(): void {
     memoryBackoff = null;
+    memoryBackoffWriteRefused = false;
+    if (activeLockToken === null) return;
     if (readPersistentAuthItem(backoffStorageKey) !== null) {
       try { globalThis.localStorage?.removeItem(backoffStorageKey); } catch { /* ignore storage errors */ }
     }
   }
 
-  function syncMemoryBackoffFromDisk(): void {
-    const raw = readPersistentAuthItem(backoffStorageKey);
-    if (raw === undefined) return;
-    if (raw === null) {
-      memoryBackoff = null;
-      return;
-    }
-    const parsed = parseBackoffRecord(raw, Date.now());
-    if (!parsed) {
-      clearBackoffRecord();
-      return;
-    }
-    memoryBackoff = parsed;
-  }
-
+  /**
+   * Read-only view of the active backoff record for `expectedGen`.
+   * Never mutates `localStorage`; treats a mismatched or corrupt disk entry as ignorable
+   * until the next locked attempt cleans it up. Preserves a same-generation in-memory
+   * fallback when storage is readable but the preceding write was refused.
+   */
   function readBackoffRecord(expectedGen: string | null): RefreshBackoffRecord | null {
     const now = Date.now();
     const raw = readPersistentAuthItem(backoffStorageKey);
+    if (raw === undefined) {
+      return clampedMemoryBackoff(expectedGen, now);
+    }
     if (raw === null) {
+      if (memoryBackoffWriteRefused) {
+        return clampedMemoryBackoff(expectedGen, now);
+      }
       memoryBackoff = null;
       return null;
     }
-    if (raw === undefined) {
-      if (!memoryBackoff) return null;
-      if (!expectedGen || memoryBackoff.gen !== expectedGen) {
-        memoryBackoff = null;
-        return null;
-      }
-      return {
-        gen: memoryBackoff.gen,
-        nextAttemptAt: Math.min(memoryBackoff.nextAttemptAt, now + REFRESH_BACKOFF_CAP_MS),
-        attempts: memoryBackoff.attempts,
-      };
-    }
     const parsed = parseBackoffRecord(raw, now);
     if (!parsed || !expectedGen || parsed.gen !== expectedGen) {
-      clearBackoffRecord();
+      if (memoryBackoffWriteRefused) {
+        return clampedMemoryBackoff(expectedGen, now);
+      }
+      if (!expectedGen || (memoryBackoff && memoryBackoff.gen !== expectedGen)) {
+        memoryBackoff = null;
+      }
       return null;
     }
+    if (memoryBackoffWriteRefused && memoryBackoff && memoryBackoff.gen === expectedGen) {
+      const localClamped = Math.min(memoryBackoff.nextAttemptAt, now + REFRESH_RETRY_AFTER_CEILING_MS);
+      const merged: RefreshBackoffRecord = {
+        gen: parsed.gen,
+        nextAttemptAt: Math.max(parsed.nextAttemptAt, localClamped),
+        attempts: Math.max(parsed.attempts, memoryBackoff.attempts),
+      };
+      memoryBackoff = merged;
+      if (parsed.nextAttemptAt >= localClamped) {
+        memoryBackoffWriteRefused = false;
+      }
+      return merged;
+    }
     memoryBackoff = parsed;
+    memoryBackoffWriteRefused = false;
     return parsed;
   }
 
-  function recordBackoffFailure(gen: string, retryAfterHeader: string | null): RefreshBackoffRecord {
+  /**
+   * Read-only re-sync of the in-memory backoff mirror after a BroadcastChannel auth event
+   * or `storage` event. Never mutates `localStorage`, and preserves any matching record.
+   */
+  function syncMemoryBackoffFromStorage(currentGen: string | null): void {
+    readBackoffRecord(currentGen);
+  }
+
+  function recordBackoffFailureLocked(gen: string, retryAfterHeader: string | null): RefreshBackoffRecord {
     const now = Date.now();
     const existing = readBackoffRecord(gen);
     const attempts = (existing?.attempts ?? 0) + 1;
+    // Cap only the exponential part at REFRESH_BACKOFF_CAP_MS (60s); honour a valid
+    // server Retry-After longer than 60s up to REFRESH_RETRY_AFTER_CEILING_MS (15m).
     const expDelay = Math.min(
       REFRESH_BACKOFF_BASE_MS * (2 ** Math.min(attempts - 1, 10)),
       REFRESH_BACKOFF_CAP_MS,
     );
     const retryAfterMs = parseRetryAfterMs(retryAfterHeader, now);
-    const rawDelay = retryAfterMs !== null ? Math.max(expDelay, retryAfterMs) : expDelay;
-    const delayMs = Math.min(Math.max(rawDelay, REFRESH_BACKOFF_FLOOR_MS), REFRESH_BACKOFF_CAP_MS);
+    const boundedRetryAfterMs =
+      retryAfterMs !== null ? Math.min(retryAfterMs, REFRESH_RETRY_AFTER_CEILING_MS) : null;
+    const rawDelay =
+      boundedRetryAfterMs !== null ? Math.max(expDelay, boundedRetryAfterMs) : expDelay;
+    const delayMs = Math.min(
+      Math.max(rawDelay, REFRESH_BACKOFF_FLOOR_MS),
+      REFRESH_RETRY_AFTER_CEILING_MS,
+    );
     const record: RefreshBackoffRecord = {
       gen,
       nextAttemptAt: now + delayMs,
       attempts,
     };
     memoryBackoff = record;
-    try {
-      globalThis.localStorage?.setItem(backoffStorageKey, JSON.stringify(record));
-    } catch { /* memory fallback still bounds this tab */ }
+    memoryBackoffWriteRefused = true;
+    if (activeLockToken !== null) {
+      const serialized = JSON.stringify(record);
+      try {
+        const storage = globalThis.localStorage;
+        if (storage) {
+          storage.setItem(backoffStorageKey, serialized);
+          if (readPersistentAuthItem(backoffStorageKey) === serialized) {
+            memoryBackoffWriteRefused = false;
+          }
+        }
+      } catch { /* readable-but-write-refused storage still honours memoryBackoff */ }
+    }
     return record;
   }
 
-  function reconcileBackoffWithCredential(currentGen: string | null): void {
+  function reconcileBackoffOnDiskLocked(currentGen: string | null): void {
+    if (activeLockToken === null) {
+      syncMemoryBackoffFromStorage(currentGen);
+      return;
+    }
     const raw = readPersistentAuthItem(backoffStorageKey);
     if (raw === null) {
-      memoryBackoff = null;
+      if (!memoryBackoffWriteRefused || !currentGen || memoryBackoff?.gen !== currentGen) {
+        memoryBackoff = null;
+        memoryBackoffWriteRefused = false;
+      }
       return;
     }
     if (raw === undefined) {
       if (memoryBackoff && (currentGen === null || memoryBackoff.gen !== currentGen)) {
         memoryBackoff = null;
+        memoryBackoffWriteRefused = false;
       }
       return;
     }
     const parsed = parseBackoffRecord(raw, Date.now());
     if (!parsed || currentGen === null || parsed.gen !== currentGen) {
-      clearBackoffRecord();
+      clearBackoffRecordLocked();
       return;
     }
     memoryBackoff = parsed;
+    memoryBackoffWriteRefused = false;
   }
 
   function acceptPersistentAuthItem(key: string, value: string | null): void {
@@ -665,18 +758,12 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     storageRetryInFlight = true;
     const run = (async () => {
       try {
-        const lock = hasWebLocks()
-          ? navigatorLock
-          : options.allowProcessLockFallback
-            ? processLock
-            : null;
-        if (!lock) return;
         for (const [key, pending] of pendingStorageWrites) {
           if (quiesced) return;
-          // A fresh sign-in identifies its SDK key before the first successful read.
           // Try once without waiting or stealing; a busy owner gets the next tick.
+          // Route through trackedLock so the processLock fallback is covered identically.
           try {
-            await lock(`lock:${sessionStorageKey ?? key}`, 0, async () => {
+            await trackedLock(expectedLockName, 0, async () => {
               if (quiesced) return;
               const storage = storageBackend();
               reconcileAuthItem(key);
@@ -727,9 +814,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   function readAuthItem(key: string): string | null {
     importedStorageKeys.add(key);
     reconcileAuthItem(key);
-    const value = authMemory.get(key) ?? null;
-    if (savedSession(value)) sessionStorageKey = key;
-    return value;
+    return authMemory.get(key) ?? null;
   }
 
   function currentStoredSession(): Session | null {
@@ -747,9 +832,6 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     if (quiesced) return;
     if (event.storageArea !== globalThis.localStorage) return;
     const targetSessionKey = effectiveStorageKey();
-    if (event.key === null || event.key === backoffStorageKey) {
-      syncMemoryBackoffFromDisk();
-    }
     const keys = event.key === null
       ? [...new Set([...importedStorageKeys, targetSessionKey])]
       : [event.key];
@@ -761,10 +843,11 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         removedStorageKeys.delete(key);
         acceptPersistentAuthItem(key, value);
       }
-      if (key === targetSessionKey) {
-        const nextSession = savedSession(value ?? null);
-        reconcileBackoffWithCredential(credentialGenerationKey(nextSession));
-      }
+    }
+    // Condition 1: storage events are read-only hints. Re-read current storage and
+    // preserve any active backoff record matching the current credential without mutating disk.
+    if (event.key === null || event.key === backoffStorageKey || event.key === targetSessionKey) {
+      syncMemoryBackoffFromStorage(credentialGenerationKey(currentStoredSession()));
     }
   };
 
@@ -821,8 +904,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         throw new AuthRetryableFetchError("Sign-in changed during storage save", 0);
       }
       const nextSession = savedSession(value);
-      if (nextSession) sessionStorageKey = key;
-      if (key === sessionStorageKey) removalSnapshot = null;
+      if (key === effectiveStorageKey()) removalSnapshot = null;
       removedStorageKeys.delete(key);
       authMemory.set(key, value);
       pendingStorageWrites.set(key, { expected: pending ? pending.expected : disk === undefined ? diskSnapshots.get(key) : disk, value });
@@ -835,7 +917,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         }
       } catch { persistentStorage = null; }
       if (key === effectiveStorageKey() && nextSession) {
-        reconcileBackoffWithCredential(credentialGenerationKey(nextSession));
+        reconcileBackoffOnDiskLocked(credentialGenerationKey(nextSession));
       }
       scheduleStorageRetry();
     },
@@ -843,7 +925,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       if (quiesced) {
         throw new AuthRetryableFetchError("Session quiesced", 0);
       }
-      if (key === sessionStorageKey && removalSnapshot !== null) {
+      if (key === effectiveStorageKey() && removalSnapshot !== null) {
         const expected = removalSnapshot;
         removalSnapshot = null;
         // Abort SDK cleanup before SIGNED_OUT can broadcast over a successor.
@@ -853,7 +935,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       }
       if (key === effectiveStorageKey()) {
         if (activeRefreshAttempt) activeRefreshAttempt.commitGuardReadArmed = false;
-        clearBackoffRecord();
+        clearBackoffRecordLocked();
       }
       importedStorageKeys.add(key);
       pendingStorageWrites.delete(key);
@@ -919,9 +1001,18 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
       const isRefresh = method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "refresh_token";
       const isUser = method === "GET" && url.pathname.endsWith("/auth/v1/user");
+      const isLogout = method === "POST" && url.pathname.endsWith("/auth/v1/logout");
       if (quiesced) {
         if (isRefresh) return makeDiscardResponse(false, null);
         throw new AuthRetryableFetchError("Session quiesced", 0);
+      }
+      if (isLogout) {
+        return await fetch(input, { ...init, signal: AbortSignal.any([
+          ...((init?.signal ?? (input instanceof Request ? input.signal : null))
+            ? [init?.signal ?? (input as Request).signal] : []),
+          quiesceController.signal,
+          AbortSignal.timeout(4_000),
+        ]) });
       }
       if (!isRefresh && !isUser) {
         const response = await fetch(input, init);
@@ -942,12 +1033,27 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       const storedGen = credentialGenerationKey(savedCredential);
 
       if (isRefresh) {
+        // Condition 3: refuse to put a refresh on the wire unless this client holds the
+        // active tracked lock on the exact managed session slot with an active refresh
+        // attempt scope bound to that lock token.
+        const hasTrackedLockedAttempt = Boolean(
+          activeRefreshAttempt !== null &&
+          activeLockToken !== null &&
+          activeRefreshAttempt.lockToken === activeLockToken &&
+          activeRefreshAttempt.storageKey === defaultStorageKey &&
+          authClientRef?.lockAcquired === true,
+        );
+        if (!hasTrackedLockedAttempt) {
+          return makeDiscardResponse(false, requestRefresh);
+        }
         // Condition 2: if storage already holds a different credential than the request token,
         // abandon without touching the network or recording backoff.
         if (savedCredential !== null && requestRefresh !== null && savedCredential.refresh_token !== requestRefresh) {
-          reconcileBackoffWithCredential(storedGen);
+          reconcileBackoffOnDiskLocked(storedGen);
           return makeDiscardResponse(true, requestRefresh);
         }
+        // Clean up any stale/mismatched backoff record on disk under the active lock.
+        reconcileBackoffOnDiskLocked(storedGen);
         // Cross-tab backoff outside the lock: during an active window for this credential generation,
         // exit immediately through the discard path with zero network I/O and zero lock sleep.
         const existingBackoff = readBackoffRecord(storedGen);
@@ -988,9 +1094,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
             currentCred?.refresh_token === requestRefresh,
           );
           if (sameCurrent && storedGen !== null) {
-            recordBackoffFailure(storedGen, null);
+            recordBackoffFailureLocked(storedGen, null);
           } else {
-            reconcileBackoffWithCredential(currentGen);
+            reconcileBackoffOnDiskLocked(currentGen);
           }
           return makeDiscardResponse(true, requestRefresh);
         }
@@ -1002,10 +1108,13 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       }
       if (response.ok) {
         if (isRefresh) {
-          clearBackoffRecord();
+          clearBackoffRecordLocked();
           lastDiscardedRefreshToken = null;
           // auth-js's storedAfter guard discards a peer replacement/logout without
           // re-sending the now-consumed predecessor or entering a retry cooldown.
+        } else if (isUser && activeLockToken !== null && activeUserCheck !== null) {
+          // Condition 4: bind verifiedSession success to the exact access token checked by GoTrue.
+          activeUserCheck.verifiedAccessToken = access ?? null;
         }
         return response;
       }
@@ -1033,12 +1142,12 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         if (!credentialMatches) {
           // Condition 2: credential changed, rotated, or cleared (even on terminal refusal).
           // Do not back off, overwrite, remove, or announce; exit via discard.
-          reconcileBackoffWithCredential(currentGen);
+          reconcileBackoffOnDiskLocked(currentGen);
           return makeDiscardResponse(true, requestRefresh);
         }
         if (terminal) {
           // Confirmed terminal refusal for the still-current stored credential.
-          clearBackoffRecord();
+          clearBackoffRecordLocked();
           if (savedCredential?.expires_at && savedCredential.expires_at * 1000 <= Date.now()) {
             removalSnapshot = savedAtStart;
           }
@@ -1047,7 +1156,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         // Non-terminal refusal (400 refresh_token_already_used, 429, 5xx, etc.):
         // record external backoff honoring Retry-After and release the lock via discard.
         if (storedGen !== null) {
-          recordBackoffFailure(storedGen, response.headers.get("retry-after"));
+          recordBackoffFailureLocked(storedGen, response.headers.get("retry-after"));
         }
         return makeDiscardResponse(true, requestRefresh);
       }
@@ -1070,6 +1179,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     }
   };
 
+  // Select navigatorLock when Web Locks exist, or processLock where allowProcessLockFallback
+  // permits it (already gated above). Both lock implementations run through trackedLock so
+  // activeLockToken tracks lock ownership identically for both Web Locks and processLock.
   const baseLock = hasWebLocks() ? navigatorLock : processLock;
   const trackedLock: typeof navigatorLock = (name, acquireTimeout, fn) => {
     if (quiesced) {
@@ -1078,6 +1190,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     return baseLock(name, acquireTimeout, async () => {
       if (quiesced) {
         return undefined as never;
+      }
+      if (name !== expectedLockName) {
+        return await fn();
       }
       const token = Symbol("session-lock");
       activeLockToken = token;
@@ -1105,8 +1220,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   });
 
   // Synchronously validate the created SDK instance BEFORE any microtask runs.
-  // If the runtime client does not match the pinned 2.111.0 shape or version,
-  // fail closed immediately: neutralize & tear down the instance and hand out no client.
+  // If the runtime client does not match the pinned 2.111.0 shape, version, or exact
+  // managed storage slot, fail closed immediately: neutralize & tear down the instance
+  // and hand out no client.
   const authClient = (client as unknown as { auth?: InternalAuthClientShape } | null)?.auth ?? null;
   const clientHeaders = (client as unknown as { headers?: Record<string, unknown> } | null)?.headers;
   const clientInfo = clientHeaders?.["X-Client-Info"] ?? authClient?.headers?.["X-Client-Info"];
@@ -1118,10 +1234,15 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     typeof client === "object" &&
     authClient &&
     typeof authClient === "object" &&
+    typeof authClient.storageKey === "string" &&
+    authClient.storageKey === defaultStorageKey &&
     typeof authClient._emitInitialSession === "function" &&
     typeof authClient.onAuthStateChange === "function" &&
     typeof authClient._callRefreshToken === "function" &&
     typeof authClient._refreshAccessToken === "function" &&
+    typeof authClient._acquireLock === "function" &&
+    typeof authClient._removeSession === "function" &&
+    typeof authClient.admin?.signOut === "function" &&
     "lockAcquired" in authClient &&
     "refreshingDeferred" in authClient &&
     typeof clientInfo === "string" &&
@@ -1152,7 +1273,8 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     }
     return { ok: false, reason: "unsupported_sdk" };
   }
-  authClientRef = authClient;
+  const verifiedAuthClient: InternalAuthClientShape = authClient;
+  authClientRef = verifiedAuthClient;
 
   // 2.111.0 also defaults PostgREST GET queries to 3 exponential-backoff retries (1s/2s/4s);
   // keep single-attempt reads so readWithDeadline and explicit UI retry controls own recovery.
@@ -1170,25 +1292,34 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   // through our fan-out so no subscription starts an implicit unlocked session load.
   authClient._emitInitialSession = async () => {};
 
+  function makeUntrackedRefreshDiscardResult(): { data: null; error: Error } {
+    const discarded = new AuthRetryableFetchError("Refresh attempt refused outside active session lock", 0);
+    discarded.name = "AuthRefreshDiscardedError";
+    return { data: null, error: discarded };
+  }
+
   const origCallRefreshToken = authClient._callRefreshToken!.bind(client.auth);
   const origRefreshAccessToken = authClient._refreshAccessToken!.bind(client.auth);
   authClient._callRefreshToken = async (refreshToken: string) => {
-    // Re-entrant call while a refresh is already active on this client dedupes via
+    const lockToken = activeLockToken;
+    // Condition 3: refuse any refresh attempt outside this client's active tracked lock.
+    // Ends immediately through the discard error shape with zero wire requests, zero
+    // storage mutations, zero events, and without arming the commit-guard read marker.
+    if (quiesced || lockToken === null || authClient.lockAcquired !== true) {
+      return makeUntrackedRefreshDiscardResult();
+    }
+    // Re-entrant call while a refresh is already active under this lock dedupes via
     // GoTrue's `refreshingDeferred`; preserve the outermost attempt scope.
     if (activeRefreshAttempt !== null) {
-      return origCallRefreshToken(refreshToken);
-    }
-    const lockToken = activeLockToken;
-    if (lockToken === null) {
+      if (activeRefreshAttempt.lockToken !== lockToken) {
+        return makeUntrackedRefreshDiscardResult();
+      }
       return origCallRefreshToken(refreshToken);
     }
     const attempt: RefreshAttemptScope = {
       id: Symbol("refresh-attempt"),
       lockToken,
-      storageKey:
-        typeof authClient.storageKey === "string" && authClient.storageKey.length > 0
-          ? authClient.storageKey
-          : effectiveStorageKey(),
+      storageKey: defaultStorageKey,
       discardSentinel: null,
       commitGuardReadArmed: false,
     };
@@ -1253,17 +1384,45 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   }) as typeof client.auth.onAuthStateChange;
 
   client.auth.onAuthStateChange((event) => {
+    // Condition 1: SDK auth events (including delayed cross-tab BroadcastChannel
+    // messages forwarded outside the lock) are read-only hints. Never mutate the
+    // shared durable backoff record here; re-read current storage and preserve any
+    // active backoff matching the current stored credential.
     if (event === "SIGNED_OUT") {
       deadSession = false;
       removalSnapshot = null;
       lastDiscardedRefreshToken = null;
-      clearBackoffRecord();
+      syncMemoryBackoffFromStorage(credentialGenerationKey(currentStoredSession()));
     } else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
       deadSession = false;
       lastDiscardedRefreshToken = null;
-      clearBackoffRecord();
+      syncMemoryBackoffFromStorage(credentialGenerationKey(currentStoredSession()));
     }
   });
+
+  async function runSerializedUserCheck(): Promise<{
+    userResult: Awaited<ReturnType<typeof client.auth.getUser>>;
+    verifiedAccessToken: string | null;
+  }> {
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => { release = resolve; });
+    const prev = userCheckChain;
+    userCheckChain = prev.then(() => next);
+    await prev;
+    if (quiesced) {
+      release();
+      throw new AuthRecoveryRequired();
+    }
+    const scope = { verifiedAccessToken: null as string | null };
+    activeUserCheck = scope;
+    try {
+      const userResult = await client.auth.getUser();
+      return { userResult, verifiedAccessToken: scope.verifiedAccessToken };
+    } finally {
+      if (activeUserCheck === scope) activeUserCheck = null;
+      release();
+    }
+  }
 
   async function verifiedSession(): Promise<Session | null> {
     if (quiesced) throw new AuthRecoveryRequired();
@@ -1323,23 +1482,39 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       // No explicit JWT: the SDK reads and verifies the current credential while
       // holding its lock, including terminal removal. A stale caller cannot clear a
       // successor by validating an old token outside that lock.
-      const { data: userData, error } = await client.auth.getUser();
-      if (quiesced) throw new AuthRecoveryRequired();
-      const latest = await client.auth.getSession();
-      if (quiesced) throw new AuthRecoveryRequired();
-      if (error) {
-        if (latest.data.session && !sameCredentials(session, latest.data.session)) {
+      // Condition 4: bind success to the exact access credential checked by GET /auth/v1/user.
+      // If a different access credential (e.g. a same-user replacement login with a new
+      // session_id) lands between getUser() and getSession(), verify THAT credential
+      // directly up to a small fixed bound before releasing it.
+      const MAX_VERIFICATION_ATTEMPTS = 3;
+      let candidateSession: Session = session;
+      for (let attempt = 0; attempt < MAX_VERIFICATION_ATTEMPTS; attempt += 1) {
+        const { userResult, verifiedAccessToken } = await runSerializedUserCheck();
+        if (quiesced) throw new AuthRecoveryRequired();
+        const { data: userData, error } = userResult;
+        const latest = await client.auth.getSession();
+        if (quiesced) throw new AuthRecoveryRequired();
+        if (error) {
+          if (latest.data.session && !sameCredentials(candidateSession, latest.data.session)) {
+            throw new AuthRecoveryRequired(currentBackoffRetryAfter(latest.data.session));
+          }
+          if (isAuthSessionMissingError(error)) { deadSession = true; throw new SessionExpired(); }
+          throw new AuthRecoveryRequired(currentBackoffRetryAfter());
+        }
+        if (latest.error || !latest.data.session || !userData.user) {
           throw new AuthRecoveryRequired(currentBackoffRetryAfter(latest.data.session));
         }
-        if (isAuthSessionMissingError(error)) { deadSession = true; throw new SessionExpired(); }
-        throw new AuthRecoveryRequired(currentBackoffRetryAfter());
+        if (
+          verifiedAccessToken !== null &&
+          latest.data.session.access_token === verifiedAccessToken &&
+          userData.user.id === latest.data.session.user.id
+        ) {
+          deadSession = false;
+          return latest.data.session;
+        }
+        candidateSession = latest.data.session;
       }
-      if (latest.error || !latest.data.session || !userData.user ||
-          userData.user.id !== latest.data.session.user.id) {
-        throw new AuthRecoveryRequired(currentBackoffRetryAfter());
-      }
-      deadSession = false;
-      return latest.data.session;
+      throw new AuthRecoveryRequired(currentBackoffRetryAfter());
     } catch (error) {
       if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
       // Lock contention and storage/transport exceptions also leave saved auth
@@ -1352,10 +1527,110 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     return boundedAuth(verifiedSession());
   }
 
-  async function signOut(): Promise<void> {
+  async function signOut(signOutOptions?: BrowserSignOutOptions): Promise<BrowserSignOutResult> {
+    if (quiesced) {
+      return { signedOutLocally: false, serverRevoked: false, replaced: false };
+    }
     deadSession = false;
-    await client.auth.signOut();
-    deadSession = false;
+    const scope = signOutOptions?.scope ?? "global";
+    const targetKey = effectiveStorageKey();
+    const initialRaw = readAuthItem(targetKey);
+    const initialCred = savedSession(initialRaw);
+    const expectedUserId = signOutOptions?.expected?.userId?.trim() || initialCred?.user?.id?.trim() || null;
+    const expectedSessionId =
+      signOutOptions?.expected?.sessionId?.trim() ||
+      sessionIdFromAccessToken(initialCred?.access_token) ||
+      null;
+
+    const matchesInitiatingLogin = (cred: Session | null): boolean => {
+      if (!cred) return false;
+      if (expectedUserId !== null && cred.user?.id !== expectedUserId) return false;
+      const credSid = sessionIdFromAccessToken(cred.access_token);
+      if (expectedSessionId !== null) {
+        return credSid === expectedSessionId;
+      }
+      if (initialCred !== null) {
+        return cred.user?.id === initialCred.user?.id && cred.refresh_token === initialCred.refresh_token;
+      }
+      return true;
+    };
+
+    if (initialCred !== null && !matchesInitiatingLogin(initialCred)) {
+      return { signedOutLocally: false, serverRevoked: false, replaced: true };
+    }
+    if (initialCred === null) {
+      return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false };
+    }
+
+    if (verifiedAuthClient.initializePromise) {
+      await Promise.resolve(verifiedAuthClient.initializePromise).catch(() => undefined);
+    }
+    if (quiesced) {
+      return { signedOutLocally: false, serverRevoked: false, replaced: false };
+    }
+
+    return await verifiedAuthClient._acquireLock!(-1, async () => {
+      if (quiesced) {
+        return { signedOutLocally: false, serverRevoked: false, replaced: false };
+      }
+      const rawBeforeLogout = readAuthItem(targetKey);
+      const credBeforeLogout = savedSession(rawBeforeLogout);
+      if (credBeforeLogout === null) {
+        clearBackoffRecordLocked();
+        deadSession = false;
+        return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false };
+      }
+      if (!matchesInitiatingLogin(credBeforeLogout)) {
+        return { signedOutLocally: false, serverRevoked: false, replaced: true };
+      }
+
+      let serverRevoked = false;
+      const accessToken = credBeforeLogout.access_token;
+      if (typeof accessToken === "string" && accessToken.length > 0 && isUnexpiredSession(credBeforeLogout)) {
+        try {
+          const { error } = await verifiedAuthClient.admin!.signOut!(accessToken, scope);
+          if (!error) {
+            serverRevoked = true;
+          }
+        } catch {
+          serverRevoked = false;
+        }
+      }
+
+      if (quiesced) {
+        return { signedOutLocally: false, serverRevoked, replaced: false };
+      }
+      if (scope === "others") {
+        return { signedOutLocally: false, serverRevoked, replaced: false };
+      }
+
+      const rawBeforeRemove = readAuthItem(targetKey);
+      const credBeforeRemove = savedSession(rawBeforeRemove);
+      if (credBeforeRemove === null) {
+        clearBackoffRecordLocked();
+        deadSession = false;
+        return { signedOutLocally: true, serverRevoked, replaced: false };
+      }
+      if (!matchesInitiatingLogin(credBeforeRemove)) {
+        return { signedOutLocally: false, serverRevoked, replaced: true };
+      }
+
+      // Guard local removal with removalSnapshot so _removeSession aborts before
+      // mutating storage or announcing SIGNED_OUT if a peer replaces the slot.
+      removalSnapshot = rawBeforeRemove;
+      try {
+        await verifiedAuthClient._removeSession!();
+      } catch {
+        removalSnapshot = null;
+        const afterCred = savedSession(readAuthItem(targetKey));
+        if (afterCred !== null && !matchesInitiatingLogin(afterCred)) {
+          return { signedOutLocally: false, serverRevoked, replaced: true };
+        }
+        return { signedOutLocally: afterCred === null, serverRevoked, replaced: false };
+      }
+      deadSession = false;
+      return { signedOutLocally: true, serverRevoked, replaced: false };
+    });
   }
 
   function quiesce(): Promise<void> {
@@ -1363,6 +1638,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     quiesced = true;
     retireRefreshAttempt();
     memoryBackoff = null;
+    memoryBackoffWriteRefused = false;
     removalSnapshot = null;
     authListeners.clear();
     pendingStorageWrites.clear();

@@ -15,6 +15,7 @@ import {
   REFRESH_BACKOFF_BASE_MS,
   REFRESH_BACKOFF_CAP_MS,
   REFRESH_BACKOFF_FLOOR_MS,
+  REFRESH_RETRY_AFTER_CEILING_MS,
   SessionExpired,
   createBrowserSession,
   credentialGenerationKey,
@@ -892,7 +893,9 @@ test("Order B: rotation in storage with storage event 200 ms after 400 refresh_t
       const rotatedAt = Date.now();
       dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: initialStored, newValue: rotatedStored });
 
-      assert.equal(storage.entries.has(backoffKey), false, "storage event with different credential clears old backoff immediately");
+      // Condition 1: storage events run outside the cross-tab lock and must not mutate disk;
+      // the mismatched backoff entry is ignored at read time until the next locked attempt cleans it up.
+      assert.equal(storage.entries.has(backoffKey), true, "storage event did not mutate backoff key outside the lock");
 
       const [resA, resB] = await raceDeadline(
         Promise.all([sessionA.currentSession(), sessionB.currentSession()]),
@@ -1467,8 +1470,8 @@ test("cross-tab backoff generation key (Item 15): uses non-secret session_id + u
         await assert.rejects(() => session.currentSession(), (err) => {
           assert.ok(err instanceof AuthRecoveryRequired);
           assert.ok(typeof err.retryAfter === "number");
-          assert.ok(err.retryAfter <= beforeFailure + REFRESH_BACKOFF_CAP_MS + 1_000);
-          assert.ok(err.retryAfter >= beforeFailure + REFRESH_BACKOFF_FLOOR_MS);
+          assert.ok(err.retryAfter <= beforeFailure + REFRESH_RETRY_AFTER_CEILING_MS + 1_000);
+          assert.ok(err.retryAfter >= beforeFailure + REFRESH_RETRY_AFTER_CEILING_MS - 1_000);
           return true;
         });
 
@@ -1612,7 +1615,9 @@ test("cross-tab backoff across two independent module instances (Items 12 & 13):
       // 2) Storage change prompts a fresh verified read on both instances with zero extra refreshes.
       storage.entries.set(TEST_STORAGE_KEY, s1RotatedValid);
       dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: s1Expired, newValue: s1RotatedValid });
-      assert.equal(storage.entries.has(backoffKey), false, "storage event cleared old backoff");
+      // Condition 1: storage event is a read-only hint outside the lock; mismatched backoff is ignored
+      // at read time and cleaned up by the next locked operation (verified in step 3 below).
+      assert.equal(storage.entries.has(backoffKey), true, "storage event did not mutate backoff key outside the lock");
 
       const [verA, verB] = await Promise.all([tabA.verifiedSession(), tabB.verifiedSession()]);
       assert.equal(verA?.refresh_token, "rt-s1-rot");
@@ -1621,6 +1626,9 @@ test("cross-tab backoff across two independent module instances (Items 12 & 13):
       assert.equal(userAuthHeaders.length, 2, "fresh verified getUser() ran on both instances");
 
       // 3) New login proceeds immediately while an in-flight predecessor refresh stays fenced.
+      // Clear Step 1's active backoff for s1Expired before re-seeding the same credential
+      // (Condition 1 keeps Step 2's unlocked storage event from deleting backoffKey on disk).
+      storage.entries.delete(backoffKey);
       storage.entries.set(TEST_STORAGE_KEY, s1Expired);
       dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: s1RotatedValid, newValue: s1Expired });
       holdPredecessor = true;
@@ -1757,4 +1765,245 @@ test("Item 14: no raw refresh token, access token, or session payload appears in
   } finally {
     Object.assign(console, origConsole);
   }
+});
+
+test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SIGNED_IN preserves active peer backoff; readable-but-write-refused storage preserves in-process backoff; Retry-After: 300 gates wire for 300s; 15-minute ceiling clamps extreme headers", async (t) => {
+  await t.test("delayed TOKEN_REFRESHED and SIGNED_IN for current session arriving after peer 429 backoff do not clear backoff or allow wire refresh before retry time", async () => {
+    const modA = await import("../../../shared/browser-session/index.ts?tab=c1-delayed-a");
+    const modB = await import("../../../shared/browser-session/index.ts?tab=c1-delayed-b");
+    assert.notEqual(modA, modB, "two distinct ES module instances");
+
+    const backoffKey = modA.refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const currentAt = makeJwt({ sub: "user-1", sessionId: "sid-c1-1", sig: "sig-c1-1" });
+    const currentSessionObj = {
+      access_token: currentAt,
+      refresh_token: "rt-c1-1",
+      expires_in: 3600,
+      expires_at: nowSec - 120,
+      token_type: "bearer",
+      user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+    };
+    const storedJson = JSON.stringify(currentSessionObj);
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: storedJson });
+    const locks = createFifoLocks();
+    let refreshWireCalls = 0;
+
+    const fetchImpl = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/token")) {
+        refreshWireCalls += 1;
+        return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "x-supabase-api-version": "2024-01-01",
+            "retry-after": "30",
+          },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withSharedBrowserEnv({ storage, locks, fetchImpl }, async ({ dispatchStorageEvent }) => {
+      const sdk = { createClient, navigatorLock, processLock, isAuthSessionMissingError, AuthRetryableFetchError };
+      const tabA = modA.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+      const tabB = modB.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+      assert.equal(tabA.ok, true);
+      assert.equal(tabB.ok, true);
+      if (!tabA.ok || !tabB.ok) return;
+
+      const observedA = [];
+      tabA.client.auth.onAuthStateChange((event) => observedA.push(event));
+
+      try {
+        // Peer Tab B hits 429 and writes shared durable backoff for the current session generation.
+        let errB;
+        try { await tabB.verifiedSession(); } catch (e) { errB = e; }
+        assert.equal(errB?.name, "AuthRecoveryRequired");
+        assert.equal(refreshWireCalls, 1);
+        const backoffRawAfter429 = storage.entries.get(backoffKey);
+        assert.ok(typeof backoffRawAfter429 === "string" && backoffRawAfter429.length > 0, "peer wrote durable backoff");
+
+        // Simulate delayed peer BroadcastChannel TOKEN_REFRESHED and SIGNED_IN events for the
+        // CURRENT session arriving outside the refresh lock on Tab A.
+        await tabA.client.auth._notifyAllSubscribers("TOKEN_REFRESHED", currentSessionObj, false);
+        await tabA.client.auth._notifyAllSubscribers("SIGNED_IN", currentSessionObj, false);
+        dispatchStorageEvent({ key: TEST_STORAGE_KEY, oldValue: storedJson, newValue: storedJson });
+
+        assert.deepEqual(observedA, ["TOKEN_REFRESHED", "SIGNED_IN"], "subscribers still received delayed events");
+        assert.equal(
+          storage.entries.get(backoffKey),
+          backoffRawAfter429,
+          "delayed TOKEN_REFRESHED/SIGNED_IN and storage event preserved matching durable backoff",
+        );
+
+        // Neither Tab A nor Tab B may send another wire refresh before the retry deadline.
+        let errA;
+        try { await tabA.verifiedSession(); } catch (e) { errA = e; }
+        assert.equal(errA?.name, "AuthRecoveryRequired");
+        assert.equal(errA?.retryAfter, errB.retryAfter, "Tab A honoured Tab B's exact retryAfter");
+        await assert.rejects(() => tabB.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
+        assert.equal(refreshWireCalls, 1, "zero wire refreshes sent before retry deadline despite delayed events");
+      } finally {
+        await Promise.all([tabA.quiesce(), tabB.quiesce()]);
+      }
+    });
+  });
+
+  await t.test("readable storage with refused writes (QuotaExceededError) still bounds this tab via in-process fallback", async () => {
+    const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const stored1 = JSON.stringify({
+      access_token: makeJwt({ sub: "user-1", sessionId: "sid-ro-1", sig: "sig-ro-1" }),
+      refresh_token: "rt-ro-1",
+      expires_in: 3600,
+      expires_at: nowSec - 120,
+      token_type: "bearer",
+      user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+    });
+    const base = memoryStorage({ [TEST_STORAGE_KEY]: stored1 });
+    const writeRefusingStorage = {
+      ...base,
+      get length() { return base.length; },
+      key(i) { return base.key(i); },
+      getItem(k) { return base.getItem(k); },
+      setItem() { throw new DOMException("QuotaExceededError", "QuotaExceededError"); },
+      removeItem(k) { base.removeItem(k); },
+    };
+    const locks = createFifoLocks();
+    let refreshWireCalls = 0;
+
+    const fetchImpl = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/token")) {
+        refreshWireCalls += 1;
+        return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+          status: 429,
+          headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01", "retry-after": "25" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withSharedBrowserEnv({ storage: writeRefusingStorage, locks, fetchImpl }, async ({ dispatchStorageEvent }) => {
+      const session = makeBrowserSession();
+      try {
+        let firstErr;
+        try { await session.verifiedSession(); } catch (e) { firstErr = e; }
+        assert.equal(firstErr?.name, "AuthRecoveryRequired");
+        assert.ok(typeof firstErr?.retryAfter === "number" && firstErr.retryAfter > Date.now() + 20_000);
+        assert.equal(base.entries.has(backoffKey), false, "disk backoff key is absent because setItem threw");
+        assert.equal(refreshWireCalls, 1);
+
+        // Even after a storage event or repeated verifiedSession()/getSession() calls while disk
+        // remains readable and returns null for backoffKey, this tab keeps its same-generation
+        // in-memory backoff and sends ZERO extra wire refreshes.
+        dispatchStorageEvent({ key: backoffKey, oldValue: null, newValue: null });
+        let secondErr;
+        try { await session.verifiedSession(); } catch (e) { secondErr = e; }
+        assert.equal(secondErr?.name, "AuthRecoveryRequired");
+        assert.equal(secondErr?.retryAfter, firstErr.retryAfter, "in-process fallback preserved exact retryAfter");
+        await session.client.auth.getSession();
+        assert.equal(refreshWireCalls, 1, "zero extra wire refreshes when storage is readable but writes are refused");
+      } finally {
+        await session.quiesce();
+      }
+    });
+  });
+
+  await t.test("Retry-After: 300 gates the wire for full 300s even on earlier screen-level retries, and 15-minute ceiling clamps extreme headers", async () => {
+    const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+    let fakeNow = Date.now();
+    const realDateNow = Date.now;
+    Date.now = () => fakeNow;
+
+    try {
+      const nowSec = Math.floor(fakeNow / 1000);
+      const makeExpired = (sid, rt) => JSON.stringify({
+        access_token: makeJwt({ sub: "user-1", sessionId: sid, sig: `sig-${sid}` }),
+        refresh_token: rt,
+        expires_in: 3600,
+        expires_at: nowSec - 120,
+        token_type: "bearer",
+        user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+      });
+
+      const storage = memoryStorage({ [TEST_STORAGE_KEY]: makeExpired("sid-ra300", "rt-ra300") });
+      const locks = createFifoLocks();
+      let retryAfterHeader = "300";
+      let refreshWireCalls = 0;
+
+      const fetchImpl = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/token")) {
+          refreshWireCalls += 1;
+          return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "x-supabase-api-version": "2024-01-01",
+              "retry-after": retryAfterHeader,
+            },
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withSharedBrowserEnv({ storage, locks, fetchImpl }, async () => {
+        const modA = await import("../../../shared/browser-session/index.ts?tab=c1-ra-a");
+        const modB = await import("../../../shared/browser-session/index.ts?tab=c1-ra-b");
+        const sdk = { createClient, navigatorLock, processLock, isAuthSessionMissingError, AuthRetryableFetchError };
+        const tabA = modA.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+        const tabB = modB.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+        assert.equal(tabA.ok && tabB.ok, true);
+        if (!tabA.ok || !tabB.ok) return;
+
+        try {
+          const t0 = fakeNow;
+          let err1;
+          try { await tabA.verifiedSession(); } catch (e) { err1 = e; }
+          assert.equal(err1?.name, "AuthRecoveryRequired");
+          assert.equal(err1?.retryAfter, t0 + 300_000, "Retry-After: 300 is NOT clipped to 60s exponential cap");
+          assert.equal(refreshWireCalls, 1);
+
+          // Screen-level retry at +65s (past old 60s cap) and +299s must STILL send zero wire calls.
+          fakeNow = t0 + 65_000;
+          let err65;
+          try { await tabB.verifiedSession(); } catch (e) { err65 = e; }
+          assert.equal(err65?.name, "AuthRecoveryRequired");
+          assert.equal(err65?.retryAfter, t0 + 300_000);
+          assert.equal(refreshWireCalls, 1, "wire still gated at +65s");
+
+          fakeNow = t0 + 299_000;
+          await assert.rejects(() => tabA.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
+          assert.equal(refreshWireCalls, 1, "wire still gated at +299s");
+
+          // At +300s, the wire gate opens; test extreme Retry-After: 7200 against the 15-minute ceiling.
+          retryAfterHeader = "7200";
+          fakeNow = t0 + 300_000;
+          let errCeiling;
+          try { await tabA.verifiedSession(); } catch (e) { errCeiling = e; }
+          assert.equal(errCeiling?.name, "AuthRecoveryRequired");
+          assert.equal(REFRESH_RETRY_AFTER_CEILING_MS, 15 * 60 * 1_000, "sanity ceiling is 15 minutes");
+          assert.equal(errCeiling?.retryAfter, fakeNow + REFRESH_RETRY_AFTER_CEILING_MS, "extreme Retry-After clamped to 15-minute ceiling");
+          assert.equal(refreshWireCalls, 2);
+
+          // Still gated at +899s from second failure, then allowed at +900s.
+          const t1 = fakeNow;
+          fakeNow = t1 + REFRESH_RETRY_AFTER_CEILING_MS - 1_000;
+          await assert.rejects(() => tabB.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
+          assert.equal(refreshWireCalls, 2, "wire gated up to 15-minute ceiling");
+          fakeNow = t1 + REFRESH_RETRY_AFTER_CEILING_MS;
+          await assert.rejects(() => tabB.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
+          assert.equal(refreshWireCalls, 3, "wire opens once 15-minute ceiling elapses");
+          assert.ok(storage.entries.has(backoffKey));
+        } finally {
+          await Promise.all([tabA.quiesce(), tabB.quiesce()]);
+        }
+      });
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
 });

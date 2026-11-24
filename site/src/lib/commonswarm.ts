@@ -52,12 +52,16 @@ import {
   sameCredentials,
   terminalRefreshCodes,
   type BrowserSession,
+  type BrowserSignOutOptions,
+  type BrowserSignOutResult,
   type Deployment,
 } from "../../../shared/browser-session/index.js";
 export {
   AuthRecoveryRequired,
   SessionExpired,
   isRestSessionEnded,
+  type BrowserSignOutOptions,
+  type BrowserSignOutResult,
   type Deployment,
 };
 import { authProvider } from "./auth-providers.js";
@@ -1104,12 +1108,31 @@ export async function signOutAllBrowserAccounts(): Promise<SignOutAllResult | nu
   return mgr.signOutAllAccounts();
 }
 
-export async function signOut(expected?: { userId: string; loginId: string } | null): Promise<void> {
+export async function signOut(
+  expected?: {
+    userId: string;
+    loginId: string;
+    sessionId?: string | null;
+    scope?: BrowserSignOutOptions["scope"];
+  } | null,
+): Promise<BrowserSignOutResult | null> {
   if (isMultiAccountEnabled()) {
     await signOutActiveAccount(expected ?? null);
-    return;
+    return null;
   }
-  await singleAccountSession()?.signOut();
+  const single = singleAccountSession();
+  if (!single) return null;
+  return await single.signOut({
+    ...(expected?.scope ? { scope: expected.scope } : {}),
+    ...(expected
+      ? {
+          expected: {
+            userId: expected.userId || null,
+            sessionId: expected.sessionId ?? (expected.loginId || null),
+          },
+        }
+      : {}),
+  });
 }
 
 export class NoDeployment extends Error {

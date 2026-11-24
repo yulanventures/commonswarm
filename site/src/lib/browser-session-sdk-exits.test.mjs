@@ -1295,25 +1295,29 @@ test("Real module witness (Items 6, 7, 10, 11): synchronous _emitInitialSession 
         await new Promise((r) => setTimeout(r, 20));
         assert.equal(locks.acquireCount, acquiresBeforeLate, "late subscriber acquired zero locks");
 
-        // Seed stale backoff entry to verify shared module's own onAuthStateChange clears it on each event.
+        // Seed stale backoff entry: events are read-only hints outside the lock (Condition 1),
+        // so signInWithPassword (which runs outside _acquireLock in pinned auth-js 2.111.0)
+        // leaves the stale key untouched on disk while ignoring it for the new session, and
+        // locked operations (refreshSession, signOut) clean it up under the cross-tab lock.
         const seedBackoff = () => storage.entries.set(TEST_BACKOFF_KEY, JSON.stringify({ gen: "v1:uid:user-1:1", nextAttemptAt: Date.now() + 30_000, attempts: 1 }));
 
         // 1) Sign in -> SIGNED_IN
         seedBackoff();
         const signInRes = await session.client.auth.signInWithPassword({ email: "owner@example.test", password: "pw" });
         assert.equal(signInRes.error, null);
-        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "shared module cleared backoff on SIGNED_IN");
+        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), true, "SIGNED_IN event handler did not mutate shared backoff outside the lock");
 
-        // 2) Token rotation -> TOKEN_REFRESHED
+        // 2) Token rotation -> TOKEN_REFRESHED (runs under lock, clears stale backoff)
         seedBackoff();
         const refreshRes = await session.client.auth.refreshSession();
         assert.equal(refreshRes.error, null);
-        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "shared module cleared backoff on TOKEN_REFRESHED");
+        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "locked refresh cleared backoff");
 
-        // 3) Sign out -> SIGNED_OUT
+        // 3) Sign out -> SIGNED_OUT (runs under lock, clears stale backoff)
         seedBackoff();
-        await session.signOut();
-        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "shared module cleared backoff on SIGNED_OUT");
+        const signOutRes = await session.signOut();
+        assert.deepEqual(signOutRes, { signedOutLocally: true, serverRevoked: true, replaced: false });
+        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "locked signOut cleared backoff");
 
         const expected = [
           { event: "SIGNED_IN", at: "at-signin" },
@@ -1568,7 +1572,7 @@ test("commonswarm single-account failure handling: only unsupported_sdk rejects 
           currentSession: async () => fakeSessionObj,
           verifiedSession: async () => fakeSessionObj,
           boundedAuth: (p) => p,
-          signOut: async () => undefined,
+          signOut: async () => ({ signedOutLocally: true, serverRevoked: true, replaced: false }),
           quiesce: async () => undefined,
         };
       },
@@ -1754,6 +1758,62 @@ test("Source pin (Item 9): site/ and app/ installs both pin @supabase/supabase-j
       supaConstantsSrc.includes("'X-Client-Info': `supabase-js/${version};"),
       true,
       `[${label}] SupabaseClient X-Client-Info header format changed in src/lib/constants.ts. Re-verify shared/browser-session/index.ts runtime version check before moving this pin.`,
+    );
+
+    // 5) Pin BroadcastChannel peer-event forwarding outside the refresh lock (Condition 1).
+    const broadcastSnippet = [
+      "this.broadcastChannel?.addEventListener('message', async (event) => {",
+      "        this._debug('received broadcast notification from other tab or client', event)",
+      "",
+      "        // Another tab successfully refreshed or signed in — any cached",
+      "        // failure in this tab is stale and should not block the next",
+      "        // refresh attempt.",
+      "        if (event.data.event === 'TOKEN_REFRESHED' || event.data.event === 'SIGNED_IN') {",
+      "          this.lastRefreshFailure = null",
+      "        }",
+      "",
+      "        try {",
+      "          await this._notifyAllSubscribers(event.data.event, event.data.session, false)",
+    ].join("\n");
+    assert.equal(
+      goTrueSrc.includes(broadcastSnippet),
+      true,
+      `[${label}] GoTrueClient BroadcastChannel listener shape changed. Re-verify Condition 1 read-only event handling in shared/browser-session/index.ts before moving this pin.`,
+    );
+
+    // 6) Pin GoTrueClient signOut/_signOut early return on non-missing sessionError, _removeSession,
+    //    and GoTrueAdminApi.signOut logout request shape (Condition 2).
+    const signOutEarlyReturnSnippet = [
+      "const { data, error: sessionError } = result",
+      "      if (sessionError && !isAuthSessionMissingError(sessionError)) {",
+      "        return this._returnResult({ error: sessionError })",
+      "      }",
+    ].join("\n");
+    assert.equal(
+      goTrueSrc.includes(signOutEarlyReturnSnippet),
+      true,
+      `[${label}] GoTrueClient._signOut sessionError early-return shape changed. Re-verify Condition 2 signOut wrapper in shared/browser-session/index.ts before moving this pin.`,
+    );
+    const removeSessionSnippet = [
+      "private async _removeSession() {",
+      "    // Bump synchronously, BEFORE any `await`, so that `_callRefreshToken`'s",
+      "    // post-save check sees the increment whenever this method has started —",
+      "    // even if it hasn't finished. Pairs with the epoch check in",
+      "    // `_callRefreshToken`. See `_sessionRemovalEpoch` field doc.",
+      "    this._sessionRemovalEpoch += 1",
+    ].join("\n");
+    assert.equal(
+      goTrueSrc.includes(removeSessionSnippet) &&
+      goTrueSrc.includes("await removeItemAsync(this.storage, this.storageKey)") &&
+      goTrueSrc.includes("await this._notifyAllSubscribers('SIGNED_OUT', null)"),
+      true,
+      `[${label}] GoTrueClient._removeSession shape changed. Re-verify Condition 2 guarded local sign-out in shared/browser-session/index.ts before moving this pin.`,
+    );
+    const adminApiSrc = await readFile(path.join(authJsDir, "src/GoTrueAdminApi.ts"), "utf8");
+    assert.equal(
+      adminApiSrc.includes("await _request(this.fetch, 'POST', `${this.url}/logout?scope=${scope}`, {"),
+      true,
+      `[${label}] GoTrueAdminApi.signOut request shape changed. Re-verify Condition 2 server revocation in shared/browser-session/index.ts before moving this pin.`,
     );
   }
 });
@@ -2002,5 +2062,495 @@ test("SDK table: unpatched pinned auth-js 2.111.0 late onAuthStateChange with ex
     } finally {
       await client.auth.dispose();
     }
+  });
+});
+
+// ============================================================================
+// CONDITIONS 2, 3, AND 4 PINNED-CLIENT WITNESSES
+// ============================================================================
+
+function makeSignedJwt({ sub = "user-1", sessionId = "sid-1", sig = "sig-1" } = {}) {
+  const b64 = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
+  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub, session_id: sessionId })}.${sig}`;
+}
+
+test("Condition 2 (pinned client): deliberate sign-out is truthful during non-terminal backoff, revokes healthy unchanged login, and leaves replacement login untouched", async (t) => {
+  await t.test("(a) sign-out during non-terminal 429 backoff clears stored credential and backoff, announces SIGNED_OUT once, skips expired-token logout, and cannot recover later", async () => {
+    const expiredJwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-backoff-1", sig: "sig-bo-1" });
+    const expiredStored = makeStoredSession({ accessToken: expiredJwt, refreshToken: "rt-bo-1", expired: true });
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: expiredStored });
+    const locks = createFifoLocks();
+    const events = [];
+    let refreshCalls = 0;
+    let logoutCalls = 0;
+    let serverHealthy = false;
+
+    const fetchImpl = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/token")) {
+        refreshCalls += 1;
+        if (!serverHealthy) {
+          return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01", "retry-after": "30" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            access_token: makeSignedJwt({ sub: "user-1", sessionId: "sid-backoff-1", sig: "sig-bo-recovered" }),
+            refresh_token: "rt-bo-recovered",
+            expires_in: 3600,
+            token_type: "bearer",
+            user: { id: "user-1", aud: "authenticated" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/auth/v1/logout")) {
+        logoutCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeRealSession();
+      session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+      try {
+        await assert.rejects(() => session.verifiedSession(), AuthRecoveryRequired);
+        assert.equal(refreshCalls, 1);
+        assert.ok(storage.entries.has(TEST_BACKOFF_KEY), "429 backoff recorded");
+        assert.equal(storage.entries.get(TEST_STORAGE_KEY), expiredStored, "expired session still stored before sign-out");
+        assert.deepEqual(events, []);
+
+        // Deliberate sign-out during active 429 backoff: must clear local credential and announce SIGNED_OUT once.
+        const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-backoff-1" } });
+        assert.deepEqual(outcome, { signedOutLocally: true, serverRevoked: false, replaced: false });
+        assert.equal(storage.entries.get(TEST_STORAGE_KEY) ?? null, null, "stored credential for that login is gone");
+        assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "backoff record cleared under lock");
+        assert.deepEqual(events, [{ event: "SIGNED_OUT", sess: null }], "SIGNED_OUT announced exactly once");
+        assert.equal(refreshCalls, 1, "sign-out triggered zero extra refresh calls");
+        assert.equal(logoutCalls, 0, "skipped server logout because expired access token is not usable");
+
+        // Even after server becomes healthy, nothing can recover the signed-out session.
+        serverHealthy = true;
+        const afterReload = makeRealSession();
+        try {
+          assert.equal(await afterReload.verifiedSession(), null, "reload stays signed out");
+          assert.equal(refreshCalls, 1, "reload sent zero refresh calls");
+        } finally {
+          await afterReload.quiesce();
+        }
+      } finally {
+        await session.quiesce();
+      }
+    });
+  });
+
+  await t.test("(b) unchanged login control with healthy session sends server logout and clears local state; server 500 still clears local state and reports serverRevoked: false", async () => {
+    for (const logoutStatus of [204, 500]) {
+      const validJwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-healthy-1", sig: "sig-h-1" });
+      const validStored = makeStoredSession({ accessToken: validJwt, refreshToken: "rt-h-1", expired: false });
+      const storage = memoryStorage({ [TEST_STORAGE_KEY]: validStored });
+      const locks = createFifoLocks();
+      const events = [];
+      const logoutHeaders = [];
+
+      const fetchImpl = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/logout")) {
+          logoutHeaders.push({ url, auth: new Headers(init?.headers).get("authorization") });
+          return logoutStatus === 204
+            ? new Response(null, { status: 204 })
+            : new Response(JSON.stringify({ msg: "server error" }), { status: 500, headers: { "content-type": "application/json" } });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          events.length = 0;
+
+          const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-healthy-1" } });
+          assert.deepEqual(outcome, {
+            signedOutLocally: true,
+            serverRevoked: logoutStatus === 204,
+            replaced: false,
+          });
+          assert.equal(logoutHeaders.length, 1, "server logout attempted once");
+          assert.equal(logoutHeaders[0].auth, `Bearer ${validJwt}`);
+          assert.equal(storage.entries.get(TEST_STORAGE_KEY) ?? null, null, "local credential cleared");
+          assert.deepEqual(events, [{ event: "SIGNED_OUT", sess: null }], "SIGNED_OUT announced once");
+        } finally {
+          await session.quiesce();
+        }
+      });
+    }
+  });
+
+  await t.test("(c) replacement login during the wait (different user OR same user with new session_id) is untouched and no SIGNED_OUT is announced", async () => {
+    for (const replacementCase of [
+      { name: "different user", userId: "user-2", sessionId: "sid-other-2", refreshToken: "rt-other-2" },
+      { name: "same user new session_id", userId: "user-1", sessionId: "sid-same-user-2", refreshToken: "rt-same-2" },
+    ]) {
+      const login1Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-orig-1", sig: "sig-orig-1" });
+      const login1Stored = makeStoredSession({ accessToken: login1Jwt, refreshToken: "rt-orig-1", expired: true, userId: "user-1" });
+      const login2Jwt = makeSignedJwt({ sub: replacementCase.userId, sessionId: replacementCase.sessionId, sig: "sig-rep-2" });
+      const login2Stored = makeStoredSession({
+        accessToken: login2Jwt,
+        refreshToken: replacementCase.refreshToken,
+        expired: false,
+        userId: replacementCase.userId,
+      });
+
+      const storage = memoryStorage({ [TEST_STORAGE_KEY]: login1Stored });
+      const locks = createFifoLocks();
+      const events = [];
+      let logoutCalls = 0;
+
+      const fetchImpl = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/logout")) {
+          logoutCalls += 1;
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes("/auth/v1/token")) {
+          return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01", "retry-after": "30" },
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          events.length = 0;
+
+          // Hold the shared lock while signOut() starts, then replace storage with the replacement login.
+          let releaseLock;
+          const lockHeld = new Promise((r) => { releaseLock = r; });
+          let lockAcquiredResolve;
+          const lockAcquired = new Promise((r) => { lockAcquiredResolve = r; });
+
+          const peerLock = locks.request(TEST_LOCK_NAME, async () => {
+            lockAcquiredResolve();
+            await lockHeld;
+          });
+          await lockAcquired;
+
+          const pendingSignOut = session.signOut({ expected: { userId: "user-1", sessionId: "sid-orig-1" } });
+          storage.entries.set(TEST_STORAGE_KEY, login2Stored);
+          releaseLock();
+          await peerLock;
+
+          const outcome = await pendingSignOut;
+          assert.deepEqual(
+            outcome,
+            { signedOutLocally: false, serverRevoked: false, replaced: true },
+            `${replacementCase.name}: reported replacement without signing out locally`,
+          );
+          assert.equal(
+            storage.entries.get(TEST_STORAGE_KEY),
+            login2Stored,
+            `${replacementCase.name}: replacement login untouched in storage`,
+          );
+          assert.equal(logoutCalls, 0, `${replacementCase.name}: did not revoke replacement on server`);
+          assert.deepEqual(events, [], `${replacementCase.name}: announced zero SIGNED_OUT events`);
+        } finally {
+          await session.quiesce();
+        }
+      });
+    }
+  });
+});
+
+test("Condition 3 (pinned client): untracked refresh sends zero wire requests/writes/events; missing or mismatched storageKey fails closed; processLock fallback refreshes normally", async (t) => {
+  await t.test("untracked _callRefreshToken, direct _refreshAccessToken, and unlocked _recoverAndRefresh send zero wire calls, zero writes, zero events", async () => {
+    const expiredStored = makeStoredSession({ accessToken: "at-c3-1", refreshToken: "rt-c3-1", expired: true });
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: expiredStored });
+    const locks = createFifoLocks();
+    const events = [];
+    let wireCalls = 0;
+
+    const fetchImpl = async () => {
+      wireCalls += 1;
+      return new Response(
+        JSON.stringify({
+          access_token: "at-c3-2",
+          refresh_token: "rt-c3-2",
+          expires_in: 3600,
+          token_type: "bearer",
+          user: { id: "user-1", aud: "authenticated" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeRealSession();
+      session.client.auth.onAuthStateChange((e, sess) => events.push({ e, sess }));
+      try {
+        // Stop auto-init refresh from running concurrently; reset storage to expiredStored.
+        await session.client.auth.initialize();
+        await settleLockIdle(locks);
+        await session.client.auth.stopAutoRefresh();
+        await settleLockIdle(locks);
+
+        storage.entries.set(TEST_STORAGE_KEY, expiredStored);
+        storage.ops.length = 0;
+        events.length = 0;
+        wireCalls = 0;
+
+        // 1) Call wrapped _callRefreshToken outside any lock.
+        const untrackedCallRes = await session.client.auth._callRefreshToken("rt-c3-1");
+        assert.equal(untrackedCallRes.data, null);
+        assert.equal(isAuthRefreshDiscardedError(untrackedCallRes.error), true, "exited via AuthRefreshDiscardedError");
+
+        // 2) Call _refreshAccessToken directly outside any lock (hits authFetch wire boundary).
+        const directRefreshRes = await session.client.auth._refreshAccessToken("rt-c3-1");
+        assert.equal(wireCalls, 0, "authFetch wire boundary sent zero wire requests");
+        assert.equal(directRefreshRes.data?.session?.access_token?.startsWith("__cs_discard_v1_"), true, "authFetch returned discard sentinel");
+
+        // 3) Trigger library path _recoverAndRefresh directly outside any lock.
+        await session.client.auth._recoverAndRefresh();
+
+        assert.equal(wireCalls, 0, "zero wire refresh requests across all untracked paths");
+        assert.equal(storage.entries.get(TEST_STORAGE_KEY), expiredStored, "stored session untouched");
+        assert.equal(
+          storage.ops.some((op) => op === `set:${TEST_STORAGE_KEY}` || op === `remove:${TEST_STORAGE_KEY}`),
+          false,
+          "zero storage mutations",
+        );
+        assert.deepEqual(events, [], "zero auth events emitted");
+      } finally {
+        await session.quiesce();
+      }
+    });
+  });
+
+  await t.test("missing or unexpected client storageKey fails closed as unsupported_sdk with zero wire calls", async () => {
+    for (const badKey of [undefined, "", "sb-other-auth-token"]) {
+      const expiredStored = makeStoredSession({ accessToken: "at-key-1", refreshToken: "rt-key-1", expired: true });
+      const storage = memoryStorage({ [TEST_STORAGE_KEY]: expiredStored });
+      const locks = createFifoLocks();
+      let wireCalls = 0;
+
+      const fetchImpl = async () => {
+        wireCalls += 1;
+        return new Response(JSON.stringify({}), { status: 429 });
+      };
+
+      await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+        const result = createBrowserSession({
+          url: TEST_API_URL,
+          anonKey: "anon-key",
+          detectSessionInUrl: false,
+          allowProcessLockFallback: false,
+          sdk: {
+            createClient(url, key, opts) {
+              const client = createClient(url, key, opts);
+              Object.defineProperty(client.auth, "storageKey", { value: badKey, configurable: true });
+              return client;
+            },
+            navigatorLock,
+            processLock,
+            isAuthSessionMissingError,
+            AuthRetryableFetchError,
+          },
+        });
+        assert.deepEqual(result, { ok: false, reason: "unsupported_sdk" }, `bad storageKey=${String(badKey)} must fail closed`);
+        await new Promise((r) => setTimeout(r, 30));
+        assert.equal(wireCalls, 0, "zero wire requests");
+        assert.equal(storage.entries.get(TEST_STORAGE_KEY), expiredStored, "storage untouched");
+      });
+    }
+  });
+
+  await t.test("allowProcessLockFallback: true with navigator.locks absent still refreshes normally through trackedLock -> processLock", async () => {
+    const expiredStored = makeStoredSession({
+      accessToken: makeSignedJwt({ sub: "user-1", sessionId: "sid-proc-1", sig: "sig-proc-old" }),
+      refreshToken: "rt-proc-1",
+      expired: true,
+    });
+    const freshJwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-proc-1", sig: "sig-proc-new" });
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: expiredStored });
+    let processLockCalls = 0;
+    let refreshCalls = 0;
+    let userCalls = 0;
+
+    const fetchImpl = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/token")) {
+        refreshCalls += 1;
+        return new Response(
+          JSON.stringify({
+            access_token: freshJwt,
+            refresh_token: "rt-proc-2",
+            expires_in: 3600,
+            token_type: "bearer",
+            user: { id: "user-1", aud: "authenticated" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/auth/v1/user")) {
+        userCalls += 1;
+        return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withBrowserEnv({ storage, locks: undefined, fetchImpl }, async () => {
+      const created = createBrowserSession({
+        url: TEST_API_URL,
+        anonKey: "anon-key",
+        detectSessionInUrl: false,
+        allowProcessLockFallback: true,
+        sdk: {
+          createClient,
+          navigatorLock,
+          processLock: (...args) => {
+            processLockCalls += 1;
+            return processLock(...args);
+          },
+          isAuthSessionMissingError,
+          AuthRetryableFetchError,
+        },
+      });
+      assert.equal(created.ok, true);
+      if (!created.ok) return;
+      try {
+        const verified = await created.verifiedSession();
+        assert.equal(verified?.access_token, freshJwt, "processLock fallback refreshed and verified normally");
+        assert.equal(verified?.refresh_token, "rt-proc-2");
+        assert.ok(processLockCalls > 0, "processLock was invoked under trackedLock");
+        assert.equal(refreshCalls, 1, "exactly 1 wire refresh succeeded");
+        assert.equal(userCalls, 1, "verified with getUser");
+      } finally {
+        await created.quiesce();
+      }
+    });
+  });
+});
+
+test("Condition 4 (pinned client): verifiedSession binds success to the exact verified access credential and re-verifies a same-user successor", async (t) => {
+  await t.test("held settlement: swapping storage to a different session_id for the same user during getUser requires the successor's own getUser before returning", async () => {
+    const jwt1 = makeSignedJwt({ sub: "user-1", sessionId: "sid-v4-1", sig: "sig-v4-1" });
+    const jwt2 = makeSignedJwt({ sub: "user-1", sessionId: "sid-v4-2", sig: "sig-v4-2" });
+    const stored1 = makeStoredSession({ accessToken: jwt1, refreshToken: "rt-v4-1", expired: false, userId: "user-1" });
+    const stored2 = makeStoredSession({ accessToken: jwt2, refreshToken: "rt-v4-2", expired: false, userId: "user-1" });
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: stored1 });
+    const locks = createFifoLocks();
+
+    const userChecks = [];
+    let hit1Resolve;
+    const hit1 = new Promise((r) => { hit1Resolve = r; });
+    let release1;
+    const hold1 = new Promise((r) => { release1 = r; });
+    let hit2Resolve;
+    const hit2 = new Promise((r) => { hit2Resolve = r; });
+    let release2;
+    const hold2 = new Promise((r) => { release2 = r; });
+
+    const fetchImpl = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/user")) {
+        const auth = new Headers(init?.headers).get("authorization");
+        userChecks.push(auth);
+        if (auth === `Bearer ${jwt1}`) {
+          hit1Resolve();
+          await hold1;
+        } else if (auth === `Bearer ${jwt2}`) {
+          hit2Resolve();
+          await hold2;
+        }
+        return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeRealSession();
+      try {
+        await session.client.auth.initialize();
+        await settleLockIdle(locks);
+
+        let settled = false;
+        const pendingVerified = session.verifiedSession().then((res) => {
+          settled = true;
+          return res;
+        });
+
+        // 1) Hold GET /auth/v1/user for sid-v4-1, swap storage to same user with sid-v4-2, release sid-v4-1.
+        await hit1;
+        storage.entries.set(TEST_STORAGE_KEY, stored2);
+        release1();
+
+        // 2) Must NOT settle on sid-v4-1's verification; must start sid-v4-2's own GET /auth/v1/user.
+        await hit2;
+        await new Promise((r) => setImmediate(r));
+        assert.equal(settled, false, "successor sid-v4-2 was NOT released before its own getUser settled");
+        assert.deepEqual(userChecks, [`Bearer ${jwt1}`, `Bearer ${jwt2}`], "successor triggered its own getUser");
+
+        // 3) Release sid-v4-2's own user check -> now returns sid-v4-2.
+        release2();
+        const result = await pendingVerified;
+        assert.equal(result?.access_token, jwt2, "returned successor only after its own verification");
+        assert.equal(result?.refresh_token, "rt-v4-2");
+      } finally {
+        release1?.();
+        release2?.();
+        await session.quiesce();
+      }
+    });
+  });
+
+  await t.test("bounded re-verification: repeated credential swaps stop after 3 user checks and reject with AuthRecoveryRequired", async () => {
+    const jwt = (n) => makeSignedJwt({ sub: "user-1", sessionId: `sid-flap-${n}`, sig: `sig-flap-${n}` });
+    const stored = (n) => makeStoredSession({ accessToken: jwt(n), refreshToken: `rt-flap-${n}`, expired: false, userId: "user-1" });
+    const storage = memoryStorage({ [TEST_STORAGE_KEY]: stored(1) });
+    const locks = createFifoLocks();
+    let userCheckCount = 0;
+
+    const fetchImpl = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/auth/v1/user")) {
+        userCheckCount += 1;
+        // Swap to a fresh same-user session_id during every user check so latest always differs.
+        storage.entries.set(TEST_STORAGE_KEY, stored(userCheckCount + 1));
+        return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeRealSession();
+      try {
+        await session.client.auth.initialize();
+        await settleLockIdle(locks);
+        await assert.rejects(() => session.verifiedSession(), AuthRecoveryRequired);
+        assert.equal(userCheckCount, 3, "bounded at 3 user verification attempts before returning AuthRecoveryRequired");
+      } finally {
+        await session.quiesce();
+      }
+    });
   });
 });

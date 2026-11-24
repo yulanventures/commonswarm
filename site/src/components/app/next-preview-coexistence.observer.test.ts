@@ -8,8 +8,11 @@
  * intercepts every API and Realtime request locally (zero external network traffic).
  *
  * Proves:
- *  (a) Overlapping token refresh in both tabs spends the single-use refresh token once and
- *      neither tab is signed out.
+ *  (a) Overlapping token refresh in both tabs is safe even if the peer tab sends one extra
+ *      stale refresh before seeing the rotated credential: at most two refreshes occur (any
+ *      second uses the old credential and is refused), both tabs end signed in, only the
+ *      rotated session is ever written to storage, no sign-out is announced, and no page
+ *      error occurs.
  *  (b1/b2) A stale terminal verification (GET /user 403) or stale terminal refresh failure
  *      (POST /token 400) in one tab does not remove a replacement login stored by the other tab.
  *  (c) A private response held in `/next` stays retired after Tab A signs out, after the same
@@ -652,15 +655,16 @@ function buildTokenFetchInitScript(tabLabel: string, lockName: string): string {
 })();`;
 }
 
-// Plain-string init script for scenario (h): records every localStorage write/remove on STORAGE_KEY,
-// and optionally renames the first lock:sb-api-auth-token acquisition so a second tab deterministically
-// starts an overlapping refresh with the old token while the first tab's refresh is held.
+// Plain-string init script shared by scenarios (a) and (h): records every localStorage write/remove
+// on STORAGE_KEY and any SIGNED_OUT announcement on BroadcastChannel(STORAGE_KEY), and optionally
+// renames the first lock:sb-api-auth-token acquisition so a second tab deterministically starts an
+// overlapping refresh with the old token while the first tab's refresh is held.
 function buildScenarioHInitScript(storageKey: string, lockName: string, bypassFirstLock: boolean): string {
   return `(() => {
   var targetKey = ${JSON.stringify(storageKey)};
   var targetLock = ${JSON.stringify(lockName)};
   var bypassFirst = ${JSON.stringify(bypassFirstLock)};
-  window.__csStorageAudit = { writes: [], removals: [] };
+  window.__csStorageAudit = { writes: [], removals: [], signedOutBroadcasts: [] };
   var proto = Storage.prototype;
   var origSet = proto.setItem;
   var origRemove = proto.removeItem;
@@ -681,6 +685,31 @@ function buildScenarioHInitScript(storageKey: string, lockName: string, bypassFi
     }
     return origRemove.apply(this, arguments);
   };
+  if (typeof BroadcastChannel === "function") {
+    try {
+      var auditBc = new BroadcastChannel(targetKey);
+      auditBc.addEventListener("message", function (ev) {
+        try {
+          var data = ev && ev.data;
+          if (data && data.event === "SIGNED_OUT") {
+            window.__csStorageAudit.signedOutBroadcasts.push({ ts: Date.now(), source: "broadcast-rx" });
+          }
+        } catch (_e) {}
+      });
+    } catch (_e) {}
+    var bcProto = BroadcastChannel.prototype;
+    if (bcProto && typeof bcProto.postMessage === "function") {
+      var origPost = bcProto.postMessage;
+      bcProto.postMessage = function (msg) {
+        try {
+          if (this && this.name === targetKey && msg && msg.event === "SIGNED_OUT") {
+            window.__csStorageAudit.signedOutBroadcasts.push({ ts: Date.now(), source: "broadcast-tx" });
+          }
+        } catch (_e) {}
+        return origPost.apply(this, arguments);
+      };
+    }
+  }
   if (bypassFirst && navigator && navigator.locks && typeof navigator.locks.request === "function") {
     var locks = navigator.locks;
     var origReq = locks.request.bind(locks);
@@ -793,13 +822,11 @@ function buildHomeOverview(
 }
 
 const repeatScenarioARaw = process.env.CS_REPEAT_SCENARIO_A?.trim() ?? "";
-const REPEAT_SCENARIO_A_COUNT =
-  /^\d+$/.test(repeatScenarioARaw) && Number(repeatScenarioARaw) > 0
-    ? Number(repeatScenarioARaw)
-    : 1;
+const IS_REPEAT_SCENARIO_A = /^\d+$/.test(repeatScenarioARaw) && Number(repeatScenarioARaw) > 0;
+const REPEAT_SCENARIO_A_COUNT = IS_REPEAT_SCENARIO_A ? Number(repeatScenarioARaw) : 1;
 
 test(
-  "served /app and /next two-tab coexistence: single-use refresh, stale terminal guard, held private retirement, and anti-framing",
+  "served /app and /next two-tab coexistence: safe overlapping refresh, stale terminal guard, held private retirement, and anti-framing",
   { timeout: Math.max(180_000, REPEAT_SCENARIO_A_COUNT * 30_000) },
   async (t) => {
   const siteRoot = resolve(import.meta.dirname, "../../..");
@@ -1602,95 +1629,279 @@ test(
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // (a) Overlapping token refresh in both tabs spends the refresh token once
-    //     and neither tab is signed out. Supports CS_REPEAT_SCENARIO_A=N.
+    // (a) Overlapping token refresh in both tabs is safe under a browser-level
+    //     stale double refresh: at most two refreshes (any second uses the old
+    //     credential and is refused), both tabs end signed in, only the rotated
+    //     session is ever written to storage, no sign-out is announced, and no
+    //     page error occurs. Supports CS_REPEAT_SCENARIO_A=N.
     // ═══════════════════════════════════════════════════════════════════════════
-    for (let run = 1; run <= REPEAT_SCENARIO_A_COUNT; run += 1) {
-      const runLabel = REPEAT_SCENARIO_A_COUNT > 1 ? `a-overlapping-refresh#run${run}/${REPEAT_SCENARIO_A_COUNT}` : "a-overlapping-refresh";
-      const sidA = "sid-overlap-1";
-      const firstRefreshHit = createSignal<void>();
-      const releaseFirstRefresh = createSignal<void>();
-      let rotatedTokenReused = false;
-      const scenario: ScenarioConfig = {
-        name: runLabel,
-        validRefreshToken: "rt-overlap-1",
-        nextRefreshToken: "rt-overlap-2",
-        activeSessionIds: new Set([sidA]),
-        async onRefresh(rt) {
-          if (rt !== scenario.validRefreshToken) {
-            rotatedTokenReused = true;
-            return {
-              status: 400,
-              body: { code: "refresh_token_already_used", error_code: "refresh_token_already_used", msg: "Already used" },
-            };
-          }
-          scenario.validRefreshToken = scenario.nextRefreshToken;
-          firstRefreshHit.resolve();
-          await releaseFirstRefresh.promise;
-          return {
-            status: 200,
-            body: makeSessionPayload({ sessionId: sidA, refreshToken: scenario.nextRefreshToken }),
+    {
+      let completedRuns = 0;
+      let secondRefreshRuns = 0;
+      let notSignedInRuns = 0;
+      try {
+        for (let run = 1; run <= REPEAT_SCENARIO_A_COUNT; run += 1) {
+          const runLabel =
+            REPEAT_SCENARIO_A_COUNT > 1
+              ? `a-overlapping-refresh#run${run}/${REPEAT_SCENARIO_A_COUNT}`
+              : "a-overlapping-refresh";
+          const sidA = "sid-overlap-1";
+          const firstRefreshHit = createSignal<void>();
+          const releaseFirstRefresh = createSignal<void>();
+          const refreshRequests: Array<{ rt: string; status: number }> = [];
+          let rotatedTokenReused = false;
+          const scenario: ScenarioConfig = {
+            name: runLabel,
+            validRefreshToken: "rt-overlap-1",
+            nextRefreshToken: "rt-overlap-2",
+            activeSessionIds: new Set([sidA]),
+            async onRefresh(rt) {
+              if (rt !== scenario.validRefreshToken) {
+                rotatedTokenReused = true;
+                refreshRequests.push({ rt, status: 400 });
+                return {
+                  status: 400,
+                  body: { code: "refresh_token_already_used", error_code: "refresh_token_already_used", msg: "Already used" },
+                };
+              }
+              scenario.validRefreshToken = scenario.nextRefreshToken;
+              refreshRequests.push({ rt, status: 200 });
+              firstRefreshHit.resolve();
+              await releaseFirstRefresh.promise;
+              return {
+                status: 200,
+                body: makeSessionPayload({ sessionId: sidA, refreshToken: scenario.nextRefreshToken }),
+              };
+            },
           };
-        },
-      };
 
-      await withTwoTabScenario(scenario, async (ctx) => {
-        try {
-        ctx.setStep("seed-expired-session");
-        await ctx.seedStorage(makeSessionPayload({ sessionId: sidA, refreshToken: "rt-overlap-1", expired: true }));
+          await withTwoTabScenario(scenario, async (ctx) => {
+            let runBothSignedIn = false;
+            let runCountedNotSignedIn = false;
+            try {
+              ctx.setStep("seed-expired-session");
+              await ctx.seedStorage(makeSessionPayload({ sessionId: sidA, refreshToken: "rt-overlap-1", expired: true }));
 
-        const tabA = await ctx.context.newPage();
-        const tabB = await ctx.context.newPage();
-        ctx.attachPageDiagnostics("tabA", tabA);
-        ctx.attachPageDiagnostics("tabB", tabB);
-        await ctx.instrumentTab("tabA", tabA);
-        await ctx.instrumentTab("tabB", tabB);
-        const pages = { tabA, tabB };
+              const tabA = await ctx.context.newPage();
+              const tabB = await ctx.context.newPage();
+              ctx.attachPageDiagnostics("tabA", tabA);
+              ctx.attachPageDiagnostics("tabB", tabB);
+              await tabA.addInitScript(buildScenarioHInitScript(STORAGE_KEY, LOCK_NAME, false));
+              await tabB.addInitScript(buildScenarioHInitScript(STORAGE_KEY, LOCK_NAME, false));
+              await ctx.instrumentTab("tabA", tabA);
+              await ctx.instrumentTab("tabB", tabB);
+              const pages = { tabA, tabB };
 
-        ctx.setStep("open-both-tabs-simultaneously");
-        await Promise.all([tabA.goto(`${origin}/app`), tabB.goto(`${origin}/next`)]);
+              ctx.setStep("open-both-tabs-simultaneously");
+              await Promise.all([tabA.goto(`${origin}/app`), tabB.goto(`${origin}/next`)]);
 
-        ctx.setStep("wait-for-first-refresh-and-peer-lock-contention");
-        await ctx.waitForSignal("first refresh to hit scripted API", firstRefreshHit, pages);
+              ctx.setStep("wait-for-first-refresh-and-peer-lock-contention");
+              await ctx.waitForSignal("first refresh to hit scripted API", firstRefreshHit, pages);
 
-        // Give the peer tab up to 600ms (well below authFetch's 4000ms timeout!) to queue on lock:sb-api-auth-token.
-        const overlapDeadline = Date.now() + 600;
-        while (Date.now() < overlapDeadline) {
-          const lockState = await tabA.evaluate(async (lockName: string) => {
-            const q = await navigator.locks.query();
-            return {
-              held: q.held?.some((l) => l.name === lockName) ?? false,
-              pending: q.pending?.some((l) => l.name === lockName) ?? false,
-            };
-          }, LOCK_NAME).catch(() => ({ held: false, pending: false }));
-          if (lockState.held && lockState.pending) break;
-          await new Promise((r) => setTimeout(r, 25));
+              // Give the peer tab up to 600ms (well below authFetch's 4000ms timeout!) to queue on lock:sb-api-auth-token.
+              const overlapDeadline = Date.now() + 600;
+              while (Date.now() < overlapDeadline) {
+                const lockState = await tabA.evaluate(async (lockName: string) => {
+                  const q = await navigator.locks.query();
+                  return {
+                    held: q.held?.some((l) => l.name === lockName) ?? false,
+                    pending: q.pending?.some((l) => l.name === lockName) ?? false,
+                  };
+                }, LOCK_NAME).catch(() => ({ held: false, pending: false }));
+                if (lockState.held && lockState.pending) break;
+                await new Promise((r) => setTimeout(r, 25));
+              }
+
+              ctx.setStep("release-first-refresh");
+              releaseFirstRefresh.resolve();
+
+              try {
+                await ctx.waitForAppSignedIn(tabA, pages);
+                await ctx.waitForNextSignedIn(tabB, "Alpha Vault", pages);
+              } catch (err) {
+                notSignedInRuns += 1;
+                runCountedNotSignedIn = true;
+                throw err;
+              }
+
+              const tabAState = await tabA.evaluate(() => {
+                const dash = document.querySelector<HTMLElement>("live-dashboard");
+                const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+                const state = dash?.dataset.state ?? "";
+                return {
+                  state,
+                  signedOutHidden: Boolean(signedOut?.hidden),
+                  signedIn: Boolean(
+                    state &&
+                    state !== "loading" &&
+                    state !== "signed-out" &&
+                    state !== "workspace-error" &&
+                    signedOut?.hidden,
+                  ),
+                };
+              });
+              const tabBState = await tabB.evaluate(() => {
+                const priv = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+                const signedOut = document.querySelector<HTMLElement>('[data-testid="signed-out-screen"]');
+                const recovery = document.querySelector<HTMLElement>('[data-testid="session-recovery-screen"]');
+                return {
+                  hasPrivateRoot: Boolean(priv && !priv.hidden),
+                  hasSignedOutScreen: Boolean(signedOut),
+                  hasRecoveryScreen: Boolean(recovery),
+                  signedIn: Boolean(priv && !priv.hidden && !signedOut && !recovery),
+                };
+              });
+              runBothSignedIn = tabAState.signedIn && tabBState.signedIn;
+              if (!runBothSignedIn) {
+                notSignedInRuns += 1;
+                runCountedNotSignedIn = true;
+              }
+
+              if (ctx.counters.refreshes >= 2) {
+                const refreshRecords = ctx.tokenFetchRecords.filter((rec) => rec.grantType === "refresh_token");
+                const formatRefreshRec = (rec: TokenFetchRecord | undefined, idx: number): string =>
+                  rec
+                    ? `#${idx + 1}(tab=${rec.tab},holdsLock=${rec.holdsLock},localLockHeld=${rec.localLockHeld},lockHeldByAny=${rec.lockHeldByAny},lockPending=${rec.lockPendingCount},rt=…${rec.rtLast4 ?? "none"})`
+                    : `#${idx + 1}(missing)`;
+                t.diagnostic(
+                  `[${runLabel}] second refresh observed (harmless, refused): ${formatRefreshRec(refreshRecords[0], 0)} ${formatRefreshRec(refreshRecords[1], 1)}`,
+                );
+              }
+
+              const stored = await ctx.readStorage(tabA);
+              const readAudit = (p: Page) =>
+                p.evaluate(() => (window as unknown as {
+                  __csStorageAudit?: {
+                    writes: Array<{ refreshToken: string | null }>;
+                    removals: Array<unknown>;
+                    signedOutBroadcasts: Array<{ ts: number; source: string }>;
+                  };
+                }).__csStorageAudit ?? { writes: [], removals: [], signedOutBroadcasts: [] });
+              const auditA = await readAudit(tabA);
+              const auditB = await readAudit(tabB);
+              const allWrites = [...auditA.writes, ...auditB.writes];
+              const allRemovals = [...auditA.removals, ...auditB.removals];
+              const allSignedOutBroadcasts = [...auditA.signedOutBroadcasts, ...auditB.signedOutBroadcasts];
+              const pageErrors = ctx.consoleErrors.filter((line) => line.includes("pageerror"));
+
+              assert.ok(
+                ctx.counters.refreshes >= 1 && ctx.counters.refreshes <= 2,
+                `Expected 1 or at most 2 refresh requests (got ${ctx.counters.refreshes}):\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                refreshRequests.length,
+                ctx.counters.refreshes,
+                `Refresh request trace count must match counter:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                refreshRequests[0]?.rt,
+                "rt-overlap-1",
+                `First refresh must spend the initial credential:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                refreshRequests[0]?.status,
+                200,
+                `First refresh must succeed:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                ctx.counters.rejectedRefreshes,
+                ctx.counters.refreshes - 1,
+                `Expected ${ctx.counters.refreshes - 1} rejected refresh(es) for ${ctx.counters.refreshes} total:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              if (ctx.counters.refreshes === 2) {
+                assert.equal(
+                  rotatedTokenReused,
+                  true,
+                  `Second refresh must be a stale reuse of the old credential:\n${await ctx.dumpDiagnostics(pages)}`,
+                );
+                assert.equal(
+                  refreshRequests[1]?.rt,
+                  "rt-overlap-1",
+                  `Second refresh must have used the old credential (rt-overlap-1), got ${refreshRequests[1]?.rt}:\n${await ctx.dumpDiagnostics(pages)}`,
+                );
+                assert.equal(
+                  refreshRequests[1]?.status,
+                  400,
+                  `Second refresh must have been refused with 400:\n${await ctx.dumpDiagnostics(pages)}`,
+                );
+              }
+              assert.equal(
+                tabAState.signedIn,
+                true,
+                `Tab A (/app) must end signed in (${JSON.stringify(tabAState)}):\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                tabBState.signedIn,
+                true,
+                `Tab B (/next) must end signed in (${JSON.stringify(tabBState)}):\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(stored?.refresh_token, "rt-overlap-2", "Rotated refresh token must be persisted");
+              assert.ok(
+                allWrites.length >= 1,
+                `Rotated session must have been written to storage:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.ok(
+                allWrites.every((w) => w.refreshToken === "rt-overlap-2"),
+                `Only the rotated session (rt-overlap-2) may ever be written to storage: ${JSON.stringify(allWrites)}\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                allRemovals.length,
+                0,
+                `Zero storage removals allowed during overlapping refresh: ${JSON.stringify(allRemovals)}\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                allSignedOutBroadcasts.length,
+                0,
+                `No sign-out may be announced in either tab: ${JSON.stringify(allSignedOutBroadcasts)}\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                ctx.counters.logouts,
+                0,
+                `Zero logout requests allowed during overlapping refresh:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                tabAState.signedOutHidden,
+                true,
+                `Tab A signed-out panel must remain hidden:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                tabBState.hasSignedOutScreen,
+                false,
+                `Tab B must not show signed-out screen:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+              assert.equal(
+                pageErrors.length,
+                0,
+                `Expected zero pageerrors:\n${await ctx.dumpDiagnostics(pages)}`,
+              );
+            } finally {
+              completedRuns += 1;
+              if (ctx.counters.refreshes >= 2) {
+                secondRefreshRuns += 1;
+              }
+              if (!runBothSignedIn && !runCountedNotSignedIn) {
+                notSignedInRuns += 1;
+              }
+              releaseFirstRefresh.resolve();
+            }
+          });
         }
-
-        ctx.setStep("release-first-refresh");
-        releaseFirstRefresh.resolve();
-
-        await ctx.waitForAppSignedIn(tabA, pages);
-        await ctx.waitForNextSignedIn(tabB, "Alpha Vault", pages);
-
-        ctx.emitRefreshDiagnostics(runLabel);
-        if (rotatedTokenReused) {
+      } finally {
+        if (IS_REPEAT_SCENARIO_A) {
+          const repsText =
+            completedRuns === REPEAT_SCENARIO_A_COUNT
+              ? `${REPEAT_SCENARIO_A_COUNT}`
+              : `${completedRuns}/${REPEAT_SCENARIO_A_COUNT}`;
           t.diagnostic(
-            `[${runLabel}] ROTATED TOKEN REUSED — full tokenFetchRecords:\n${JSON.stringify(ctx.tokenFetchRecords, null, 2)}`,
+            `[a-overlapping-refresh] repeat summary: repetitions=${repsText} secondRefreshes=${secondRefreshRuns} notSignedIn=${notSignedInRuns}`,
           );
         }
-
-        const stored = await ctx.readStorage(tabA);
-        assert.equal(ctx.counters.refreshes, 1, `Expected single-use refresh token spent once:\n${await ctx.dumpDiagnostics(pages)}`);
-        assert.equal(ctx.counters.rejectedRefreshes, 0, `Expected zero rejected refreshes:\n${await ctx.dumpDiagnostics(pages)}`);
-        assert.equal(stored?.refresh_token, "rt-overlap-2", "Rotated refresh token must be persisted");
-        assert.equal(await tabB.locator('[data-testid="signed-out-screen"]').count(), 0, "Tab B must remain signed in");
-        } finally {
-          releaseFirstRefresh.resolve();
-        }
-      });
-
-      if (rotatedTokenReused) break;
+      }
+      assert.equal(
+        notSignedInRuns,
+        0,
+        `Expected zero repetitions ending with any tab not signed in (got ${notSignedInRuns}/${REPEAT_SCENARIO_A_COUNT})`,
+      );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4030,6 +4241,127 @@ test(
         assert.equal(stored, null, `Dead session must be removed from storage:\n${await ctx.dumpDiagnostics(pages)}`);
         assert.equal(ctx.counters.refreshes, 1, `Expected single terminal refresh:\n${await ctx.dumpDiagnostics(pages)}`);
         assert.equal(ctx.counters.rejectedRefreshes, 1, "Expected 1 terminal rejected refresh");
+        assert.equal(pageErrors.length, 0, `Expected zero pageerrors:\n${await ctx.dumpDiagnostics(pages)}`);
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Condition 2: Deliberate click on Sign out during an active 429 backoff
+    //     Clears storage for that login, signs both tabs out, and a reload
+    //     stays signed out even when the server would now succeed on refresh.
+    // ═══════════════════════════════════════════════════════════════════════════
+    {
+      const sidBackoffSignOut = "sid-signout-429-backoff-1";
+      const rtInitial = "rt-signout-429-1";
+      let allowServerRecovery = false;
+      const first429Hit = createSignal<void>();
+
+      const scenario: ScenarioConfig = {
+        name: "deliberate-signout-during-429-backoff",
+        validRefreshToken: rtInitial,
+        nextRefreshToken: "rt-signout-429-recovered",
+        activeSessionIds: new Set([sidBackoffSignOut]),
+        async onRefresh() {
+          if (!allowServerRecovery) {
+            first429Hit.resolve();
+            return {
+              status: 429,
+              headers: { "retry-after": "30" },
+              body: { code: "over_request_rate_limit", error_code: "over_request_rate_limit", msg: "Rate limited" },
+            };
+          }
+          return {
+            status: 200,
+            body: makeSessionPayload({ sessionId: sidBackoffSignOut, refreshToken: "rt-signout-429-recovered" }),
+          };
+        },
+      };
+
+      await withTwoTabScenario(scenario, async (ctx) => {
+        ctx.setStep("seed-valid-session-and-open-app");
+        await ctx.seedStorage(makeSessionPayload({ sessionId: sidBackoffSignOut, refreshToken: rtInitial, expired: false }));
+
+        const tabA = await ctx.context.newPage();
+        ctx.attachPageDiagnostics("tabA", tabA);
+        await ctx.instrumentTab("tabA", tabA);
+        const pages: Record<string, Page | null> = { tabA, tabB: null };
+
+        await tabA.goto(`${origin}/app`);
+        await ctx.waitForAppSignedIn(tabA, pages);
+
+        // Expire the stored session and open Tab B (/next) to trigger a 429 backoff in shared storage.
+        ctx.setStep("trigger-429-backoff-via-tabB");
+        await ctx.seedStorage(makeSessionPayload({ sessionId: sidBackoffSignOut, refreshToken: rtInitial, expired: true }));
+        const tabB = await ctx.context.newPage();
+        pages.tabB = tabB;
+        ctx.attachPageDiagnostics("tabB", tabB);
+        await ctx.instrumentTab("tabB", tabB);
+        await tabB.goto(`${origin}/next`);
+        await ctx.waitForSignal("429 refresh during backoff setup", first429Hit, pages);
+        await ctx.waitFor(
+          "Tab B enters recovery screen with active 429 backoff",
+          () => tabB.locator('[data-testid="session-recovery-screen"]').isVisible().catch(() => false),
+          pages,
+          5_000,
+        );
+
+        // Now allow the server to succeed on refresh: if Sign out failed to clear localStorage,
+        // reloading Tab A would recover the session instead of staying signed out.
+        allowServerRecovery = true;
+        const refreshesBeforeSignOut = ctx.counters.refreshes;
+
+        ctx.setStep("click-signout-in-app-during-429-backoff");
+        await ctx.signOutFromApp(tabA, pages);
+
+        await ctx.waitFor(
+          "both tabs signed out after deliberate Sign out during 429 backoff",
+          async () => {
+            const appSignedOut = await tabA.evaluate(() => {
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const panel = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+              return dash?.dataset.state === "signed-out" && Boolean(panel && !panel.hidden);
+            });
+            const nextSignedOut = await tabB.evaluate(() => {
+              return (
+                Boolean(document.querySelector('[data-testid="signed-out-screen"]')) &&
+                !document.querySelector('[data-testid="session-recovery-screen"]') &&
+                !document.querySelector('[data-testid="private-view-root"]')
+              );
+            });
+            return appSignedOut && nextSignedOut;
+          },
+          pages,
+          10_000,
+        );
+
+        const storedAfterSignOut = await ctx.readStorage(tabA);
+        const backoffAfterSignOut = await tabA.evaluate(
+          (key) => window.localStorage.getItem(key),
+          `${STORAGE_KEY}:refresh-backoff`,
+        );
+        assert.equal(storedAfterSignOut, null, `Session slot must be empty after Sign out during 429 backoff:\n${await ctx.dumpDiagnostics(pages)}`);
+        assert.equal(backoffAfterSignOut, null, `Backoff key must be cleared after Sign out:\n${await ctx.dumpDiagnostics(pages)}`);
+        assert.equal(ctx.counters.refreshes, refreshesBeforeSignOut, "Sign out during backoff sent zero extra refreshes");
+
+        // Reload Tab A and confirm it stays signed out with storage empty.
+        ctx.setStep("reload-tabA-and-confirm-stays-signed-out");
+        await tabA.reload();
+        await ctx.waitFor(
+          "reloaded Tab A stays on signed-out panel",
+          () =>
+            tabA.evaluate(() => {
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const panel = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+              return dash?.dataset.state === "signed-out" && Boolean(panel && !panel.hidden);
+            }),
+          pages,
+          10_000,
+        );
+
+        const storedAfterReload = await ctx.readStorage(tabA);
+        const pageErrors = ctx.consoleErrors.filter((line) => line.includes("pageerror"));
+        assert.equal(storedAfterReload, null, `Reloaded Tab A must stay signed out with empty storage:\n${await ctx.dumpDiagnostics(pages)}`);
+        assert.equal(ctx.counters.refreshes, refreshesBeforeSignOut, "Reload after Sign out sent zero refresh attempts");
         assert.equal(pageErrors.length, 0, `Expected zero pageerrors:\n${await ctx.dumpDiagnostics(pages)}`);
       });
     }

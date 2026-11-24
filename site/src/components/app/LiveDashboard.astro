@@ -10987,8 +10987,17 @@ import "../../styles/kylon-image-viewer.css";
               return;
             }
           } else {
-            await client()?.auth.signOut({ scope: "local" });
+            const signOutRes = await signOut({
+              userId: ownerRenderedUserId || session.user.id,
+              loginId: ownerLoginId,
+              sessionId: ownerLoginId || sessionIdFromAccessToken(session.access_token),
+              scope: "local",
+            });
             session = null;
+            if (signOutRes?.replaced) {
+              if (!authReloadQueued) runBoot();
+              return;
+            }
           }
           showAuthView("choices");
           showPanel("signed-out");
@@ -21123,20 +21132,35 @@ import "../../styles/kylon-image-viewer.css";
           return;
         }
         const signingOutUserId = renderedAuthUserId || session?.user.id || "";
+        const signingOutSessionId =
+          renderedAuthLoginId || (session ? sessionIdFromAccessToken(session.access_token) ?? "" : "");
         pendingSeatAdminReauthNotice = false;
         pendingForcedNotice = null;
         passwordChangeNotice = null;
+        authRecoveryActive = false;
         clearSeatAdminReauthIntent();
         if (signingOutUserId) {
           clearCreateIntent(signingOutUserId);
           forgetAddAgent(addAgentStore(), signingOutUserId);
         }
         teardownActiveAccountView();
-        await signOut();
+        const signOutRes = await signOut(
+          signingOutUserId || signingOutSessionId
+            ? {
+                userId: signingOutUserId,
+                loginId: signingOutSessionId,
+                sessionId: signingOutSessionId || null,
+              }
+            : null,
+        );
+        button.disabled = false;
+        if (signOutRes?.replaced) {
+          if (!authReloadQueued) runBoot();
+          return;
+        }
         session = null;
         showAuthView("choices");
         showPanel("signed-out");
-        button.disabled = false;
       });
     }
 
