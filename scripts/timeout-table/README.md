@@ -72,7 +72,7 @@ Nearest-rank p95 of 20 samples is the 19th sorted value. The slowest sample is d
 
 ## Inventory rules
 
-The TypeScript compiler API reads tracked `.ts`, `.tsx`, and `.astro` client sources under `src/` and `site/src/`. Test, spec, and fixture files are excluded. It finds:
+The TypeScript compiler API reads tracked `.ts`, `.tsx`, and `.astro` client sources under `src/`, `site/src/`, `shared/`, and `app/src/`. Test, spec, and fixture files are excluded. It finds:
 
 - numeric const declarations containing `TIMEOUT`, `DEADLINE`, or `BUDGET`, including `as const` and imported aliases (`HOOK_CHECK_TIMEOUT_MS = AGENT_CHECK_TIMEOUT_MS`);
 - `AbortSignal.timeout(...)` calls, including identifiers and `??` numeric fallbacks;

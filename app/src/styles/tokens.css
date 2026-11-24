@@ -1,0 +1,306 @@
+@import "tailwindcss";
+@import "./fonts.css";
+
+@theme {
+  /* Breakpoints */
+  --breakpoint-desktop: 720px;
+  --breakpoint-wide: 1120px;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+
+  --text-2xs: 10px;
+  --text-2xs--line-height: 1.3;
+  --text-badge: 11px;
+  --text-badge--line-height: 1.2;
+  --text-xs: 12px;
+  --text-xs--line-height: 1.35;
+  --text-sm: 13px;
+  --text-sm--line-height: 1.45;
+  --text-md: 14px;
+  --text-md--line-height: 1.45;
+  --text-base: 15px;
+  --text-base--line-height: 1.5;
+  --text-lg: 16px;
+  --text-lg--line-height: 1.45;
+  --text-phone-title: 17px;
+  --text-phone-title--line-height: 1.25;
+  --text-icon: 18px;
+  --text-icon--line-height: 1;
+  --text-dialog-title: 22px;
+  --text-dialog-title--line-height: 1.25;
+
+  --tracking-tighter: -0.02em;
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0em;
+  --tracking-label: 0.04em;
+
+  /* Surfaces */
+  --color-backdrop: #0A0B0D;
+  --color-sidebar: #0B0C0F;
+  --color-ground: #0E0F12;
+  --color-raised: #121318;
+  --color-elevated: #15171C;
+  --color-popover: #17181D;
+  --color-subtle: #1B1D23;
+  --color-active: #1E2027;
+  --color-menu-active: #23252C;
+
+  /* Borders */
+  --color-hairline: #1C1E24;
+  --color-card-border: #1F2128;
+  --color-border: #2A2D35;
+  --color-border-strong: #3A3D46;
+  --color-offline: #6B707A;
+
+  /* Text */
+  --color-ink: #ECEDEF;
+  --color-ink-body: #E4E6EA;
+  --color-ink-strong: #D5D8DE;
+  --color-ink-secondary: #B4B8C0;
+  --color-ink-muted: #9A9EA8;
+
+  /* Links */
+  --color-link: #8FB8FF;
+  --color-link-hover: #B7D1FF;
+
+  /* Accent */
+  --color-accent: #FFD84D;
+  --color-on-accent: #17130A;
+  --color-accent-surface: #1D1A0E;
+  --color-accent-tint: #211B08;
+  --color-accent-border: #5A4A14;
+  --color-accent-ink: #FFE58A;
+
+  /* Working */
+  --color-working: #3DD68C;
+  --color-working-surface: #12281E;
+  --color-working-ink: #9BF0C6;
+
+  /* Needs you */
+  --color-needs-you: #FF8A4C;
+  --color-on-needs-you: #1A0E05;
+  --color-needs-you-surface: #2E1D10;
+  --color-needs-you-ink: #FFB07A;
+  --color-approval-surface: #17130F;
+  --color-approval-border: #4A3320;
+
+  /* Avatars */
+  --color-avatar-purple-bg: #2A2140;
+  --color-avatar-purple-ink: #D9C8FF;
+  --color-avatar-green-bg: #143326;
+  --color-avatar-green-ink: #9BF0C6;
+  --color-avatar-blue-bg: #1B2A44;
+  --color-avatar-blue-ink: #BBD4FF;
+  --color-avatar-amber-bg: #3A2A12;
+  --color-avatar-amber-ink: #FFD9A0;
+  --color-avatar-maya-bg: #2B3A55;
+  --color-avatar-maya-ink: #CFE0FF;
+  --color-avatar-jonas-bg: #3A2440;
+  --color-avatar-jonas-ink: #F0C8FF;
+
+  /* Radii */
+  --radius-tag: 5px;
+  --radius-sm: 8px;
+  --radius-control: 9px;
+  --radius-md: 10px;
+  --radius-card: 12px;
+  --radius-surface: 14px;
+  --radius-composer: 16px;
+  --radius-modal: 18px;
+  --radius-pill: 24px;
+  --radius-full: 9999px;
+
+  /* Spacing & Layout Dimensions */
+  --spacing: 4px;
+  --spacing-rail: 56px;
+  --spacing-nav: 280px;
+  --spacing-sidebar: 336px;
+  --spacing-details: 300px;
+  --spacing-header: 56px;
+  --spacing-phone-nav: 78px;
+  --spacing-phone-header-top: 16px;
+  --spacing-dialog: 680px;
+  --spacing-slash-menu: 360px;
+  --spacing-message-max: 640px;
+  --spacing-channel-card-max: 620px;
+  --spacing-waiting-max: 860px;
+  --spacing-phone-bubble-max: 300px;
+  --spacing-touch: 44px;
+  --spacing-tile: 64px;
+  --spacing-step-kind: 62px;
+  --spacing-step-icon: 14px;
+  --spacing-hash-col: 18px;
+  --spacing-avatar-sm: 26px;
+  --spacing-avatar-md: 30px;
+  --spacing-avatar-lg: 34px;
+  --spacing-dot-xs: 6px;
+  --spacing-dot-sm: 7px;
+  --spacing-dot-md: 8px;
+  --spacing-row-sm: 30px;
+  --spacing-row-md: 32px;
+  --spacing-row-lg: 36px;
+  --spacing-row-xl: 44px;
+  --spacing-btn-xs: 28px;
+  --spacing-btn-sm: 32px;
+  --spacing-btn-md: 36px;
+  --spacing-btn-lg: 42px;
+  --spacing-btn-phone: 48px;
+  --spacing-btn-phone-sm: 46px;
+  --spacing-chip: 28px;
+  --spacing-pill: 24px;
+  --spacing-review-chip: 26px;
+  --spacing-badge: 20px;
+  --spacing-badge-min: 22px;
+  --spacing-badge-sm: 18px;
+  --spacing-input: 42px;
+  --spacing-mode-btn: 38px;
+  --spacing-search: 34px;
+  --spacing-pad-page: 40px;
+  --spacing-pad-header: 24px;
+  --spacing-pad-card-x: 18px;
+  --spacing-pad-card-y: 16px;
+  --spacing-pad-panel: 20px;
+  --spacing-pad-section: 28px;
+  --spacing-pad-dialog-x: 30px;
+  --spacing-pad-dialog-y: 28px;
+  --spacing-step-indent: 38px;
+  --spacing-caret-w: 2px;
+  --spacing-caret-h: 16px;
+
+  /* Shadows */
+  --shadow-modal: 0 30px 80px rgba(0, 0, 0, 0.6);
+  --shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.45);
+
+  /* Motion */
+  --ease-quiet: cubic-bezier(0.2, 0, 0, 1);
+  --duration-fast: 120ms;
+  --duration-dialog: 160ms;
+}
+
+:root {
+  --border-width-selected: 1.5px;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --backdrop-opacity: 0.82;
+  --scrollbar-size: 6px;
+}
+
+@utility border-selected {
+  border-width: var(--border-width-selected);
+}
+
+@utility transition-quiet {
+  transition-property: color, background-color, border-color, opacity, transform;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease-quiet);
+}
+
+@keyframes cs-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cs-scale-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes cs-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility animate-overlay-in {
+  animation: cs-fade-in var(--duration-dialog) var(--ease-quiet);
+}
+
+@utility animate-dialog-in {
+  animation: cs-scale-in var(--duration-dialog) var(--ease-quiet);
+}
+
+@utility animate-menu-in {
+  animation: cs-menu-in var(--duration-fast) var(--ease-quiet);
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background-color: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-lg);
+    line-height: var(--text-lg--line-height);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  @media (min-width: 720px) {
+    body {
+      font-size: var(--text-base);
+      line-height: var(--text-base--line-height);
+    }
+  }
+
+  :where(a, button, input, textarea, [tabindex]):focus-visible {
+    outline: var(--focus-ring-width) solid var(--color-accent);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-border);
+    border-radius: var(--radius-full);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

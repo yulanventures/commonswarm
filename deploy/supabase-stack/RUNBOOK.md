@@ -530,3 +530,29 @@ needs this explicit metadata addition. This source change alone installs no
 production gate or registry update. Run the focused CLI security regressions
 with `python3 tests/scoped-env-check.test.py`; fixtures contain synthetic values
 and do not access Docker or private host files.
+
+## pg_cron background workers (2026-11-23)
+
+The `postgres` service command in `compose.yaml` now sets `cron.use_background_workers=on` and `max_worker_processes=20`. With background workers enabled, `pg_cron` runs scheduled jobs as PostgreSQL background workers instead of opening local connections that fail SCRAM authentication; `pg_hba.conf` and role logins do not change.
+
+Both `cron.use_background_workers` and `max_worker_processes` are postmaster settings (`PGC_POSTMASTER`), so a configuration reload does not apply them. Applying this stack change requires one restart of the `postgres` service (recreating `commonswarm-postgres`).
+
+After the restart, confirm that scheduled jobs are executing cleanly with one read-only query:
+
+```sql
+SELECT j.jobname, r.status, r.start_time, r.end_time, r.return_message
+FROM cron.job_run_details r
+LEFT JOIN cron.job j ON j.jobid = r.jobid
+ORDER BY r.runid DESC
+LIMIT 20;
+```
+
+Once new runs report `status = 'succeeded'` (with no connection failures), retire the temporary host timer for quiet-agent sync and restore its `pg_cron` job with job name `swarm-sync-system-alerts`, schedule `*/2 * * * *`, and command `SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')`:
+
+```sql
+SELECT cron.schedule(
+  'swarm-sync-system-alerts',
+  '*/2 * * * *',
+  $$SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')$$
+);
+```

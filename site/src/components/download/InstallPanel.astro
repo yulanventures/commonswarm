@@ -120,52 +120,11 @@ const PLATFORMS = [
 ] as const;
 ---
 
-<section data-marketing class="dl-hero" aria-labelledby="dl-title">
-  <div class="page dl-hero__inner">
-    {/* "Install", not "Download" — the nav, the footer and the h1 all say Install, and one
-        destination should not answer to four names. The route stays /download; only the
-        visible label is normalised. */}
-    <p class="eyebrow">Install</p>
-    <h1 class="h-display dl-hero__h" id="dl-title">Install CommonSwarm.</h1>
-    <p class="lede dl-hero__lede">
-      Install the cswarm CLI on macOS, Linux, or Windows with WSL.
-    </p>
-    <p class="dl-hero__sub">
-      Requires Node.js 22 or newer. Every step is spelled out below.
-    </p>
-
+<section data-marketing class="dl-term" id="terminal" aria-labelledby="dl-term-title">
+  <div class="page dl-term__inner">
     <div class="dl-card">
-      <div class="dl-card__bar">
-        <span class="dl-card__dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span class="dl-card__label mono">install</span>
-      </div>
-
       <div class="dl-card__body">
-        <div class="dl-ready" aria-labelledby="dl-ready-title">
-          <p class="dl-ready__step">Step 1</p>
-          <h2 class="dl-ready__title" id="dl-ready-title">Get Node.js 22 ready.</h2>
-          <p class="dl-ready__body">
-            CommonSwarm runs on Node.js. Open your terminal, run <code>node -v</code>, and press
-            Return or Enter. Continue if the first number is 22 or higher (for example,
-            <code>v22…</code> or <code>v24…</code>).
-          </p>
-          <div class="dl-ready__actions">
-            <a href="#dl-plat-label">Show me how to open a terminal</a>
-            <a href="https://nodejs.org/en/download">Download Node.js 22 or newer</a>
-            <a href="https://learn.microsoft.com/en-us/windows/wsl/install">
-              Set up WSL on Windows
-            </a>
-          </div>
-        </div>
-
-        <div class="dl-install-head">
-          <p class="dl-ready__step">When Node.js is ready</p>
-          <h2 class="dl-ready__title">Install CommonSwarm.</h2>
-          <p class="dl-ready__body">
-            Copy this line, paste it into the same terminal window, and press Return or Enter.
-            Nothing runs when you press the copy button.
-          </p>
-        </div>
+        <h2 class="dl-term__h" id="dl-term-title">Terminal</h2>
 
         <div class="dl-cmd">
           <pre class="dl-cmd__pre mono"><code><span class="dl-cmd__prompt" aria-hidden="true">$ </span>{cmdHead}<span class="dl-cmd__host">{HOST_TOKEN}</span>{cmdTail}</code></pre>
@@ -173,12 +132,11 @@ const PLATFORMS = [
 
         <div class="dl-go" data-dl-go>
           <Button
-            variant="primary"
+            variant="secondary"
             size="lg"
             block
             class="dl-go__btn"
             data-dl-copy={cmd}
-            aria-describedby="dl-go-hint"
           >
             <span class="dl-go__ico" slot="start">
               <svg
@@ -208,38 +166,21 @@ const PLATFORMS = [
             <span class="dl-go__txt">Copy install command</span>
           </Button>
 
-          <p class="dl-go__hint" id="dl-go-hint" data-dl-hint>
-            Paste it into the same terminal window and press Return or Enter.
-          </p>
+          <p class="dl-go__hint" id="dl-go-hint" data-dl-hint hidden></p>
         </div>
 
-        <ul class="dl-meta">
-          <li class="dl-meta__i">One file in your home folder</li>
-          <li class="dl-meta__i">macOS · Linux · WSL</li>
-          <li class="dl-meta__i">No sudo</li>
-        </ul>
-
-        {/* The two ways out of this card, and they are the two questions a reader has at the
-            moment they finish copying: what do I run next, and what is that script going to
-            do. The first is what pays for the section reorder in download.astro — "once it's
-            installed" is now the very next section, so this link is a scroll and not a
-            journey. Kept OUT of .dl-go__hint on purpose: the copy script captures that
-            element's textContent and writes it back after 2.6s, so any markup inside it would
-            survive one copy and then be flattened into plain text. */}
-        <p class="dl-next">
-          <a href="#after">Then: choose how you continue</a>
+        <p class="dl-req">
+          Requires Node.js 22+ (<code class="dl-ic">node -v</code>).
+          <a href="https://nodejs.org/en/download">Node.js</a>
           <span aria-hidden="true">·</span>
-          <a href="#what-happens">What the script does, step by step</a>
+          <a href="https://learn.microsoft.com/en-us/windows/wsl/install">WSL on Windows</a>
         </p>
 
-        {/* The trailing clause here read "coswarm is pre-launch and invite-only; there's no
-            self-serve signup" — quoted under the name it shipped with, now CommonSwarm.
-            Both halves are now wrong — self-serve workspace creation
-            exists on the server (createSelfServeWorkspace(), supabase/functions/command/
-            index.ts), gated on SWARM_SELF_SERVE rather than absent. It is deleted rather
-            than reworded: this paragraph is about the install host, the signup fact belongs
-            where a reader can act on it (/ and /app), and this panel's own header note
-            says a fact restated three times in 200px reads as nerves. */}
+        <p class="dl-next">
+          <a href="#after">Next steps</a>
+          <span aria-hidden="true">·</span>
+          <a href="#what-happens">What the script does</a>
+        </p>
       </div>
 
       <div class="dl-plat" data-dl-plat>
@@ -250,7 +191,7 @@ const PLATFORMS = [
         </script>
 
         <div class="dl-plat__head">
-          <h2 class="dl-plat__title" id="dl-plat-label">Your platform</h2>
+          <h3 class="dl-plat__title" id="dl-plat-label">Your platform</h3>
           <div class="dl-seg-slot">
             <div class="dl-seg" role="tablist" aria-labelledby="dl-plat-label" hidden data-dl-seg>
               {
@@ -283,9 +224,9 @@ const PLATFORMS = [
                 id={`dl-panel-${p.id}`}
                 data-dl-panel={p.id}
               >
-                <h3 class="dl-panel__h" data-dl-panel-h>
+                <h4 class="dl-panel__h" data-dl-panel-h>
                   {p.heading}
-                </h3>
+                </h4>
                 <ul class="dl-notes">
                   {p.notes.map((n) => (
                     <li class="dl-note">
@@ -307,7 +248,7 @@ const PLATFORMS = [
 
     <div class="dl-agent" data-dl-agent-prompt aria-labelledby="dl-agent-title">
       <div class="dl-agent__head">
-        <h2 class="dl-agent__title" id="dl-agent-title">Or paste this into your agent</h2>
+        <h3 class="dl-agent__title" id="dl-agent-title">Or paste this into your agent</h3>
         <a class="dl-agent__link" href="/start-agent.md">Read start-agent.md</a>
       </div>
       <CodeBlock code={AGENT_START_PROMPT} label="agent prompt" wrap chrome={false} class="dl-agent__code" />
@@ -316,152 +257,69 @@ const PLATFORMS = [
 </section>
 
 <style>
-  /* ---------------------------------------------------------------- hero -- */
-  .dl-hero {
-    padding-block: clamp(var(--s-12), 7vw, var(--s-24)) var(--s-8);
+  /* ------------------------------------------------------------- terminal -- */
+  .dl-term {
+    padding-block: 0 var(--s-8);
   }
 
-  .dl-hero__inner {
+  .dl-term__inner {
     display: flex;
     flex-direction: column;
     align-items: center;
-    text-align: center;
   }
 
-  /* .h-display, not .h-section: every other heading on this page is .h-section, and a page
-     title that measures the same as the section titles under it gives the outline no visible
-     top. --t-display already clamps down to 2.9rem, so it does not run away at 375px. */
-  .dl-hero__h {
-    /* Bottom margin cancels .h-display's descender padding — see global.css. */
-    margin: var(--s-4) 0 calc(-1 * var(--descender-pad, 0px));
-  }
-
-  .dl-hero__lede {
-    margin: var(--stack-sm) 0 0;
-    max-width: 40rem;
-  }
-
-  /* The caveats. A size step, not a colour step: both this and the lede are --text-muted, so
-     the hierarchy has to come from something that still works for a reader who has overridden
-     colours entirely. */
-  .dl-hero__sub {
-    margin: var(--s-3) 0 0;
-    max-width: 34rem;
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
-    color: var(--text-muted);
-    text-wrap: pretty;
+  .dl-term__h {
+    margin: 0 0 var(--s-5);
+    color: var(--text);
+    font-size: var(--t-2xl);
+    line-height: var(--lh-2xl);
+    letter-spacing: var(--track-head);
+    font-weight: var(--weight-head);
   }
 
   /* ------------------------------------------------------------ the card -- */
   .dl-card {
     width: 100%;
     max-width: 46rem;
-    margin-top: var(--s-10);
     text-align: start;
     background: var(--bg-raised);
-    border: 0;
+    border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     box-shadow: none;
     overflow: hidden;
-  }
-
-  .dl-card__bar {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    padding: var(--s-3) var(--s-4);
-    background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .dl-card__dots {
-    display: inline-flex;
-    gap: 6px;
-  }
-
-  .dl-card__dots i {
-    inline-size: 10px;
-    block-size: 10px;
-    border-radius: 50%;
-    background: var(--border-strong);
-  }
-
-  /* There was a warning "Placeholder host" badge to the right of this label, which is why the
-     label used to carry `margin-inline-end: auto`. It was one of three statements of the same
-     fact inside one panel, and it said the least of the three while shouting the loudest.
-     All three are gone now: the host is real, so there is no caveat left to state. The
-     highlight on the host survives, meaning "this is the part that names us". */
-  .dl-card__label {
-    font-size: var(--t-xs);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--text-muted);
   }
 
   .dl-card__body {
     padding: var(--pad-card-lg);
   }
 
-  /* ------------------------------------------------------- guided setup -- */
-  .dl-ready {
-    padding-bottom: var(--s-6);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .dl-ready__step {
-    margin: 0 0 var(--s-2);
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-  }
-
-  .dl-ready__title {
-    margin: 0;
-    color: var(--text);
-    font-size: var(--t-xl);
-    line-height: var(--lh-xl);
-    letter-spacing: var(--track-head);
-    font-weight: var(--weight-head);
-    text-wrap: balance;
-  }
-
-  .dl-ready__body {
-    max-inline-size: 60ch;
-    margin: var(--s-3) 0 0;
-    color: var(--text-muted);
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
-    text-wrap: pretty;
-  }
-
-  .dl-ready__body code {
-    white-space: nowrap;
-  }
-
-  .dl-ready__actions {
+  .dl-req {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--s-2) var(--s-5);
-    margin-top: var(--s-4);
+    align-items: center;
+    justify-content: center;
+    gap: var(--s-1) var(--s-2);
+    margin: var(--s-4) 0 0;
     font-size: var(--t-sm);
     line-height: var(--lh-sm);
+    color: var(--text-muted);
   }
 
-  .dl-ready__actions a {
+  .dl-req a {
     display: inline-flex;
     align-items: center;
-    min-block-size: 2.75rem;
+    min-block-size: 44px;
+    padding-inline: 4px;
     color: var(--text);
-    font-weight: var(--weight-semibold);
+    font-weight: var(--weight-medium);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
     text-underline-offset: 3px;
+    transition: text-decoration-color var(--dur-2) var(--ease-standard);
   }
 
-  .dl-install-head {
-    margin: var(--s-6) 0 var(--s-4);
+  .dl-req a:hover {
+    text-decoration-color: currentColor;
   }
 
   /* ----------------------------------------------------------- command --- */
@@ -558,6 +416,10 @@ const PLATFORMS = [
   }
 
   /* On a failed copy neither glyph is a lie: the clipboard icon stays, the words change. */
+  .dl-go__hint[hidden] {
+    display: none;
+  }
+
   .dl-go__hint {
     margin: var(--s-3) 0 0;
     text-align: center;
@@ -574,42 +436,13 @@ const PLATFORMS = [
     color: var(--warning);
   }
 
-  /* ------------------------------------------------------------- meta ---- */
-  .dl-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--s-2) var(--s-5);
-    justify-content: center;
-    margin: var(--s-5) 0 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .dl-meta__i {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s-2);
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    color: var(--text-muted);
-  }
-
-  .dl-meta__i::before {
-    content: "";
-    inline-size: 5px;
-    block-size: 5px;
-    border-radius: 50%;
-    background: var(--success);
-    flex: none;
-  }
-
   .dl-next {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
     align-items: baseline;
     gap: var(--s-2) var(--s-3);
-    margin: var(--s-5) 0 0;
+    margin: var(--s-2) 0 0;
     font-size: var(--t-sm);
     line-height: var(--lh-sm);
     color: var(--text-muted);
@@ -629,23 +462,6 @@ const PLATFORMS = [
 
   .dl-next a:hover {
     text-decoration-color: currentColor;
-  }
-
-  .dl-placeholder {
-    margin: var(--s-6) 0 0;
-    padding-top: var(--s-5);
-    border-top: 1px solid var(--border);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    color: var(--text-muted);
-  }
-
-  .dl-placeholder__flag {
-    color: var(--warning);
-    background: var(--warning-dim);
-    border-radius: 4px;
-    padding: 1px 5px;
-    white-space: nowrap;
   }
 
   /* -------------------------------------------------------- platforms ---- */
@@ -801,6 +617,7 @@ const PLATFORMS = [
     padding: var(--pad-card-lg);
     text-align: start;
     background: var(--bg-raised);
+    border: 1px solid var(--border);
     border-radius: var(--radius-xl);
   }
 
@@ -852,15 +669,6 @@ const PLATFORMS = [
       padding: var(--s-5);
     }
 
-    /* A measure in ch, so it tracks the font rather than the viewport. Below ~560px this is
-       wider than the gutters allow and does nothing; between there and 640px it stops the
-       two hero paragraphs stretching to a 55-character line the moment the card below them
-       stops being the widest thing on the page. */
-    .dl-hero__lede,
-    .dl-hero__sub {
-      max-inline-size: 34ch;
-    }
-
     /* Below this width the command cannot fit on one line at any legible size, and a
        horizontally-scrolled hero command means the reader is looking at "…/install.s".
        Wrapping keeps the whole thing visible; the continuation line is indented so it still
@@ -881,13 +689,6 @@ const PLATFORMS = [
 
     .dl-go__btn {
       --btn-h: 3rem;
-    }
-
-    /* Only narrow enough for the hint to wrap: reserve the second line here so swapping
-       "Paste it into a terminal…" for the longer copied message cannot shove the meta row
-       down under the reader’s finger. At wider sizes both messages are one line. */
-    .dl-go__hint {
-      min-height: calc(2 * var(--t-sm) * var(--lh-sm));
     }
 
     .dl-plat__head {
@@ -994,6 +795,7 @@ const PLATFORMS = [
         hint.textContent = ok
           ? "Copied."
           : "Select the command above and press Command-C or Control-C.";
+        hint.hidden = false;
       }
       status.textContent = ok
         ? "Install command copied to clipboard."
@@ -1002,7 +804,10 @@ const PLATFORMS = [
       timer = window.setTimeout(() => {
         delete go.dataset.state;
         if (txt) txt.textContent = idleLabel;
-        if (hint) hint.textContent = idleHint;
+        if (hint) {
+          hint.textContent = idleHint;
+          hint.hidden = !idleHint;
+        }
         /* Clearing matters: leaving the old text means the NEXT copy writes the same
            string, the region never changes, and nothing is announced. */
         status.textContent = "";
