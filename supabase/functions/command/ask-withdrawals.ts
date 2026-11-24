@@ -154,6 +154,108 @@ export async function applyWithdrawAsk(
   };
 }
 
+/**
+ * Reauthorize releasing a withdrawal or replacement receipt to the calling actor (C3).
+ * Checks exact sender, live workspace authority, current placement access (C1), and that the
+ * withdrawal row exists for this actor (matching expectedReplacedBySignalId when supplied).
+ *
+ * `requireOpenDeadline` makes the fresh-vs-replay deadline rule explicit:
+ * - `true` (FRESH paths only: standalone withdraw_ask and both replacement forms, called after the
+ *   final receipt, audit, spend write and credential fence): requires the old ask's `until` to
+ *   still be in the future on the database clock (`clock_timestamp()`, not statement start time).
+ * - `false` (REPLAY paths only): deliberately omits the deadline check so an authorized replay may
+ *   still return the stored receipt of a withdrawal that committed in time after `until` passes.
+ *
+ * Returns null when authorized, or the uniform 404 body otherwise.
+ */
+export async function reauthorizeAskWithdrawalRelease(
+  tx: Sql,
+  workspaceId: string,
+  actorKind: "user" | "agent",
+  actorId: string,
+  signalId: string,
+  expectedReplacedBySignalId: string | null,
+  requireOpenDeadline: boolean,
+): Promise<{ status: 404; body: Record<string, unknown> } | null> {
+  if (
+    !UUID_RE.test(workspaceId) ||
+    !UUID_RE.test(actorId) ||
+    !UUID_RE.test(signalId) ||
+    (expectedReplacedBySignalId !== null && !UUID_RE.test(expectedReplacedBySignalId))
+  ) {
+    return { status: 404, body: { ...ASK_WITHDRAWAL_NOT_FOUND_BODY } };
+  }
+  const [row] = await tx<{ allowed: boolean }[]>`
+    SELECT swarm.ask_withdrawal_release_allowed(
+      ${workspaceId}::uuid,
+      ${actorKind},
+      ${actorId}::uuid,
+      ${signalId}::uuid,
+      ${expectedReplacedBySignalId}::uuid,
+      ${requireOpenDeadline}::boolean
+    ) AS allowed
+  `;
+  if (row?.allowed === true) return null;
+  return {
+    status: 404,
+    body: { ...ASK_WITHDRAWAL_NOT_FOUND_BODY },
+  };
+}
+
+export interface AskWithdrawalReplayTarget {
+  kind: "withdraw_ask" | "replacement";
+  oldSignalId: string;
+  newSignalId: string | null;
+}
+
+/**
+ * Extract the bound old ask (and expected replacement signal id for post_signal / ask_choice
+ * supersedes) from a command + stored idempotency response so replay reauthorization can verify
+ * both the old ask withdrawal row and the new ask's destination.
+ */
+export function storedAskWithdrawalReplayTarget(
+  kind: string,
+  command: { readonly signal_id?: unknown; readonly supersedes?: unknown },
+  storedResponse: Record<string, unknown>,
+): AskWithdrawalReplayTarget | null {
+  if (kind === "withdraw_ask") {
+    const cmdSignalId = typeof command.signal_id === "string" && UUID_RE.test(command.signal_id)
+      ? command.signal_id.toLowerCase()
+      : null;
+    const storedSignalId = typeof storedResponse.signal_id === "string" && UUID_RE.test(storedResponse.signal_id)
+      ? storedResponse.signal_id.toLowerCase()
+      : null;
+    const oldSignalId = cmdSignalId ?? storedSignalId;
+    if (oldSignalId === null) return null;
+    if (cmdSignalId !== null && storedSignalId !== null && cmdSignalId !== storedSignalId) {
+      return null;
+    }
+    return { kind: "withdraw_ask", oldSignalId, newSignalId: null };
+  }
+  if (kind === "post_signal" || kind === "ask_choice") {
+    const cmdSupersedes = typeof command.supersedes === "string" && UUID_RE.test(command.supersedes)
+      ? command.supersedes.toLowerCase()
+      : null;
+    const storedSuperseded = typeof storedResponse.superseded_signal_id === "string" &&
+        UUID_RE.test(storedResponse.superseded_signal_id)
+      ? storedResponse.superseded_signal_id.toLowerCase()
+      : null;
+    if (cmdSupersedes === null && storedSuperseded === null) return null;
+    if (cmdSupersedes !== null && storedSuperseded !== null && cmdSupersedes !== storedSuperseded) {
+      return { kind: "replacement", oldSignalId: cmdSupersedes, newSignalId: null };
+    }
+    const oldSignalId = cmdSupersedes ?? storedSuperseded!;
+    const signalObj = storedResponse.signal !== null && typeof storedResponse.signal === "object"
+      ? storedResponse.signal as Record<string, unknown>
+      : null;
+    const newSignalId = typeof signalObj?.id === "string" && UUID_RE.test(signalObj.id)
+      ? signalObj.id.toLowerCase()
+      : null;
+    return { kind: "replacement", oldSignalId, newSignalId };
+  }
+  return null;
+}
+
 /** Preserve withdraw_ask and post_signal supersedes fields on idempotency replay. */
 export function askWithdrawalReplayFields(response: Record<string, unknown>): Record<string, unknown> {
   const fields: Record<string, unknown> = {};

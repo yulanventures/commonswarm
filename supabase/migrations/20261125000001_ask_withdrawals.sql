@@ -3,25 +3,39 @@
 --      ask) of its own open ask. No client role can read or write it directly.
 --   2. swarm.ask_is_withdrawn (swarm_command only) lets command handlers refuse answering or
 --      re-raising a withdrawn/replaced ask with the same refusal semantics as an expired/closed ask.
---   3. swarm.withdraw_ask (swarm_command only) enforces exact sender identity (same agent principal
+--   3. Internal withdrawal helpers (swarm_admin-owned, swarm_command EXECUTE only, no client roles):
+--      - swarm.ask_sender_can_access_placement: exact sender, live workspace authority, canonical
+--        channel access (non-archived), direct/group conversation membership via
+--        swarm.actor_can_access_direct_conversation (non-archived), or explicit legacy unfiled fallback.
+--      - swarm.ask_complete_for_withdrawal: true when swarm.ask_answered is true, a choice action
+--        completed in swarm.ui_actions, or a directly addressed agent replied (without changing
+--        swarm.ask_answered or any Waiting rule).
+--      - swarm.ask_withdrawal_release_allowed: exact sender, live placement access, and existing
+--        withdrawal row by this actor (with expected replacement id when expected) for post-fence
+--        release rechecks (requiring s.until > clock_timestamp() on fresh paths) and receipt
+--        replay reauthorization (deliberately omitting the deadline check on replays).
+--   4. swarm.withdraw_ask (swarm_command only) enforces exact sender identity (same agent principal
 --      or same person; never another agent of the same owner, never the agent's owner, never an
---      admin), rejects answered/ineligible targets with uniform not_found, makes plain repeated
---      withdrawal idempotent (one row), rejects already-withdrawn targets on replace, and
---      re-verifies live authority after the row write under READ COMMITTED.
---   4. swarm.waiting_ask_autoclear_status adds outcomes 'withdrawn' ('Withdrawn') and 'replaced'
+--      admin), requires current placement access and an open/incomplete target (uniform not_found
+--      otherwise), makes plain repeated withdrawal idempotent (one row), rejects already-withdrawn
+--      targets on replace, and re-verifies live authority/state after the row write under READ COMMITTED.
+--   5. swarm.waiting_ask_autoclear_status adds outcomes 'withdrawn' ('Withdrawn') and 'replaced'
 --      ('Replaced by a newer question') with explicit_rank = 0, taking precedence over all
 --      passive auto-clear reasons because withdrawal/replacement is the sender's explicit act.
 --      swarm.waiting_ask_eligible, decision_queue*, home_overview, waiting_archived_page, and
 --      waiting dismissal/restore/replay all inherit this automatically.
---   5. swarm_read.my_open_asks lists only the caller's own open asks (person via JWT claims,
---      agent via agent token hash or verified agent_principal_id claim), capped and keyset-paged,
---      returning id, created_at, until, addressee names, where label, and first 120 chars of body
---      (never exposing addressee dismissals).
---   6. swarm.waiting_dismissals gains dismissal_id uuid (unique per dismissal instance) so
+--   6. swarm_read.my_open_asks lists only the caller's own open asks (person via JWT claims,
+--      agent via agent token hash or verified agent_principal_id claim) using the shared placement
+--      and completion helpers, capped and keyset-paged, returning id, created_at, until, addressee
+--      names, where label, and first 120 chars of body (never exposing addressee dismissals).
+--   7. swarm_read.audit_log adds one condition so withdraw_ask rows are visible only when they
+--      carry at least one channel tag (direct/group-conversation and unfiled withdrawals stay
+--      server-only in swarm.audit_log).
+--   8. swarm.waiting_dismissals gains dismissal_id uuid (unique per dismissal instance) so
 --      swarm.dismiss_waiting_item reports created (true|false) and dismissal (uuid instance),
 --      and swarm.restore_waiting_item(ws, user, kind, id, expected_dismissal_id) restores only
 --      when the active dismissal matches expected_dismissal_id (or any active dismissal when NULL).
---   7. swarm_read.waiting_todos_page includes offer_id on rows whose reason is 'request' (and
+--   9. swarm_read.waiting_todos_page includes offer_id on rows whose reason is 'request' (and
 --      omits the offer_id key on other rows) so reviews can participate in Dismiss all.
 SET search_path = swarm, pg_catalog, public;
 
@@ -246,10 +260,262 @@ ALTER FUNCTION swarm.waiting_ask_autoclear_status(uuid, uuid, timestamptz) OWNER
 REVOKE ALL ON FUNCTION swarm.waiting_ask_autoclear_status(uuid, uuid, timestamptz)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 
+-- C1 single-source placement predicate for sender ask listing, withdrawal, replacement, and replay
+-- (internal: swarm_admin-owned, swarm_command EXECUTE only; never granted to client roles).
+-- Answers whether this exact sender currently has live workspace authority and current access to
+-- the ask's effective conversation (non-archived canonical channel, current direct/group
+-- conversation membership via swarm.actor_can_access_direct_conversation, non-archived general, or
+-- explicit legacy unfiled fallback).
+CREATE FUNCTION swarm.ask_sender_can_access_placement(
+  p_workspace_id uuid,
+  p_signal_id uuid,
+  p_actor_kind text,
+  p_actor_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_actor_live boolean;
+  v_place record;
+BEGIN
+  IF p_workspace_id IS NULL OR p_signal_id IS NULL OR p_actor_id IS NULL
+     OR p_actor_kind IS NULL OR p_actor_kind NOT IN ('user', 'agent') THEN
+    RETURN false;
+  END IF;
+
+  IF p_actor_kind = 'user' THEN
+    v_actor_live := swarm.is_member(p_workspace_id, p_actor_id);
+  ELSE
+    SELECT EXISTS (
+      SELECT 1
+      FROM swarm.agent_principals AS ap
+      JOIN swarm.agent_workspace_memberships AS am
+        ON am.principal_id = ap.principal_id
+        AND am.owner_user_id = ap.owner_user_id
+        AND am.workspace_id = p_workspace_id
+      JOIN swarm.memberships AS om
+        ON om.workspace_id = p_workspace_id
+        AND om.user_id = ap.owner_user_id
+      WHERE ap.principal_id = p_actor_id
+        AND ap.revoked_at IS NULL
+        AND am.revoked_at IS NULL
+        AND om.revoked_at IS NULL
+    ) INTO v_actor_live;
+  END IF;
+
+  IF NOT coalesce(v_actor_live, false) THEN
+    RETURN false;
+  END IF;
+
+  SELECT
+    s.channel_id AS scalar_channel_id,
+    c.conversation_id,
+    c.kind AS conv_kind,
+    c.channel_id AS conv_channel_id,
+    c.archived_at AS conv_archived_at,
+    ch.channel_id AS eff_channel_id,
+    ch.archived_at AS eff_channel_archived_at
+  INTO v_place
+  FROM swarm.signals AS s
+  LEFT JOIN swarm.conversation_signals AS cs
+    ON cs.workspace_id = s.workspace_id
+    AND cs.signal_id = s.id
+  LEFT JOIN swarm.conversations AS c
+    ON c.workspace_id = s.workspace_id
+    AND c.conversation_id = cs.conversation_id
+  LEFT JOIN swarm.channels AS ch
+    ON ch.workspace_id = s.workspace_id
+    AND ch.channel_id = coalesce(c.channel_id, s.channel_id)
+  WHERE s.workspace_id = p_workspace_id
+    AND s.id = p_signal_id
+    AND s.kind = 'ask'
+    AND s.from_kind = p_actor_kind
+    AND s.from_principal = p_actor_id
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  IF v_place.conversation_id IS NOT NULL THEN
+    IF v_place.conv_archived_at IS NOT NULL THEN
+      RETURN false;
+    END IF;
+
+    IF v_place.conv_kind IN ('public_channel', 'private_channel') THEN
+      RETURN v_place.conv_channel_id IS NOT NULL
+        AND v_place.eff_channel_id IS NOT NULL
+        AND v_place.eff_channel_archived_at IS NULL
+        AND swarm.actor_can_access_channel(
+          p_workspace_id, v_place.conv_channel_id, p_actor_kind, p_actor_id
+        );
+    ELSIF v_place.conv_kind IN ('dm', 'group_dm') THEN
+      -- Reuse the canonical direct-conversation membership predicate from 20261120000002_waiting_dm_convergence.sql.
+      RETURN v_place.scalar_channel_id IS NULL
+        AND swarm.actor_can_access_direct_conversation(
+          p_workspace_id, v_place.conversation_id, v_place.conv_kind, p_actor_kind, p_actor_id
+        );
+    ELSIF v_place.conv_kind = 'general' THEN
+      IF v_place.scalar_channel_id IS NOT NULL THEN
+        RETURN v_place.eff_channel_id IS NOT NULL
+          AND v_place.eff_channel_archived_at IS NULL
+          AND swarm.actor_can_access_channel(
+            p_workspace_id, v_place.scalar_channel_id, p_actor_kind, p_actor_id
+          );
+      END IF;
+      RETURN true;
+    ELSE
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF v_place.scalar_channel_id IS NOT NULL THEN
+    RETURN v_place.eff_channel_id IS NOT NULL
+      AND v_place.eff_channel_archived_at IS NULL
+      AND swarm.actor_can_access_channel(
+        p_workspace_id, v_place.scalar_channel_id, p_actor_kind, p_actor_id
+      );
+  END IF;
+
+  -- Explicit fallback for legacy asks filed in neither swarm.conversation_signals nor a scalar
+  -- channel: exact sender with live workspace authority (verified above).
+  RETURN true;
+END;
+$$;
+
+ALTER FUNCTION swarm.ask_sender_can_access_placement(uuid, uuid, text, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.ask_sender_can_access_placement(uuid, uuid, text, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.ask_sender_can_access_placement(uuid, uuid, text, uuid) TO swarm_command;
+
+-- C2 single-source completion predicate for sender withdrawal and my_open_asks (internal:
+-- swarm_admin-owned, swarm_command EXECUTE only; preserves swarm.ask_answered and all Waiting rules).
+-- True when swarm.ask_answered is true, OR a choice action on this ask has completed in
+-- swarm.ui_actions (including an unaddressed choice ask), OR a directly addressed agent replied.
+CREATE FUNCTION swarm.ask_complete_for_withdrawal(
+  p_workspace_id uuid,
+  p_signal_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    p_workspace_id IS NOT NULL
+    AND p_signal_id IS NOT NULL
+    AND (
+      swarm.ask_answered(p_workspace_id, p_signal_id)
+      OR EXISTS (
+        SELECT 1
+        FROM swarm.ui_actions AS ua
+        WHERE ua.workspace_id = p_workspace_id
+          AND ua.signal_id = p_signal_id
+          AND ua.state = 'completed'
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM swarm.signals AS s
+        CROSS JOIN LATERAL (
+          SELECT s.to_agent_principal_id AS agent_id
+          WHERE s.to_agent_principal_id IS NOT NULL
+          UNION
+          SELECT r.recipient_agent_principal_id AS agent_id
+          FROM swarm.signal_recipients AS r
+          WHERE r.workspace_id = s.workspace_id
+            AND r.signal_id = s.id
+            AND r.recipient_agent_principal_id IS NOT NULL
+        ) AS addressed_agent
+        JOIN swarm.signals AS reply
+          ON reply.workspace_id = s.workspace_id
+          AND reply.in_reply_to = s.id
+        WHERE s.workspace_id = p_workspace_id
+          AND s.id = p_signal_id
+          AND s.kind = 'ask'
+          AND NOT (reply.from_kind = s.from_kind AND reply.from_principal = s.from_principal)
+          AND reply.from_kind = 'agent'
+          AND reply.from_principal = addressed_agent.agent_id
+      )
+    );
+$$;
+
+ALTER FUNCTION swarm.ask_complete_for_withdrawal(uuid, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.ask_complete_for_withdrawal(uuid, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.ask_complete_for_withdrawal(uuid, uuid) TO swarm_command;
+
+-- C3 release & replay reauthorization predicate (command-role only; no client roles).
+-- Verifies exact sender, live workspace authority, current placement access (C1), and that the
+-- withdrawal row for this ask exists and was recorded by this actor (with the expected replacement
+-- signal id when one is expected).
+--
+-- Fresh vs replay deadline rule (made explicit by p_require_open_deadline):
+--   - p_require_open_deadline = true (FRESH paths only: standalone withdraw_ask and both
+--     replacement forms, called after the final receipt, audit, spend write and credential fence):
+--     also requires the old ask's deadline (`s.until`) to still be in the future on the database
+--     clock at that moment (`clock_timestamp()`, not statement start time), so a deadline passing
+--     during any wait rolls back the entire transaction.
+--   - p_require_open_deadline = false (REPLAY paths only): deliberately performs NO deadline check
+--     so an authorized replay may still return the stored receipt of a withdrawal that committed
+--     in time after the ask's deadline has passed.
+-- Neither mode checks completion because an already-withdrawn ask reads as cleared.
+CREATE FUNCTION swarm.ask_withdrawal_release_allowed(
+  p_workspace_id uuid,
+  p_actor_kind text,
+  p_actor_id uuid,
+  p_signal_id uuid,
+  p_expected_replaced_by_signal_id uuid DEFAULT NULL,
+  p_require_open_deadline boolean DEFAULT false
+)
+RETURNS boolean
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    p_workspace_id IS NOT NULL
+    AND p_actor_kind IN ('user', 'agent')
+    AND p_actor_id IS NOT NULL
+    AND p_signal_id IS NOT NULL
+    AND p_require_open_deadline IS NOT NULL
+    AND swarm.ask_sender_can_access_placement(p_workspace_id, p_signal_id, p_actor_kind, p_actor_id)
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.ask_withdrawals AS aw
+      JOIN swarm.signals AS s
+        ON s.workspace_id = aw.workspace_id
+       AND s.id = aw.signal_id
+      WHERE aw.workspace_id = p_workspace_id
+        AND aw.signal_id = p_signal_id
+        AND aw.withdrawn_by_kind = p_actor_kind
+        AND aw.withdrawn_by = p_actor_id
+        AND (
+          p_expected_replaced_by_signal_id IS NULL
+          OR aw.replaced_by_signal_id = p_expected_replaced_by_signal_id
+        )
+        AND (
+          NOT p_require_open_deadline
+          OR s.until > clock_timestamp()
+        )
+    );
+$$;
+
+ALTER FUNCTION swarm.ask_withdrawal_release_allowed(uuid, text, uuid, uuid, uuid, boolean) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.ask_withdrawal_release_allowed(uuid, text, uuid, uuid, uuid, boolean)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.ask_withdrawal_release_allowed(uuid, text, uuid, uuid, uuid, boolean) TO swarm_command;
+
 -- Sender withdrawal/replacement of an open ask (command-role only).
 -- Enforces exact sender identity (from_kind + from_principal): never another agent of the
--- same owner, never the agent's owner, never a workspace admin. Re-verifies authority and
--- ask state after acquiring locks / writing under READ COMMITTED.
+-- same owner, never the agent's owner, never a workspace admin. Uses the shared placement (C1)
+-- and completion (C2) helpers and re-verifies authority and ask state after acquiring locks /
+-- writing under READ COMMITTED.
 CREATE FUNCTION swarm.withdraw_ask(
   p_workspace_id uuid,
   p_actor_kind text,
@@ -281,7 +547,7 @@ BEGIN
     RETURN jsonb_build_object('status', 'invalid_request');
   END IF;
 
-  -- Serialize with concurrent replies (plain or choice) and concurrent withdraw/replace on the same ask.
+  -- Serialize with concurrent replies (plain or choice), re-raise, and concurrent withdraw/replace on the same ask.
   PERFORM pg_advisory_xact_lock(
     hashtextextended('answer_choice:' || p_workspace_id::text || ':' || p_signal_id::text, 0)
   );
@@ -313,26 +579,29 @@ BEGIN
     RETURN jsonb_build_object('status', 'forbidden');
   END IF;
 
-  -- Exact sender match: same kind and same principal id; no owner/admin/sibling-agent override.
-  SELECT s.id, s.channel_id, s.until
+  -- Exact sender match plus current effective-conversation placement access (C1).
+  SELECT s.id, coalesce(c.channel_id, s.channel_id) AS channel_id, s.until
   INTO v_ask
   FROM swarm.signals AS s
+  LEFT JOIN swarm.conversation_signals AS cs
+    ON cs.workspace_id = s.workspace_id
+    AND cs.signal_id = s.id
+  LEFT JOIN swarm.conversations AS c
+    ON c.workspace_id = s.workspace_id
+    AND c.conversation_id = cs.conversation_id
   WHERE s.workspace_id = p_workspace_id
     AND s.id = p_signal_id
     AND s.kind = 'ask'
     AND s.from_kind = p_actor_kind
     AND s.from_principal = p_actor_id
-    AND (
-      s.channel_id IS NULL
-      OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, p_actor_kind, p_actor_id)
-    )
+    AND swarm.ask_sender_can_access_placement(s.workspace_id, s.id, p_actor_kind, p_actor_id)
   LIMIT 1;
 
   IF NOT FOUND THEN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
-  IF swarm.ask_answered(p_workspace_id, p_signal_id) THEN
+  IF swarm.ask_complete_for_withdrawal(p_workspace_id, p_signal_id) THEN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
@@ -368,16 +637,11 @@ BEGIN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
-  -- Replacement must point to an ask of the exact same sender in the same workspace.
-  IF p_replaced_by_signal_id IS NOT NULL AND NOT EXISTS (
-    SELECT 1
-    FROM swarm.signals AS rep
-    WHERE rep.workspace_id = p_workspace_id
-      AND rep.id = p_replaced_by_signal_id
-      AND rep.kind = 'ask'
-      AND rep.from_kind = p_actor_kind
-      AND rep.from_principal = p_actor_id
-  ) THEN
+  -- Replacement must point to an ask of the exact same sender with current placement access (C1).
+  IF p_replaced_by_signal_id IS NOT NULL
+     AND NOT swarm.ask_sender_can_access_placement(
+       p_workspace_id, p_replaced_by_signal_id, p_actor_kind, p_actor_id
+     ) THEN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
@@ -390,7 +654,8 @@ BEGIN
     RETURNING withdrawn_at, replaced_by_signal_id INTO v_withdrawn_at, v_replaced_by;
     v_created := true;
 
-    -- Re-verify authority and ask state in a fresh READ COMMITTED snapshot after the row write.
+    -- Re-verify authority, placement (C1), completion (C2), and deadline in a fresh READ COMMITTED
+    -- snapshot after the row write.
     IF p_actor_kind = 'user' THEN
       v_actor_live := swarm.is_member(p_workspace_id, p_actor_id);
     ELSE
@@ -415,18 +680,19 @@ BEGIN
       RAISE EXCEPTION 'ask_withdrawal_forbidden' USING ERRCODE = 'P0001';
     END IF;
 
-    IF swarm.ask_answered(p_workspace_id, p_signal_id)
-       OR v_ask.until <= clock_timestamp()
+    IF swarm.ask_complete_for_withdrawal(p_workspace_id, p_signal_id)
+       OR NOT EXISTS (
+         SELECT 1
+         FROM swarm.signals AS s
+         WHERE s.workspace_id = p_workspace_id
+           AND s.id = p_signal_id
+           AND s.until > clock_timestamp()
+       )
+       OR NOT swarm.ask_sender_can_access_placement(p_workspace_id, p_signal_id, p_actor_kind, p_actor_id)
        OR (
-         v_ask.channel_id IS NOT NULL
-         AND (
-           NOT swarm.actor_can_access_channel(p_workspace_id, v_ask.channel_id, p_actor_kind, p_actor_id)
-           OR EXISTS (
-             SELECT 1 FROM swarm.channels AS ch
-             WHERE ch.workspace_id = p_workspace_id
-               AND ch.channel_id = v_ask.channel_id
-               AND ch.archived_at IS NOT NULL
-           )
+         p_replaced_by_signal_id IS NOT NULL
+         AND NOT swarm.ask_sender_can_access_placement(
+           p_workspace_id, p_replaced_by_signal_id, p_actor_kind, p_actor_id
          )
        ) THEN
       RAISE EXCEPTION 'ask_not_found' USING ERRCODE = 'P0001';
@@ -589,14 +855,11 @@ BEGIN
       AND s.from_kind = v_sender_kind
       AND s.from_principal = v_sender_id
       AND s.until > read_at
-      AND NOT swarm.ask_answered(s.workspace_id, s.id)
+      AND NOT swarm.ask_complete_for_withdrawal(s.workspace_id, s.id)
       AND NOT EXISTS (
         SELECT 1 FROM swarm.waiting_ask_autoclear_status(s.workspace_id, s.id, read_at)
       )
-      AND (
-        s.channel_id IS NULL
-        OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, v_sender_kind, v_sender_id)
-      )
+      AND swarm.ask_sender_can_access_placement(s.workspace_id, s.id, v_sender_kind, v_sender_id)
   ),
   anchor AS (
     SELECT coalesce(
@@ -1070,5 +1333,70 @@ ALTER FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) O
 REVOKE ALL ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid)
  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) TO authenticated;
+
+-- Latest prior definition: 20261124000001_waiting_dismissals.sql.
+-- Keep non-channel withdraw_ask rows (direct/group-conversation and unfiled withdrawals) server-only
+-- in swarm.audit_log; channel-tagged withdraw_ask rows remain gated by the existing channel_ids rule.
+CREATE OR REPLACE VIEW swarm_read.audit_log
+WITH (security_barrier = true)
+AS
+  SELECT
+    a.audit_id,
+    a.occurred_at,
+    a.actor_user,
+    a.actor_agent_principal,
+    a.actor_run,
+    a.credential_kind,
+    a.credential_id,
+    a.device_id,
+    a.command_kind,
+    a.workspace_id,
+    a.stream_id,
+    a.outcome,
+    a.reason,
+    a.detail,
+    a.request_hash,
+    a.ip
+  FROM swarm.audit_log AS a
+  WHERE swarm.is_member(a.workspace_id, auth.uid())
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.memberships AS m
+      WHERE m.workspace_id = a.workspace_id
+        AND m.user_id = auth.uid()
+        AND m.revoked_at IS NULL
+        AND m.role IN ('owner', 'admin')
+    )
+    AND (
+      COALESCE(cardinality(a.channel_ids), 0) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest(a.channel_ids) AS cid
+        WHERE cid IS NULL
+           OR NOT swarm.claims_can_access_channel(a.workspace_id, cid)
+      )
+    )
+    AND (
+      a.command_kind NOT IN (
+        'private_channel_manager_promoted',
+        'private_channel_auto_archived'
+      )
+      OR (
+        a.stream_id IS NOT NULL
+        AND swarm.claims_can_access_channel(a.workspace_id, a.stream_id)
+      )
+    )
+    AND a.command_kind NOT IN (
+      'dismiss_waiting_item',
+      'restore_waiting_item'
+    )
+    AND (
+      a.command_kind <> 'withdraw_ask'
+      OR COALESCE(cardinality(a.channel_ids), 0) > 0
+    );
+
+ALTER VIEW swarm_read.audit_log OWNER TO swarm_admin;
+GRANT SELECT ON swarm_read.audit_log TO authenticated, swarm_read;
+REVOKE ALL ON swarm_read.audit_log FROM PUBLIC, anon;
 
 RESET search_path;

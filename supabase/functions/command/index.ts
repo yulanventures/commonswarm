@@ -257,9 +257,12 @@ import {
 import {
   applyWithdrawAsk,
   ASK_WITHDRAWAL_COMMAND_KINDS,
+  ASK_WITHDRAWAL_NOT_FOUND_BODY,
   askWithdrawalReplayFields,
   isAskWithdrawalCommandKind,
   parseAskWithdrawalCommand,
+  reauthorizeAskWithdrawalRelease,
+  storedAskWithdrawalReplayTarget,
   type WithdrawAskCommand,
 } from "./ask-withdrawals.ts";
 import { choiceOptionText } from "./choice-text.ts";
@@ -4018,8 +4021,11 @@ async function isPrivateChannelAgentCommand(
   localBody: Record<string, unknown> | null,
 ): Promise<boolean> {
   if (!UUID_RE.test(workspaceId)) return false;
+  // withdraw_ask deliberately never advances coarse agent presence for any placement
+  // (public/private channel, direct/group conversation, or unfiled), fresh or replayed.
   if (kind === "channel_leave" || kind === "signals_seen" ||
-    (REACTION_COMMAND_KINDS as readonly string[]).includes(kind)) return true;
+    (REACTION_COMMAND_KINDS as readonly string[]).includes(kind) ||
+    isAskWithdrawalCommandKind(kind)) return true;
   const channelObj = record(localBody?.channel);
   if (channelObj && channelObj.visibility === "private") return true;
   const signalObj = record(localBody?.signal);
@@ -13690,11 +13696,17 @@ async function signalBatchChannelIdsForAuthorizedRefs(
   ];
   if (validIds.length === 0) return undefined;
   const rows = await tx<{ channel_id: string }[]>`
-    SELECT DISTINCT channel_id
-    FROM swarm.signals
-    WHERE workspace_id = ${workspaceId}::uuid
-      AND id = ANY(${validIds}::uuid[])
-      AND channel_id IS NOT NULL
+    SELECT DISTINCT coalesce(c.channel_id, s.channel_id) AS channel_id
+    FROM swarm.signals AS s
+    LEFT JOIN swarm.conversation_signals AS cs
+      ON cs.workspace_id = s.workspace_id
+     AND cs.signal_id = s.id
+    LEFT JOIN swarm.conversations AS c
+      ON c.workspace_id = s.workspace_id
+     AND c.conversation_id = cs.conversation_id
+    WHERE s.workspace_id = ${workspaceId}::uuid
+      AND s.id = ANY(${validIds}::uuid[])
+      AND coalesce(c.channel_id, s.channel_id) IS NOT NULL
   `;
   return rows.length > 0 ? rows.map((row) => row.channel_id) : undefined;
 }
@@ -13806,7 +13818,11 @@ async function replayAuditChannelIds(
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.signal_id]));
   }
   if (typeof stored?.superseded_signal_id === "string" && UUID_RE.test(stored.superseded_signal_id)) {
-    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.superseded_signal_id]));
+    const replacementRefs = [stored.superseded_signal_id];
+    if (typeof signal?.id === "string" && UUID_RE.test(signal.id)) {
+      replacementRefs.push(signal.id);
+    }
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, replacementRefs));
   }
   /* A stored reaction names the message it was on, and its success proves the reactor could read
    * that message then. Tag every later use of the command id with that message's channel, whatever
@@ -13927,6 +13943,13 @@ async function reraiseAsk(
       auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
       outcome, reason, detail, hash, channelIds: auditChannelIds,
     });
+  // Serialize with concurrent replies, choice answers, and sender withdrawal/replacement on the same
+  // ask before taking the per-ask re-raise lock and before reading ask state.
+  await tx`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`answer_choice:${route.workspaceId}:${command.signal_id}`}, 0)
+    )
+  `;
   await tx`
     SELECT pg_advisory_xact_lock(
       hashtextextended(${`reraise_ask:${route.workspaceId}:${command.signal_id}`}, 0)
@@ -14586,6 +14609,158 @@ async function memoryCommand(
 
 const ASK_CHOICE_ATTEMPTS_PER_PERSON = 5;
 
+type PendingAskWithdrawalRelease = {
+  route: Route;
+  auth: AuthContext;
+  actorKind: "user" | "agent";
+  actorId: string;
+  oldSignalId: string;
+  newSignalId: string | null;
+  suppliedConversationId?: string;
+  suppliedChannel?: string;
+  expectedChannelId?: string;
+  commandKind: string;
+  hash: string;
+  detail: string | null;
+  refusalAuditChannelIds: readonly string[] | undefined;
+  isReplay: boolean;
+};
+
+/**
+ * Reauthorize the destination of a replacement ask (post_signal or ask_choice with supersedes)
+ * for both post-fence fresh release rechecks and stored receipt replays, whether or not the
+ * request supplied conversation_id. Returns null when authorized, or the matching refusal otherwise.
+ */
+async function reauthorizeAskReplacementDestination(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  opts: {
+    newSignalId: string | null;
+    suppliedConversationId?: string;
+    suppliedChannel?: string;
+    expectedChannelId?: string;
+  },
+): Promise<HttpResult | null> {
+  const actor = authActorIdentity(auth);
+  if (actor === null) {
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  if (opts.newSignalId === null || !UUID_RE.test(opts.newSignalId)) {
+    return { status: 404, body: { ...ASK_WITHDRAWAL_NOT_FOUND_BODY } };
+  }
+  if (opts.suppliedConversationId !== undefined) {
+    const convRefusal = await reauthorizedConversationReplay(
+      tx,
+      route.workspaceId,
+      actor,
+      opts.suppliedConversationId,
+      false,
+    );
+    if (convRefusal !== null) return convRefusal;
+  }
+  if (opts.suppliedChannel !== undefined) {
+    const chRes = await resolveSignalChannel(tx, route, auth, {
+      kind: "post_signal",
+      signal_kind: "ask",
+      body: "",
+      to_user_id: null,
+      about: null,
+      channel: opts.suppliedChannel,
+      ...(opts.expectedChannelId !== undefined ? { expected_channel_id: opts.expectedChannelId } : {}),
+    });
+    if (!chRes.ok) {
+      return {
+        status: chRes.status!,
+        body: { error: chRes.error!, message: chRes.message! },
+      };
+    }
+  }
+  const [placed] = await tx<{
+    conversation_id: string | null;
+    conv_kind: string | null;
+    conv_archived_at: Date | null;
+    eff_channel_id: string | null;
+    eff_channel_slug: string | null;
+    eff_channel_archived_at: Date | null;
+    placement_ok: boolean;
+  }[]>`
+    SELECT
+      c.conversation_id,
+      c.kind AS conv_kind,
+      c.archived_at AS conv_archived_at,
+      coalesce(c.channel_id, s.channel_id) AS eff_channel_id,
+      ch.slug AS eff_channel_slug,
+      ch.archived_at AS eff_channel_archived_at,
+      swarm.ask_sender_can_access_placement(
+        s.workspace_id,
+        s.id,
+        ${actor.kind},
+        ${actor.id}::uuid
+      ) AS placement_ok
+    FROM swarm.signals AS s
+    LEFT JOIN swarm.conversation_signals AS cs
+      ON cs.workspace_id = s.workspace_id
+     AND cs.signal_id = s.id
+    LEFT JOIN swarm.conversations AS c
+      ON c.workspace_id = s.workspace_id
+     AND c.conversation_id = cs.conversation_id
+    LEFT JOIN swarm.channels AS ch
+      ON ch.workspace_id = s.workspace_id
+     AND ch.channel_id = coalesce(c.channel_id, s.channel_id)
+    WHERE s.workspace_id = ${route.workspaceId}::uuid
+      AND s.id = ${opts.newSignalId}::uuid
+      AND s.kind = 'ask'
+    LIMIT 1
+  `;
+  if (placed === undefined) {
+    return { status: 404, body: { ...ASK_WITHDRAWAL_NOT_FOUND_BODY } };
+  }
+  if (placed.conversation_id !== null && (placed.conv_kind === "dm" || placed.conv_kind === "group_dm")) {
+    const directRefusal = await reauthorizedConversationReplay(
+      tx,
+      route.workspaceId,
+      actor,
+      placed.conversation_id,
+      false,
+    );
+    if (directRefusal !== null) return directRefusal;
+  }
+  if (placed.eff_channel_id !== null) {
+    const canCh = await actorCanAccessChannel(tx, route.workspaceId, placed.eff_channel_id, actor.kind, actor.id);
+    if (!canCh) {
+      if (opts.suppliedConversationId !== undefined) {
+        return {
+          status: 404,
+          body: { error: "conversation_not_found", message: "There is no conversation with that id in this workspace." },
+        };
+      }
+      const slug = opts.suppliedChannel ?? placed.eff_channel_slug ?? placed.eff_channel_id;
+      return {
+        status: 404,
+        body: {
+          error: "channel_not_found",
+          message: unknownChannelMessage(slug, await liveChannelSlugs(tx, route, auth)),
+        },
+      };
+    }
+    if (placed.eff_channel_archived_at !== null || placed.conv_archived_at !== null) {
+      const slug = opts.suppliedChannel ?? placed.eff_channel_slug ?? "That channel";
+      return {
+        status: 409,
+        body: {
+          error: "channel_archived",
+          message: `${slug} is archived, so it takes no new messages. Its history still reads and its links still resolve.`,
+        },
+      };
+    }
+  }
+  if (!placed.placement_ok) {
+    return { status: 404, body: { ...ASK_WITHDRAWAL_NOT_FOUND_BODY } };
+  }
+  return null;
+}
+
 type ChoiceCtx = {
   commandId: string;
   hash: string;
@@ -14593,6 +14768,7 @@ type ChoiceCtx = {
   minClientVersion: string;
   ignoredIdentity: string | null;
   decided: (result: HttpResult) => HttpResult;
+  onAskWithdrawalRelease?: (check: PendingAskWithdrawalRelease) => void;
 };
 
 function unionChannelIds(
@@ -14640,6 +14816,47 @@ async function choiceLedgerReplay(tx: Sql, route: Route, auth: AuthContext, ctx:
   await insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
     outcome: matches ? "replayed" : "conflict", reason: matches ? null : "command_id_conflict",
     detail: ctx.ignoredIdentity, hash: ctx.hash, channelIds: unionChannelIds(storedChannelIds, currentChannelIds) });
+  if (matches && command.kind === "ask_choice") {
+    const stored = record(prior.response) ?? {};
+    const replayTarget = storedAskWithdrawalReplayTarget(ctx.kind, command, stored);
+    if (replayTarget !== null) {
+      const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+      const actorId = canonicalPrincipal(auth.actor);
+      const oldRefusal = await reauthorizeAskWithdrawalRelease(
+        tx,
+        route.workspaceId,
+        actorKind,
+        actorId,
+        replayTarget.oldSignalId,
+        replayTarget.newSignalId,
+        // Replay: deliberately omit the old ask's deadline check so an authorized retry of a
+        // committed replacement still returns its stored receipt after the old ask's until passes.
+        false,
+      );
+      if (oldRefusal !== null) return oldRefusal;
+      const destRefusal = await reauthorizeAskReplacementDestination(tx, route, auth, {
+        newSignalId: replayTarget.newSignalId,
+        suppliedChannel: command.channel,
+      });
+      if (destRefusal !== null) {
+        return destRefusal.status === 404 ? destRefusal : ctx.decided(destRefusal);
+      }
+      ctx.onAskWithdrawalRelease?.({
+        route,
+        auth,
+        actorKind,
+        actorId,
+        oldSignalId: replayTarget.oldSignalId,
+        newSignalId: replayTarget.newSignalId,
+        suppliedChannel: command.channel,
+        commandKind: ctx.kind,
+        hash: ctx.hash,
+        detail: ctx.ignoredIdentity,
+        refusalAuditChannelIds: unionChannelIds(storedChannelIds, currentChannelIds),
+        isReplay: true,
+      });
+    }
+  }
   return ctx.decided(matches
     ? replayResult(storedResponse(prior.response), ctx.kind)
     : { status: 409, body: { error: "command_id_conflict" } });
@@ -14750,6 +14967,23 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
   await choiceLedgerSettle(tx, route, auth, ctx, response);
   await audit("accepted", null);
   await chargeSpend(tx, "signal_post");
+  if (command.supersedes !== undefined) {
+    const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+    ctx.onAskWithdrawalRelease?.({
+      route,
+      auth,
+      actorKind,
+      actorId: canonicalPrincipal(auth.actor),
+      oldSignalId: command.supersedes,
+      newSignalId: posted.signal.id,
+      suppliedChannel: command.channel,
+      commandKind: ctx.kind,
+      hash: ctx.hash,
+      detail: ctx.ignoredIdentity,
+      refusalAuditChannelIds: auditChannelIds,
+      isReplay: false,
+    });
+  }
   return { status: 200, body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion } };
 }
 
@@ -16478,8 +16712,9 @@ async function handleTransaction(
       authenticatedAgent: AgentAuthRow | null;
       hostedAgent: { workspaceId: string; principalId: string } | null;
       localPlan: LocalAuthLockPlan | null;
+      pendingAskWithdrawalRelease: PendingAskWithdrawalRelease | null;
     } = {
-      authenticatedAgent: null, hostedAgent: null, localPlan: null,
+      authenticatedAgent: null, hostedAgent: null, localPlan: null, pendingAskWithdrawalRelease: null,
     };
     let acceptedPresenceRoute: PresenceRoute | null = null;
     const result = await (async (): Promise<HttpResult> => {
@@ -17717,6 +17952,75 @@ async function handleTransaction(
           );
           if (reauthorizedDismissal !== null) return reauthorizedDismissal;
         }
+        /* C3: A stored withdraw_ask receipt replays only while the calling exact sender still passes
+         * swarm.ask_withdrawal_release_allowed (live authority, current placement access, existing
+         * withdrawal row); a stored post_signal replacement receipt additionally reauthorizes the
+         * new ask's destination whether or not conversation_id was supplied. */
+        if (matches && (isAskWithdrawalCommandKind(kind) || command.kind === "post_signal")) {
+          const replayTarget = storedAskWithdrawalReplayTarget(
+            kind,
+            command as { signal_id?: unknown; supersedes?: unknown },
+            record(existing.response) ?? {},
+          );
+          if (replayTarget !== null) {
+            const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+            const actorId = canonicalPrincipal(auth.actor);
+            const oldRefusal = await reauthorizeAskWithdrawalRelease(
+              tx,
+              route.workspaceId,
+              actorKind,
+              actorId,
+              replayTarget.oldSignalId,
+              replayTarget.newSignalId,
+              // Replay: deliberately omit the old ask's deadline check so an authorized retry of a
+              // committed withdrawal/replacement still returns its stored receipt after until passes.
+              false,
+            );
+            if (oldRefusal !== null) return oldRefusal;
+            if (replayTarget.kind === "replacement") {
+              const sigCmd = command as SignalCommand;
+              const destRefusal = await reauthorizeAskReplacementDestination(tx, route, auth, {
+                newSignalId: replayTarget.newSignalId,
+                suppliedConversationId: sigCmd.conversation_id,
+                suppliedChannel: sigCmd.channel,
+                expectedChannelId: sigCmd.expected_channel_id,
+              });
+              if (destRefusal !== null) {
+                return destRefusal.status === 404 ? destRefusal : decided(destRefusal);
+              }
+              localState.pendingAskWithdrawalRelease = {
+                route,
+                auth,
+                actorKind,
+                actorId,
+                oldSignalId: replayTarget.oldSignalId,
+                newSignalId: replayTarget.newSignalId,
+                suppliedConversationId: sigCmd.conversation_id,
+                suppliedChannel: sigCmd.channel,
+                expectedChannelId: sigCmd.expected_channel_id,
+                commandKind: kind,
+                hash,
+                detail: ignoredIdentity,
+                refusalAuditChannelIds: replayChannelIds,
+                isReplay: true,
+              };
+            } else {
+              localState.pendingAskWithdrawalRelease = {
+                route,
+                auth,
+                actorKind,
+                actorId,
+                oldSignalId: replayTarget.oldSignalId,
+                newSignalId: null,
+                commandKind: kind,
+                hash,
+                detail: ignoredIdentity,
+                refusalAuditChannelIds: undefined,
+                isReplay: true,
+              };
+            }
+          }
+        }
         const replayedConversation = !matches
           ? undefined
           : isConversationCommandKind(kind)
@@ -18235,6 +18539,21 @@ async function handleTransaction(
         outcome: "accepted", detail: ignoredIdentity, hash,
         channelIds: outcome.channel_id !== null ? [outcome.channel_id] : undefined,
       });
+      // C3: Schedule post-fence release recheck after final credential/session fences so any
+      // access loss during receipt/audit/fence waits rolls back the withdrawal, receipt, and audit.
+      localState.pendingAskWithdrawalRelease = {
+        route,
+        auth,
+        actorKind,
+        actorId,
+        oldSignalId: withdrawCmd.signal_id,
+        newSignalId: null,
+        commandKind: kind,
+        hash,
+        detail: ignoredIdentity,
+        refusalAuditChannelIds: undefined,
+        isReplay: false,
+      };
       return {
         status: 200,
         body: {
@@ -18359,7 +18678,15 @@ async function handleTransaction(
 
     if (command.kind === "ask_choice") {
       return await askChoice(tx, route, auth, command, {
-        commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
+        commandId,
+        hash,
+        kind,
+        minClientVersion,
+        ignoredIdentity,
+        decided,
+        onAskWithdrawalRelease: (check) => {
+          localState.pendingAskWithdrawalRelease = check;
+        },
       }, hostedSeatCapability);
     }
 
@@ -18370,6 +18697,11 @@ async function handleTransaction(
     }
 
     if (command.kind === "post_signal") {
+      // Preserve the caller's original destination selectors before conversation routing mutates them,
+      // so the C3 post-fence release check reauthorizes the exact destination the request targeted.
+      const suppliedConversationId = command.conversation_id;
+      const suppliedChannel = command.channel;
+      const suppliedExpectedChannelId = command.expected_channel_id;
       /* Conversations (step 2a). conversation_id becomes today's fields here, before anything else reads
        * the command (the request hash above is of the request as sent): #general posts as an unfiled
        * message, a channel by its slug pinned to its id, and a 1:1 or group with the address set of the
@@ -19140,6 +19472,25 @@ async function handleTransaction(
         channelIds: finalPostAuditChannelIds,
       });
       await chargeSpend(tx, "signal_post");
+      if (command.supersedes !== undefined) {
+        const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+        localState.pendingAskWithdrawalRelease = {
+          route,
+          auth,
+          actorKind,
+          actorId: canonicalPrincipal(auth.actor),
+          oldSignalId: command.supersedes,
+          newSignalId: signal.id,
+          suppliedConversationId,
+          suppliedChannel,
+          expectedChannelId: suppliedExpectedChannelId,
+          commandKind: kind,
+          hash,
+          detail: ignoredIdentity,
+          refusalAuditChannelIds: finalPostAuditChannelIds,
+          isReplay: false,
+        };
+      }
       return {
         status: 200,
         body: {
@@ -20541,6 +20892,62 @@ async function handleTransaction(
       const finalSession=await enforceAgentSessionProof(tx,{principalId:localState.authenticatedAgent.principal_id,
         workspaceId:localState.authenticatedAgent.principal_workspace_id,proofParse:sessionProofParse,connectionOnly:kind===RENEW_AGENT_TOKEN_KIND,recheckOnly:true});
       if(!finalSession.ok) throw new LocalCommandRefused({status:finalSession.status,body:{error:finalSession.error}});
+    }
+    if (localState.pendingAskWithdrawalRelease !== null && result.status >= 200 && result.status < 300) {
+      const check = localState.pendingAskWithdrawalRelease;
+      // Fresh paths (standalone withdraw_ask and both replacement forms) require the old ask's
+      // deadline (`until`) to still be in the future on the database clock (`clock_timestamp()`)
+      // right here after the last receipt, audit, spend write and final credential fence; replay
+      // paths deliberately omit the deadline check.
+      const oldRefusal = await reauthorizeAskWithdrawalRelease(
+        tx,
+        check.route.workspaceId,
+        check.actorKind,
+        check.actorId,
+        check.oldSignalId,
+        check.newSignalId,
+        !check.isReplay,
+      );
+      if (oldRefusal !== null) {
+        throw new LocalCommandRefused(
+          oldRefusal,
+          check.isReplay ? null : {
+            auth: check.auth,
+            commandKind: check.commandKind,
+            workspaceId: check.route.workspaceId,
+            streamId: check.route.streamId,
+            outcome: "authz",
+            reason: "ask_not_found",
+            detail: check.detail,
+            hash: check.hash,
+            channelIds: check.refusalAuditChannelIds,
+          },
+        );
+      }
+      if (check.newSignalId !== null) {
+        const destRefusal = await reauthorizeAskReplacementDestination(tx, check.route, check.auth, {
+          newSignalId: check.newSignalId,
+          suppliedConversationId: check.suppliedConversationId,
+          suppliedChannel: check.suppliedChannel,
+          expectedChannelId: check.expectedChannelId,
+        });
+        if (destRefusal !== null) {
+          throw new LocalCommandRefused(
+            destRefusal,
+            check.isReplay ? null : {
+              auth: check.auth,
+              commandKind: check.commandKind,
+              workspaceId: check.route.workspaceId,
+              streamId: check.route.streamId,
+              outcome: destRefusal.status === 404 || destRefusal.status === 403 ? "authz" : "domain",
+              reason: String(destRefusal.body.error ?? "forbidden"),
+              detail: check.detail,
+              hash: check.hash,
+              channelIds: check.refusalAuditChannelIds,
+            },
+          );
+        }
+      }
     }
     return result;
   }).catch((error: unknown): HttpResult => {

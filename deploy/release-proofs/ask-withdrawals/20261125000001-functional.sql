@@ -4,6 +4,7 @@ DECLARE
   v_autoclear_src text;
   v_open_asks_src text;
   v_waiting_todos_src text;
+  v_audit_def text := pg_get_viewdef('swarm_read.audit_log'::regclass, true);
 BEGIN
   IF EXISTS (
     SELECT 1 FROM swarm.ask_withdrawals aw
@@ -26,6 +27,17 @@ BEGIN
   END IF;
   IF swarm.ask_is_withdrawn(NULL, NULL) IS DISTINCT FROM false THEN
     RAISE EXCEPTION 'ask_is_withdrawn failed null fail-closed check' USING ERRCODE = '55000';
+  END IF;
+  IF swarm.ask_sender_can_access_placement(NULL, NULL, 'user', NULL) IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'ask_sender_can_access_placement failed null fail-closed check' USING ERRCODE = '55000';
+  END IF;
+  IF swarm.ask_complete_for_withdrawal(NULL, NULL) IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'ask_complete_for_withdrawal failed null fail-closed check' USING ERRCODE = '55000';
+  END IF;
+  IF swarm.ask_withdrawal_release_allowed(NULL, 'user', NULL, NULL, NULL, true) IS DISTINCT FROM false
+     OR swarm.ask_withdrawal_release_allowed(NULL, 'user', NULL, NULL, NULL, false) IS DISTINCT FROM false
+     OR swarm.ask_withdrawal_release_allowed(NULL, 'user', NULL, NULL, NULL, NULL) IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'ask_withdrawal_release_allowed failed null fail-closed check' USING ERRCODE = '55000';
   END IF;
   IF (swarm.withdraw_ask(NULL, 'user', NULL, NULL, NULL)->>'status') IS DISTINCT FROM 'invalid_request' THEN
     RAISE EXCEPTION 'withdraw_ask failed invalid_request check' USING ERRCODE = '55000';
@@ -58,5 +70,10 @@ BEGIN
   WHERE oid = 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)'::regprocedure;
   IF position('''offer_id''' IN coalesce(v_waiting_todos_src, '')) = 0 THEN
     RAISE EXCEPTION 'waiting_todos_page missing offer_id projection for request rows' USING ERRCODE = '55000';
+  END IF;
+  IF position('withdraw_ask' IN coalesce(v_audit_def, '')) = 0
+     OR position('dismiss_waiting_item' IN coalesce(v_audit_def, '')) = 0
+     OR position('restore_waiting_item' IN coalesce(v_audit_def, '')) = 0 THEN
+    RAISE EXCEPTION 'swarm_read.audit_log missing withdraw_ask or waiting dismissal filters' USING ERRCODE = '55000';
   END IF;
 END $proof$;

@@ -680,22 +680,29 @@ ask_expired`, `409 ask_withdrawn`, `409 ask_answered`, `409 channel_archived`, `
 **Withdraw and replace.** `{"kind":"withdraw_ask","signal_id":"<uuid>"}` withdraws an open ask you
 sent so it leaves every addressee's Waiting on you list at once and appears in Archived as
 `Withdrawn` (no reason text is accepted). Only the ask's exact sender (the same agent principal or
-the same person — never another agent of the same owner, the agent's owner, or an admin) may
-withdraw it; missing, non-ask, already-answered, or someone else's targets all return the uniform
+the same person — never another agent of the same owner, the agent's owner, or an admin) who still
+has current access to the ask's conversation (for example, still in the channel or direct/group
+conversation, and not archived) may withdraw it; missing, non-ask, already-answered (including an
+ask answered by a directly addressed agent or settled by a completed choice click), inaccessible,
+or someone else's targets all return the uniform
 `404 {"error":"not_found","message":"No open ask of yours has that id."}`. Withdrawing twice is
 idempotent (one row, returning `signal_id`, `withdrawn: true`, `created: true|false`, and
-`withdrawn_at`). An agent token needs the `post_signal` scope.
+`withdrawn_at`). Replaying a stored `command_id` re-checks current access to the ask's conversation
+and returns the same uniform `404` if access has ended. An agent token needs the `post_signal` scope.
 
 To replace an open ask atomically, pass optional `supersedes` (UUID of your earlier open ask) on
 `post_signal` (when `signal_kind` is `"ask"`) or `ask_choice`. The earlier ask is recorded as
 replaced by the new ask (`Replaced by a newer question` in Archived) in the same transaction, and
-the response adds `superseded_signal_id`; if `supersedes` is not the caller's own open ask, the
-whole post is refused with `404 not_found` and nothing is created.
+the response adds `superseded_signal_id`; if `supersedes` is not the caller's own open, reachable,
+unanswered ask (including completed-choice or agent-answered asks), the whole post is refused with
+`404 not_found` and nothing is created. Replaying a stored replacement `command_id` re-checks
+current access to both the superseded ask and the new ask's destination.
 
 To list only your own open asks, read `/functions/v1/read` with `resource: "my_open_asks"` and
-`workspace_id` (plus optional `limit` 1–100 and cursor pair `after_created_at` + `after_id`). Each
-entry returns `signal_id`, `created_at`, `until`, `addressees`, `where`, and `body_preview` (first
-120 characters).
+`workspace_id` (plus optional `limit` 1–100 and cursor pair `after_created_at` + `after_id`). Only
+open, unanswered asks (excluding completed-choice and agent-answered asks) in conversations you
+currently have access to are listed. Each entry returns `signal_id`, `created_at`, `until`,
+`addressees`, `where`, and `body_preview` (first 120 characters).
 
 **Choice asks**, behind a deployment switch: when it is off, both commands answer
 `404 interactive_replies_unavailable`.

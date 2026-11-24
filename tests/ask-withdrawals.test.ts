@@ -16,6 +16,8 @@ import {
   askWithdrawalReplayFields,
   isAskWithdrawalCommandKind,
   parseAskWithdrawalCommand,
+  reauthorizeAskWithdrawalRelease,
+  storedAskWithdrawalReplayTarget,
 } from "../supabase/functions/command/ask-withdrawals.js";
 import {
   HOSTED_TOOL_TABLE,
@@ -97,6 +99,101 @@ test("askWithdrawalReplayFields preserves only valid withdraw_ask and supersedes
     error: "not_found",
     message: "No open ask of yours has that id.",
   });
+});
+
+test("storedAskWithdrawalReplayTarget extracts bound old and new signal ids for replay reauthorization", () => {
+  // Standalone withdraw_ask
+  assert.deepEqual(
+    storedAskWithdrawalReplayTarget(
+      "withdraw_ask",
+      { signal_id: ASK_ID.toUpperCase() },
+      { signal_id: ASK_ID, withdrawn: true },
+    ),
+    { kind: "withdraw_ask", oldSignalId: ASK_ID, newSignalId: null },
+  );
+  // Mismatched command vs stored signal_id fails closed
+  assert.equal(
+    storedAskWithdrawalReplayTarget(
+      "withdraw_ask",
+      { signal_id: ASK_ID },
+      { signal_id: NEW_ASK_ID, withdrawn: true },
+    ),
+    null,
+  );
+  // post_signal replacement with supersedes
+  assert.deepEqual(
+    storedAskWithdrawalReplayTarget(
+      "post_signal",
+      { supersedes: ASK_ID.toUpperCase() },
+      { signal: { id: NEW_ASK_ID.toUpperCase() }, superseded_signal_id: ASK_ID },
+    ),
+    { kind: "replacement", oldSignalId: ASK_ID, newSignalId: NEW_ASK_ID },
+  );
+  // ask_choice replacement with supersedes
+  assert.deepEqual(
+    storedAskWithdrawalReplayTarget(
+      "ask_choice",
+      { supersedes: ASK_ID },
+      { signal: { id: NEW_ASK_ID }, superseded_signal_id: ASK_ID, choice_options: [] },
+    ),
+    { kind: "replacement", oldSignalId: ASK_ID, newSignalId: NEW_ASK_ID },
+  );
+  // Replacement with missing/malformed stored signal.id returns newSignalId: null so caller fails closed
+  assert.deepEqual(
+    storedAskWithdrawalReplayTarget(
+      "post_signal",
+      { supersedes: ASK_ID },
+      { superseded_signal_id: ASK_ID },
+    ),
+    { kind: "replacement", oldSignalId: ASK_ID, newSignalId: null },
+  );
+  // Ordinary non-superseding post_signal / ask_choice returns null
+  assert.equal(
+    storedAskWithdrawalReplayTarget("post_signal", {}, { signal: { id: NEW_ASK_ID } }),
+    null,
+  );
+  assert.equal(
+    storedAskWithdrawalReplayTarget("ask_choice", {}, { signal: { id: NEW_ASK_ID } }),
+    null,
+  );
+  // Unrelated command returns null
+  assert.equal(
+    storedAskWithdrawalReplayTarget("reraise_ask", { signal_id: ASK_ID }, { signal: { id: NEW_ASK_ID } }),
+    null,
+  );
+});
+
+test("reauthorizeAskWithdrawalRelease forwards explicit fresh vs replay deadline flag and fails closed", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  let nextAllowed = true;
+  const fakeTx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    calls.push({ sql: strings.join("?"), values });
+    return Promise.resolve([{ allowed: nextAllowed }]);
+  }) as unknown as Parameters<typeof reauthorizeAskWithdrawalRelease>[0];
+
+  // Fresh release passes requireOpenDeadline = true
+  const freshOk = await reauthorizeAskWithdrawalRelease(fakeTx, WS_ID, "agent", AGENT_ID, ASK_ID, NEW_ASK_ID, true);
+  assert.equal(freshOk, null);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /ask_withdrawal_release_allowed/);
+  assert.deepEqual(calls[0]!.values, [WS_ID, "agent", AGENT_ID, ASK_ID, NEW_ASK_ID, true]);
+
+  // Replay release passes requireOpenDeadline = false
+  const replayOk = await reauthorizeAskWithdrawalRelease(fakeTx, WS_ID, "user", OWNER_ID, ASK_ID, null, false);
+  assert.equal(replayOk, null);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1]!.values, [WS_ID, "user", OWNER_ID, ASK_ID, null, false]);
+
+  // Denied returns uniform 404 body
+  nextAllowed = false;
+  const denied = await reauthorizeAskWithdrawalRelease(fakeTx, WS_ID, "agent", AGENT_ID, ASK_ID, null, true);
+  assert.deepEqual(denied, { status: 404, body: ASK_WITHDRAWAL_NOT_FOUND_BODY });
+
+  // Invalid UUID fails closed without hitting SQL
+  const beforeInvalid = calls.length;
+  const invalid = await reauthorizeAskWithdrawalRelease(fakeTx, WS_ID, "agent", AGENT_ID, "not-a-uuid", null, true);
+  assert.deepEqual(invalid, { status: 404, body: ASK_WITHDRAWAL_NOT_FOUND_BODY });
+  assert.equal(calls.length, beforeInvalid);
 });
 
 test("local and hosted MCP tool tables expose withdraw, asks_open, and ask.supersedes with strict validation", () => {
