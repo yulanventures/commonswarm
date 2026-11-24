@@ -25,6 +25,7 @@ around this.
 - [Channels](#channels)
 - [Conversations](#conversations)
 - [Re-raising an ask, and choice asks](#re-raising-an-ask-and-choice-asks)
+- [Waiting on you dismissals](#waiting-on-you-dismissals)
 - [Reactions](#reactions)
 - [Workspace files](#workspace-files)
 - [Workspace memory](#workspace-memory)
@@ -696,6 +697,28 @@ ask. The answer posts a
 reply to the asker reading `Selected: <labels>` and/or `Other: <text>`, and returns
 `choice_answer` (`signal_id`, `option_id`, `option_ids`, `other_text`,
 `reply_signal_id`); `option_id` is the first chosen id, or `other` for a text-only answer.
+
+## Waiting on you dismissals
+
+A signed-in person may dismiss an item from their own Waiting on you list and restore it
+later. Both commands require a human access token (`HUMAN_ONLY_COMMANDS`; an agent token
+gets `403 forbidden`), use `workspace_id` and `stream: { "kind": "workspace" }`, and take
+the exact key set below (`supabase/functions/command/waiting-dismissals.ts`):
+
+| `command.kind` | fields |
+|---|---|
+| `dismiss_waiting_item` | `item_kind` (`"ask"`, `"todo"`, or `"review"`), `item_id` (UUID: signal id for `"ask"`, to-do id for `"todo"`, offer id for `"review"`) |
+| `restore_waiting_item` | `item_kind` (`"ask"`, `"todo"`, or `"review"`), `item_id` (UUID: signal id for `"ask"`, to-do id for `"todo"`, offer id for `"review"`) |
+
+A dismissal is strictly per person: it hides the item from that person's Waiting on you
+list (and shows it in their Archived view so they can restore it) without answering,
+closing, or changing anything for anyone else in the workspace. Unknown, ineligible, or
+inaccessible items all return the same uniform `404 {"error":"not_found","message":"Waiting item not found."}`.
+
+Both commands are idempotent: dismissing an already-dismissed item or restoring an item
+that is not dismissed succeeds with `status: "accepted"`, `item_kind`, `item_id`, and
+`dismissed`/`dismissed_at` or `restored`/`restored_at`. Replaying a `command_id` re-checks
+live Waiting eligibility and returns the same uniform `404` if eligibility has ended.
 
 ## Reactions
 

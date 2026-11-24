@@ -245,6 +245,15 @@ import {
   storedReviewCheckChannelId,
   storedReviewCheckId,
 } from "./review-checks.ts";
+import {
+  applyWaitingDismissalCommand,
+  isWaitingDismissalCommandKind,
+  parseWaitingDismissalCommand,
+  reauthorizeWaitingDismissalReplay,
+  WAITING_DISMISSAL_COMMAND_KINDS,
+  type WaitingDismissalCommand,
+  waitingDismissalReplayFields,
+} from "./waiting-dismissals.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
@@ -640,6 +649,7 @@ type ValidatedCommand =
   | MarkChannelReadCommand
   | ConversationCommand
   | ReviewCheckCommand
+  | WaitingDismissalCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -927,6 +937,12 @@ interface StoredResponse {
   signal_ids?: string[];
   observed_signal_ids?: string[];
   refused?: Array<{ signal_id: string; error: string }>;
+  /** Waiting on you dismissals: item kind, id, state, and timestamp. */
+  item_kind?: string;
+  item_id?: string;
+  dismissed?: boolean;
+  dismissed_at?: string;
+  restored_at?: string;
 }
 
 interface EventEnvelope {
@@ -1439,6 +1455,7 @@ const COMMAND_KINDS = [
   "mark_channel_read",
   ...CONVERSATION_COMMAND_KINDS,
   ...REVIEW_CHECK_COMMAND_KINDS,
+  ...WAITING_DISMISSAL_COMMAND_KINDS,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2369,6 +2386,10 @@ function validateCommand(
 
   if (isReviewCheckCommandKind(cmd.kind)) {
     return parseReviewCheckCommand(cmd);
+  }
+
+  if (isWaitingDismissalCommandKind(cmd.kind)) {
+    return parseWaitingDismissalCommand(cmd);
   }
 
   if (cmd.kind === SIGNALS_SEEN_KIND) {
@@ -4384,6 +4405,8 @@ function storedResponse(value: unknown): StoredResponse {
     ...conversationReplayFields(response),
     // Revision-bound review checks (C3): preserve review_check replay fields.
     ...reviewCheckReplayFields(response),
+    // Waiting on you per-person dismissals: preserve dismissal/restore replay fields.
+    ...waitingDismissalReplayFields(response),
   };
 }
 
@@ -16328,7 +16351,7 @@ class LocalAuditedRefused extends Error {
   }
 }
 class LocalCommandRefused extends Error {
-  constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
+  constructor(readonly result: HttpResult, readonly audit: Audit | null = null) { super('Local credential operation refused'); }
 }
 
 async function handleTransaction(
@@ -16345,12 +16368,14 @@ async function handleTransaction(
   let recoverSavedPending = false;
   let localCredentialDenied = false;
   let renewalSupersededAlert: { workspaceId: string; principalId: string } | null = null;
+  let refusedAudit: Audit | null = null;
   const timer = new CommandTimer();
   const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
     timer.attempt();
     recoverSavedPending = false;
     localCredentialDenied = false;
     renewalSupersededAlert = null;
+    refusedAudit = null;
     const captureRenewalSuperseded = (workspaceId: string, principalId: string) => {
       renewalSupersededAlert = { workspaceId, principalId };
     };
@@ -17585,6 +17610,25 @@ async function handleTransaction(
             if (reauthorizedCheck !== null) return reauthorizedCheck;
           }
         }
+        /* A stored waiting dismissal or restore replays only while the calling person still
+         * satisfies live Waiting item eligibility; otherwise return the uniform 404. Both
+         * regular retries and LedgerRace retries pass through this check, and swarm_read.audit_log
+         * excludes these command kinds so neither replay nor conflict leaks to other members. */
+        if (matches && isWaitingDismissalCommandKind(kind)) {
+          const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+          if (viewer === null) {
+            return { status: 403, body: { error: "forbidden" } };
+          }
+          const dismissalCmd = command as WaitingDismissalCommand;
+          const reauthorizedDismissal = await reauthorizeWaitingDismissalReplay(
+            tx,
+            route.workspaceId,
+            viewer,
+            dismissalCmd.item_kind,
+            dismissalCmd.item_id,
+          );
+          if (reauthorizedDismissal !== null) return reauthorizedDismissal;
+        }
         const replayedConversation = !matches
           ? undefined
           : isConversationCommandKind(kind)
@@ -17984,6 +18028,78 @@ async function handleTransaction(
         outcome: "accepted", detail: ignoredIdentity, hash,
         channelIds: outcome.audit_channel_ids,
       });
+      return { status: 200, body: { status: "accepted", ...response } };
+    }
+
+    if (isWaitingDismissalCommandKind(command.kind)) {
+      // Local agent tokens are refused earlier by the HUMAN_ONLY_COMMANDS gate before reaching
+      // this branch or its audit; this check defends in depth for any other non-human credential.
+      const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+      if (viewer === null) {
+        return { status: 403, body: { error: "forbidden" } };
+      }
+      const dismissalCmd = command as WaitingDismissalCommand;
+      const outcome = await applyWaitingDismissalCommand(
+        tx, route.workspaceId, viewer, dismissalCmd,
+      );
+      if (!outcome.ok) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
+          reason: outcome.reason, detail: ignoredIdentity, hash,
+        });
+        const refusal: HttpResult = {
+          status: outcome.status,
+          body: { error: outcome.error, message: outcome.message },
+        };
+        return outcome.status === 404 ? refusal : decided(refusal);
+      }
+      const response: StoredResponse = { ok: true, event_ids: [], ...outcome.response };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash,
+      });
+      // C1: Re-verify live item eligibility after the final fresh-write wait (receipt + audit).
+      // On refusal, throw LocalCommandRefused to roll back the dismissal mutation, receipt, and
+      // accepted audit row, then record the refusal audit outside the rolled-back transaction.
+      const finalRefusal = await reauthorizeWaitingDismissalReplay(
+        tx,
+        route.workspaceId,
+        viewer,
+        dismissalCmd.item_kind,
+        dismissalCmd.item_id,
+      );
+      if (finalRefusal !== null) {
+        throw new LocalCommandRefused(finalRefusal, {
+          auth,
+          commandKind: kind,
+          workspaceId: route.workspaceId,
+          streamId: route.streamId,
+          outcome: "authz",
+          reason: "waiting_item_not_found",
+          detail: ignoredIdentity,
+          hash,
+        });
+      }
       return { status: 200, body: { status: "accepted", ...response } };
     }
 
@@ -20266,7 +20382,10 @@ async function handleTransaction(
     if (error instanceof LocalCredentialDenied) return error.credentialInvalid
       ? {status:401,body:{error:'unauthenticated'}}
       : {status:403,body:{error:'forbidden'}};
-    if (error instanceof LocalCommandRefused) return error.result;
+    if (error instanceof LocalCommandRefused) {
+      refusedAudit = error.audit;
+      return error.result;
+    }
     if (error instanceof HouseholdContentServiceUpdating) {
       return { status: 503, headers: { "retry-after": "1" }, body: HouseholdContentServiceUpdating.body };
     }
@@ -20276,6 +20395,14 @@ async function handleTransaction(
   const slow = slowCommandLine({ commandKind: kind, knownKinds: SLOW_LOG_COMMAND_KINDS, timer, status: response.status,
     requestId: commandRequestIds.get(body) ?? crypto.randomUUID() });
   if (slow !== null) console.log(slow);
+  if (refusedAudit !== null) {
+    const auditToRecord = refusedAudit;
+    try {
+      await withBestEffortAlertTransaction((auditTx) => insertAudit(auditTx, auditToRecord));
+    } catch (auditError) {
+      console.error("rolled_back_refusal_audit_failed", safeError(auditError));
+    }
+  }
   if (localCredentialDenied && agentTokenHash !== null) {
     // Failure path only: discovery's RAISE aborted the refused transaction.
     await reportRevokedLocalCredential(withBestEffortAlertTransaction, agentTokenHash);

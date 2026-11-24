@@ -1,0 +1,991 @@
+/**
+ * Unit tests for single-account login binding (`session_id` claim pinning) on guarded
+ * `postCommand` calls (PR #724 C3) and silent retirement in `waiting-dismissal`.
+ *
+ * Exercises the real bundled `commonswarm.ts` (including `client()`, `cachedSession.client.auth.getSession()`,
+ * `client().auth.refreshSession()`, and `postCommand()`) with synthetic HTTP + localStorage,
+ * plus direct (non-VM) guarded acquisition, claim-reader, and controller tests — no browser required.
+ */
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { afterEach, test } from "node:test";
+import { createContext, runInContext } from "node:vm";
+import { build } from "esbuild";
+import ts from "typescript";
+import {
+  client as directClient,
+  configureMultiAccountForTesting,
+  postCommand as directPostCommand,
+  resetAccountManagerForTesting,
+} from "../src/lib/commonswarm.ts";
+import { decodeJwtClaims, sessionIdFromAccessToken } from "../src/lib/jwt-claims.ts";
+import { createWaitingDismissalController } from "../src/lib/waiting-dismissal.ts";
+
+const OWNER = "33333333-3333-4333-8333-333333333333";
+const WORKSPACE = "aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const STORAGE_KEY = "sb-api-auth-token";
+
+function makeJwt(claims: Record<string, unknown>, sig = "sig"): string {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  return `${header}.${payload}.${sig}`;
+}
+
+function makeUser(id = OWNER) {
+  return {
+    id,
+    aud: "authenticated",
+    role: "authenticated",
+    email: "owner@example.test",
+    app_metadata: {},
+    user_metadata: {},
+    created_at: "2026-11-01T00:00:00.000Z",
+  };
+}
+
+function makeSession(accessToken: string, options: { refreshToken?: string; expiresOffsetSec?: number; userId?: string } = {}) {
+  const user = makeUser(options.userId ?? OWNER);
+  return {
+    access_token: accessToken,
+    refresh_token: options.refreshToken ?? "refresh-1",
+    token_type: "bearer",
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) + (options.expiresOffsetSec ?? 3600),
+    user,
+  };
+}
+
+function makeMemoryStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    get length() { return map.size; },
+    clear() { map.clear(); },
+    key(index: number) { return [...map.keys()][index] ?? null; },
+    getItem(key: string) { return map.get(key) ?? null; },
+    setItem(key: string, value: string) { map.set(key, String(value)); },
+    removeItem(key: string) { map.delete(key); },
+  };
+}
+
+let cachedBundleText: string | null = null;
+async function loadCommonswarmBundle(): Promise<string> {
+  if (cachedBundleText) return cachedBundleText;
+  const bundle = await build({
+    entryPoints: [new URL("../src/lib/commonswarm.ts", import.meta.url).pathname],
+    bundle: true,
+    write: false,
+    platform: "browser",
+    format: "cjs",
+    define: {
+      "import.meta.env": JSON.stringify({
+        PUBLIC_SUPABASE_URL: "https://api.test.invalid",
+        PUBLIC_SUPABASE_ANON_KEY: "synthetic-public-key",
+      }),
+    },
+  });
+  cachedBundleText = bundle.outputFiles[0]!.text;
+  return cachedBundleText;
+}
+
+interface CommandCall {
+  command_id: string;
+  kind: string;
+  bearer: string;
+}
+
+const activeEnvs: Array<{ dispose: () => Promise<void> }> = [];
+
+async function createIsolatedClientEnv(handlers: {
+  initialStorageSession?: ReturnType<typeof makeSession> | null;
+  onRefresh?: (body: Record<string, unknown> | null) => Promise<Response> | Response;
+  onCommand?: (call: CommandCall, attemptIndex: number) => Promise<Response> | Response;
+}) {
+  const code = await loadCommonswarmBundle();
+  const storage = makeMemoryStorage();
+  if (handlers.initialStorageSession) {
+    storage.setItem(STORAGE_KEY, JSON.stringify(handlers.initialStorageSession));
+  }
+  const commandCalls: CommandCall[] = [];
+  let refreshCalls = 0;
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const req = new Request(input, init);
+    const url = new URL(req.url);
+    if (url.pathname === "/auth/v1/user") {
+      return Response.json(makeUser());
+    }
+    if (url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "refresh_token") {
+      refreshCalls += 1;
+      const body = await req.json().catch(() => null) as Record<string, unknown> | null;
+      if (handlers.onRefresh) return await handlers.onRefresh(body);
+      return Response.json({ error: "refresh_token_not_found", error_code: "refresh_token_not_found" }, { status: 400 });
+    }
+    if (url.pathname === "/functions/v1/command") {
+      const body = await req.json().catch(() => ({})) as { command_id?: unknown; command?: { kind?: unknown } };
+      const call: CommandCall = {
+        command_id: String(body.command_id ?? ""),
+        kind: String(body.command?.kind ?? ""),
+        bearer: req.headers.get("authorization") ?? "",
+      };
+      commandCalls.push(call);
+      if (handlers.onCommand) return await handlers.onCommand(call, commandCalls.length - 1);
+      return Response.json({ status: "accepted", ok: true, event_ids: [] });
+    }
+    return Response.json({ error: "unexpected_path", path: url.pathname }, { status: 404 });
+  };
+
+  const activeTimers = new Set<ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>();
+  const trackedSetTimeout: typeof setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const id = setTimeout(() => { activeTimers.delete(id); fn(...args); }, ms);
+    activeTimers.add(id);
+    return id;
+  }) as typeof setTimeout;
+  const trackedClearTimeout: typeof clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+    activeTimers.delete(id);
+    clearTimeout(id);
+  }) as typeof clearTimeout;
+  const trackedSetInterval: typeof setInterval = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const id = setInterval(fn, ms, ...args);
+    id.unref?.();
+    activeTimers.add(id);
+    return id;
+  }) as typeof setInterval;
+  const trackedClearInterval: typeof clearInterval = ((id: ReturnType<typeof setInterval>) => {
+    activeTimers.delete(id);
+    clearInterval(id);
+  }) as typeof clearInterval;
+
+  class StubWebSocket {
+    readyState = 3;
+    close() {}
+    send() {}
+  }
+
+  const listeners = new Map<string, Set<(event: unknown) => void>>();
+  const context = createContext({
+    module: { exports: {} },
+    fetch: fetcher,
+    AbortSignal,
+    AbortController,
+    setTimeout: trackedSetTimeout,
+    clearTimeout: trackedClearTimeout,
+    setInterval: trackedSetInterval,
+    clearInterval: trackedClearInterval,
+    WebSocket: StubWebSocket,
+    console,
+    Error,
+    URL,
+    URLSearchParams,
+    Headers,
+    Request,
+    Response,
+    TextEncoder,
+    TextDecoder,
+    atob,
+    btoa,
+    crypto,
+    localStorage: storage,
+    addEventListener: (type: string, fn: (event: unknown) => void) => {
+      let set = listeners.get(type);
+      if (!set) { set = new Set(); listeners.set(type, set); }
+      set.add(fn);
+    },
+    removeEventListener: (type: string, fn: (event: unknown) => void) => {
+      listeners.get(type)?.delete(fn);
+    },
+    window: undefined,
+    document: { querySelector: () => null },
+  });
+  runInContext(code, context);
+  const lib = context.module.exports as typeof import("../src/lib/commonswarm.js");
+  // Initialize the cached single-account Supabase client, as LiveDashboard does at boot.
+  const supa = lib.client();
+  assert.ok(supa, "client() initialized");
+  // Ensure SDK initial load completes before test actions begin.
+  await supa.auth.getSession();
+
+  const dispose = async () => {
+    try { await supa.auth.stopAutoRefresh(); } catch { /* ignore */ }
+    for (const id of activeTimers) {
+      clearTimeout(id as ReturnType<typeof setTimeout>);
+      clearInterval(id as ReturnType<typeof setInterval>);
+    }
+    activeTimers.clear();
+  };
+
+  const notifyStorageChanged = (key: string | null = STORAGE_KEY) => {
+    for (const fn of listeners.get("storage") ?? []) {
+      fn({ key, storageArea: storage });
+    }
+  };
+
+  const env = { lib, supa, storage, commandCalls, getRefreshCalls: () => refreshCalls, notifyStorageChanged, dispose };
+  activeEnvs.push(env);
+  return env;
+}
+
+afterEach(async () => {
+  while (activeEnvs.length > 0) {
+    await activeEnvs.pop()!.dispose();
+  }
+});
+
+test("JWT claim reader: decodes valid session_id and rejects malformed or missing claims as unknown (null)", () => {
+  const valid = makeJwt({ sub: OWNER, session_id: "sess-alpha-1", user_metadata: { name: "Renée 日本" } });
+  assert.equal(decodeJwtClaims(valid)?.session_id, "sess-alpha-1");
+  assert.equal(sessionIdFromAccessToken(valid), "sess-alpha-1");
+
+  // Missing or invalid session_id claim values.
+  assert.equal(sessionIdFromAccessToken(makeJwt({ sub: OWNER })), null);
+  assert.equal(sessionIdFromAccessToken(makeJwt({ sub: OWNER, session_id: "" })), null);
+  assert.equal(sessionIdFromAccessToken(makeJwt({ sub: OWNER, session_id: "   " })), null);
+  assert.equal(sessionIdFromAccessToken(makeJwt({ sub: OWNER, session_id: 42 })), null);
+  assert.equal(sessionIdFromAccessToken(makeJwt({ sub: OWNER, session_id: null })), null);
+  assert.equal(sessionIdFromAccessToken(makeJwt({ sub: OWNER, session_id: { id: "x" } })), null);
+
+  // Malformed tokens.
+  for (const bad of [
+    "",
+    "synthetic-human",
+    "only.two",
+    "a.b.c.d",
+    "hdr..sig",
+    "hdr.!!!notbase64!!!.sig",
+    "hdr.abcde.sig", // length % 4 === 1
+    `hdr.${Buffer.from("not-json").toString("base64url")}.sig`,
+    `hdr.${Buffer.from("[1,2,3]").toString("base64url")}.sig`,
+    `hdr.${Buffer.from('"just-a-string"').toString("base64url")}.sig`,
+    `hdr.${Buffer.from("null").toString("base64url")}.sig`,
+  ]) {
+    assert.equal(decodeJwtClaims(bad), null, `decodeJwtClaims(${JSON.stringify(bad)})`);
+    assert.equal(sessionIdFromAccessToken(bad), null, `sessionIdFromAccessToken(${JSON.stringify(bad)})`);
+  }
+  assert.equal(sessionIdFromAccessToken(null), null);
+  assert.equal(sessionIdFromAccessToken(undefined), null);
+});
+
+test("guarded postCommand retires silently with 0 dispatches on same-person different-login session after acquisition", async () => {
+  const login1Jwt = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 1 });
+  const login2Jwt = makeJwt({ sub: OWNER, session_id: "sess-login-2", rev: 1 });
+  const login1Session = makeSession(login1Jwt);
+  const login2Session = makeSession(login2Jwt, { refreshToken: "refresh-login-2" });
+
+  const env = await createIsolatedClientEnv({ initialStorageSession: login1Session });
+  // Replace storage with a NEW login for the SAME user id (different session_id).
+  env.storage.setItem(STORAGE_KEY, JSON.stringify(login2Session));
+  env.notifyStorageChanged();
+
+  const res = await env.lib.postCommand(
+    login1Session as never,
+    "cmd-swap-1",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(res.status, 0);
+  assert.equal(res.body.error, "operation_retired");
+  assert.equal(env.commandCalls.length, 0, "must dispatch zero commands under replacement login");
+});
+
+test("guarded postCommand retires silently with 0 dispatches when getSession returns empty session (never falls back)", async () => {
+  const login1Jwt = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 1 });
+  const login1Session = makeSession(login1Jwt);
+
+  const env = await createIsolatedClientEnv({ initialStorageSession: login1Session });
+  // Empty storage without firing SIGNED_OUT.
+  env.storage.removeItem(STORAGE_KEY);
+  env.notifyStorageChanged();
+
+  const res = await env.lib.postCommand(
+    login1Session as never,
+    "cmd-empty-1",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(res.status, 0);
+  assert.equal(res.body.error, "operation_retired");
+  assert.equal(env.commandCalls.length, 0, "must never fall back to older supplied bearer");
+});
+
+test("guarded postCommand retires silently with 0 dispatches on acquisition error or unreadable session_id", async () => {
+  // 1a. Expired session whose refresh returns a terminal error (acquisition returns { error }).
+  const expiredJwt = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: "expired" });
+  const expiredSession = makeSession(expiredJwt, { expiresOffsetSec: -60 });
+  const envErr = await createIsolatedClientEnv({
+    initialStorageSession: expiredSession,
+    onRefresh: () => Response.json(
+      { code: "refresh_token_not_found", error_code: "refresh_token_not_found", msg: "Invalid Refresh Token" },
+      { status: 400, headers: { "x-supabase-api-version": "2024-01-01" } },
+    ),
+  });
+  const resErr = await envErr.lib.postCommand(
+    expiredSession as never,
+    "cmd-acq-err",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(resErr.status, 0);
+  assert.equal(resErr.body.error, "operation_retired");
+  assert.equal(envErr.commandCalls.length, 0, "acquisition error must retire without dispatching");
+
+  // 1b. getSession rejects / throws (inconclusive acquisition) -> retires without dispatching.
+  const validForThrow = makeSession(makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: "throw" }));
+  const envThrow = await createIsolatedClientEnv({ initialStorageSession: validForThrow });
+  envThrow.supa.auth.getSession = () => Promise.reject(new Error("lock interrupted"));
+  const resThrow = await envThrow.lib.postCommand(
+    validForThrow as never,
+    "cmd-acq-throw",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(resThrow.status, 0);
+  assert.equal(resThrow.body.error, "operation_retired");
+  assert.equal(envThrow.commandCalls.length, 0, "thrown acquisition error must retire without dispatching");
+
+  // 2. Initiating token without a readable session_id.
+  const noSidSession = makeSession(makeJwt({ sub: OWNER }));
+  const envNoSid = await createIsolatedClientEnv({ initialStorageSession: noSidSession });
+  const resNoSid = await envNoSid.lib.postCommand(
+    noSidSession as never,
+    "cmd-no-sid",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(resNoSid.status, 0);
+  assert.equal(resNoSid.body.error, "operation_retired");
+  assert.equal(envNoSid.commandCalls.length, 0);
+
+  // 3. Acquired token without a readable session_id.
+  const validJwt = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 1 });
+  const validSession = makeSession(validJwt);
+  const envBadAcq = await createIsolatedClientEnv({ initialStorageSession: validSession });
+  envBadAcq.storage.setItem(STORAGE_KEY, JSON.stringify(makeSession("malformed-token", { refreshToken: "refresh-2" })));
+  envBadAcq.notifyStorageChanged();
+  const resBadAcq = await envBadAcq.lib.postCommand(
+    validSession as never,
+    "cmd-bad-acq",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(resBadAcq.status, 0);
+  assert.equal(resBadAcq.body.error, "operation_retired");
+  assert.equal(envBadAcq.commandCalls.length, 0);
+});
+
+test("guarded postCommand accepts same-login token rotation and sends once with the new bearer", async () => {
+  const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 1 });
+  const login1Rotated = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 2 });
+  const initialSession = makeSession(login1Initial);
+  const rotatedSession = makeSession(login1Rotated, { refreshToken: "refresh-2" });
+
+  const env = await createIsolatedClientEnv({ initialStorageSession: initialSession });
+  env.storage.setItem(STORAGE_KEY, JSON.stringify(rotatedSession));
+  env.notifyStorageChanged();
+
+  const res = await env.lib.postCommand(
+    initialSession as never,
+    "cmd-rotate-1",
+    { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+    { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    undefined,
+    { isAlive: () => true },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, "accepted");
+  assert.equal(env.commandCalls.length, 1);
+  assert.equal(env.commandCalls[0]!.command_id, "cmd-rotate-1");
+  assert.equal(env.commandCalls[0]!.bearer, `Bearer ${login1Rotated}`);
+});
+
+test("guarded postCommand 401 recovery: different login sends no retry; same-login refresh retries once with same command_id", async () => {
+  const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 1 });
+  const login1Refreshed = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 2 });
+  const login2Jwt = makeJwt({ sub: OWNER, session_id: "sess-login-2", rev: 1 });
+
+  // A. 401 -> storage swapped to same-person different-login during attempt 0 -> getSession yields login-2 -> NO retry.
+  {
+    const initialSession = makeSession(login1Initial);
+    const login2Session = makeSession(login2Jwt, { refreshToken: "refresh-login-2" });
+    let envRef: Awaited<ReturnType<typeof createIsolatedClientEnv>>;
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: initialSession,
+      onCommand: () => {
+        envRef.storage.setItem(STORAGE_KEY, JSON.stringify(login2Session));
+        envRef.notifyStorageChanged();
+        return Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 });
+      },
+    });
+    envRef = env;
+
+    const res = await env.lib.postCommand(
+      initialSession as never,
+      "cmd-401-swap-get",
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(res.status, 0);
+    assert.equal(res.body.error, "operation_retired");
+    assert.equal(env.commandCalls.length, 1, "must NOT retry when 401 getSession yields different login");
+  }
+
+  // B. 401 -> refreshSession returns same-person different-login -> NO retry.
+  {
+    const initialSession = makeSession(login1Initial);
+    const login2Session = makeSession(login2Jwt, { refreshToken: "refresh-login-2" });
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: initialSession,
+      onRefresh: () => Response.json(login2Session),
+      onCommand: () => Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 }),
+    });
+
+    const res = await env.lib.postCommand(
+      initialSession as never,
+      "cmd-401-swap-refresh",
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(res.status, 0);
+    assert.equal(res.body.error, "operation_retired");
+    assert.equal(env.commandCalls.length, 1, "must NOT retry when 401 refreshSession yields different login");
+  }
+
+  // C. 401 -> same-login refresh returns new bearer with same session_id -> retries ONCE with exact same command_id.
+  {
+    const initialSession = makeSession(login1Initial);
+    const refreshedSession = makeSession(login1Refreshed, { refreshToken: "refresh-2" });
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: initialSession,
+      onRefresh: () => Response.json(refreshedSession),
+      onCommand: (_call, attemptIndex) =>
+        attemptIndex === 0
+          ? Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 })
+          : Response.json({ status: "accepted", ok: true, restored: true }),
+    });
+
+    const res = await env.lib.postCommand(
+      initialSession as never,
+      "cmd-401-same-login",
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, "accepted");
+    assert.equal(env.commandCalls.length, 2);
+    assert.equal(env.commandCalls[0]!.command_id, "cmd-401-same-login");
+    assert.equal(env.commandCalls[1]!.command_id, "cmd-401-same-login");
+    assert.equal(env.commandCalls[0]!.bearer, `Bearer ${login1Initial}`);
+    assert.equal(env.commandCalls[1]!.bearer, `Bearer ${login1Refreshed}`);
+  }
+});
+
+test("unguarded postCommand preserves exact existing behavior across all cases", async () => {
+  const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 1 });
+  const login1Refreshed = makeJwt({ sub: OWNER, session_id: "sess-login-1", rev: 2 });
+  const login2Jwt = makeJwt({ sub: OWNER, session_id: "sess-login-2", rev: 1 });
+
+  // 1. Unguarded call with non-JWT token and empty storage still dispatches with supplied bearer.
+  {
+    const plainSession = makeSession("synthetic-human");
+    const env = await createIsolatedClientEnv({ initialStorageSession: null });
+    const res = await env.lib.postCommand(
+      plainSession as never,
+      "cmd-unguarded-1",
+      { kind: "rename_workspace", name: "Home" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(env.commandCalls.length, 1);
+    assert.equal(env.commandCalls[0]!.bearer, "Bearer synthetic-human");
+  }
+
+  // 2. Unguarded call on 401 with empty session still throws SessionExpired (not operation_retired).
+  {
+    const initialSession = makeSession(login1Initial);
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: null,
+      onCommand: () => Response.json({ error: "unauthenticated" }, { status: 401 }),
+    });
+    await assert.rejects(
+      () => env.lib.postCommand(
+        initialSession as never,
+        "cmd-unguarded-empty-401",
+        { kind: "rename_workspace", name: "Home" },
+        { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      ),
+      (err: unknown) => (err as Error)?.name === "SessionExpired",
+    );
+    assert.equal(env.commandCalls.length, 1);
+  }
+
+  // 3. Unguarded call on 401 with refresh error still throws AuthRecoveryRequired.
+  {
+    const initialSession = makeSession(login1Initial);
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: initialSession,
+      onRefresh: () => Response.json(
+        { code: "refresh_token_not_found", error_code: "refresh_token_not_found", msg: "Invalid Refresh Token" },
+        { status: 400, headers: { "x-supabase-api-version": "2024-01-01" } },
+      ),
+      onCommand: () => Response.json({ error: "unauthenticated" }, { status: 401 }),
+    });
+    await assert.rejects(
+      () => env.lib.postCommand(
+        initialSession as never,
+        "cmd-unguarded-err-401",
+        { kind: "rename_workspace", name: "Home" },
+        { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      ),
+      (err: unknown) => (err as Error)?.name === "AuthRecoveryRequired",
+    );
+    assert.equal(env.commandCalls.length, 1);
+  }
+
+  // 4. Unguarded call on 401 with same-user replacement login still retries as before.
+  {
+    const initialSession = makeSession(login1Initial);
+    const login2Session = makeSession(login2Jwt, { refreshToken: "refresh-login-2" });
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: login2Session,
+      onCommand: (_call, attemptIndex) =>
+        attemptIndex === 0
+          ? Response.json({ error: "unauthenticated" }, { status: 401 })
+          : Response.json({ status: "accepted", ok: true }),
+    });
+    const res = await env.lib.postCommand(
+      initialSession as never,
+      "cmd-unguarded-swap-401",
+      { kind: "rename_workspace", name: "Home" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(env.commandCalls.length, 2);
+    assert.equal(env.commandCalls[1]!.command_id, "cmd-unguarded-swap-401");
+    assert.equal(env.commandCalls[1]!.bearer, `Bearer ${login2Jwt}`);
+  }
+
+  // 5. Unguarded call on 401 with same-login refresh retries once with same command_id.
+  {
+    const initialSession = makeSession(login1Initial);
+    const refreshedSession = makeSession(login1Refreshed, { refreshToken: "refresh-2" });
+    const env = await createIsolatedClientEnv({
+      initialStorageSession: initialSession,
+      onRefresh: () => Response.json(refreshedSession),
+      onCommand: (_call, attemptIndex) =>
+        attemptIndex === 0
+          ? Response.json({ error: "unauthenticated" }, { status: 401 })
+          : Response.json({ status: "accepted", ok: true }),
+    });
+    const res = await env.lib.postCommand(
+      initialSession as never,
+      "cmd-unguarded-refresh-401",
+      { kind: "rename_workspace", name: "Home" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(env.commandCalls.length, 2);
+    assert.equal(env.commandCalls[1]!.command_id, "cmd-unguarded-refresh-401");
+    assert.equal(env.commandCalls[1]!.bearer, `Bearer ${login1Refreshed}`);
+  }
+});
+
+test("waiting-dismissal controller clears pending indicator on still-owned operation_retired and does nothing on already-retired settlement", async () => {
+  const retired = { ok: false as const, status: 0, error: "operation_retired", message: "Action cancelled." };
+  let renders = 0;
+  let reloads = 0;
+  let invalidations = 0;
+  let errors = 0;
+  const ctrl = createWaitingDismissalController({
+    sendDismiss: async () => retired,
+    sendRestore: async () => retired,
+    isAlive: () => true,
+    removeCardFromClient: () => {},
+    reloadWaiting: () => { reloads += 1; },
+    invalidateArchived: () => { invalidations += 1; },
+    setCardError: () => { errors += 1; },
+    setStatusError: () => { errors += 1; },
+    setArchivedError: () => { errors += 1; },
+    clearArchivedError: () => {},
+    render: () => { renders += 1; },
+  });
+
+  // Still-owned Dismiss returns operation_retired -> clears own pending row visually, zero error/reload/invalidation.
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: "ask-1", cardId: "ask-1",
+    workspaceId: WORKSPACE, channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey: `${WORKSPACE}:general`, scope: "workspace",
+  });
+  assert.equal(renders, 2, "optimistic render + pending-indicator clear render");
+  assert.equal(reloads, 0);
+  assert.equal(invalidations, 0);
+  assert.equal(errors, 0);
+  assert.equal(ctrl.has("ask:ask-1"), false);
+
+  // Still-owned Archived Restore returns operation_retired -> clears own Restoring… indicator, zero error/reload/invalidation.
+  renders = 0;
+  await ctrl.restoreArchived({
+    itemKey: "ask:ask-2", kind: "ask", id: "ask-2", todoId: null, askKind: "choice",
+    workspaceId: WORKSPACE, workspaceName: "Home", title: "Question?", from: null,
+    outcomeKind: "dismissed", outcomeText: "Dismissed", archivedAt: "2026-11-23T12:00:00Z",
+    when: "now", answeredByName: null, placement: "general", channelId: null,
+    conversationId: null, channelLabel: "#general", href: null,
+  });
+  assert.equal(renders, 2, "initial restoring render + pending-indicator clear render");
+  assert.equal(reloads, 0);
+  assert.equal(invalidations, 0);
+  assert.equal(errors, 0);
+  assert.equal(ctrl.isArchivedRestoring("ask:ask-2"), false);
+});
+
+test("LiveDashboard waitingActionGuard and queueAuthReload retire Waiting actions on same-user different-login SIGNED_IN without SIGNED_OUT", async () => {
+  const astro = await readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const script = [...astro.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
+    .map(m => m[1]!)
+    .sort((a, b) => b.length - a.length)[0]!;
+  const sf = ts.createSourceFile("LiveDashboard.ts", script, ts.ScriptTarget.Latest, true);
+  const want = new Set(["authLoginIdFor", "waitingActionGuard", "queueAuthReload"]);
+  const chunks: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name) && want.has(decl.name.text)) {
+          chunks.push(node.getText(sf));
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  assert.equal(chunks.length, 3, "extracted authLoginIdFor, waitingActionGuard, and queueAuthReload");
+  const transpiled = ts.transpileModule(chunks.join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+
+  const login1Initial = makeSession(makeJwt({ sub: OWNER, session_id: "sess-1", rev: 1 }));
+  const login1Rotated = makeSession(makeJwt({ sub: OWNER, session_id: "sess-1", rev: 2 }));
+  const login2SameUser = makeSession(makeJwt({ sub: OWNER, session_id: "sess-2", rev: 1 }));
+
+  let resets = 0;
+  let queuedBoots = 0;
+  const ctx = createContext({
+    sessionIdFromAccessToken,
+    isMultiAccountEnabled: () => false,
+    window: { setTimeout: (fn: () => void) => { queuedBoots += 1; void fn; return 1; } },
+    resetWorkspaceSessionState: () => {
+      resets += 1;
+      runInContext("waitingAuthGeneration += 1; waitingGeneration += 1;", ctx);
+    },
+    runBoot: () => {},
+  });
+  runInContext(`
+    let sampleMode = false;
+    let waitingAuthGeneration = 0;
+    let waitingGeneration = 0;
+    let renderedAuthUserId = ${JSON.stringify(OWNER)};
+    let renderedAuthLoginId = "sess-1";
+    let renderedAuthViewGen = -1;
+    let requestVersion = 0;
+    let authReloadQueued = false;
+    let authRecoveryActive = false;
+    let session = ${JSON.stringify(login1Initial)};
+  `, ctx);
+  runInContext(transpiled, ctx);
+
+  runInContext("const guard = waitingActionGuard(renderedAuthUserId, waitingAuthGeneration);", ctx);
+  assert.equal(runInContext("guard()", ctx), true, "guard starts alive for login 1");
+
+  // Same-login token rotation (same user.id, same session_id): guard stays alive and queueAuthReload does not reset.
+  runInContext(`session = ${JSON.stringify(login1Rotated)}; queueAuthReload(session, false, false);`, ctx);
+  assert.equal(runInContext("guard()", ctx), true, "same-login rotation keeps guard alive");
+  assert.equal(resets, 0);
+  assert.equal(queuedBoots, 0);
+
+  // Same-user SIGNED_IN with a DIFFERENT session_id and NO SIGNED_OUT (signedOut = false):
+  // synchronously retires guard, bumps waitingAuthGeneration & waitingGeneration, and queues reload.
+  runInContext(`queueAuthReload(${JSON.stringify(login2SameUser)}, false, false);`, ctx);
+  assert.equal(runInContext("guard()", ctx), false, "same-user different-login SIGNED_IN retires guard immediately");
+  assert.equal(runInContext("renderedAuthLoginId", ctx), "sess-2");
+  assert.equal(resets, 1, "resetWorkspaceSessionState ran synchronously");
+  assert.equal(runInContext("waitingAuthGeneration", ctx), 1);
+  assert.equal(runInContext("waitingGeneration", ctx), 1);
+  assert.equal(queuedBoots, 1);
+});
+
+test("LiveDashboard sendWaitingPanelChoice and sendWaitingPlainAsk enforce attempt ownership on overlap and clear pending indicator on still-owned operation_retired", async () => {
+  const astro = await readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const script = [...astro.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
+    .map(m => m[1]!)
+    .sort((a, b) => b.length - a.length)[0]!;
+  const sf = ts.createSourceFile("LiveDashboard.ts", script, ts.ScriptTarget.Latest, true);
+  const want = new Set(["sendWaitingPanelChoice", "sendWaitingPlainAsk"]);
+  const chunks: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name) && want.has(decl.name.text)) {
+          chunks.push(node.getText(sf));
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  assert.equal(chunks.length, 2, "extracted sendWaitingPanelChoice and sendWaitingPlainAsk");
+  const transpiled = ts.transpileModule(chunks.join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+
+  const choiceResolvers: Array<(v: unknown) => void> = [];
+  const plainResolvers: Array<(v: unknown) => void> = [];
+  let choiceDispatches = 0;
+  let plainDispatches = 0;
+  let renders = 0;
+  let refreshes = 0;
+  let seq = 0;
+
+  const ctx = createContext({
+    Map,
+    Set,
+    Array,
+    CHOICE_ANSWER_FAILED: "Could not send.",
+    isMultiAccountEnabled: () => false,
+    homeViewerId: () => OWNER,
+    one: () => null,
+    uuid: () => `cmd-${++seq}`,
+    newWaitingAttemptId: () => ++seq,
+    choiceDraftKey: (ws: string, id: string) => `${ws}:${id}`,
+    readableError: () => "Error",
+    renderWaitingPanelView: () => { renders += 1; },
+    showWaitingSent: () => {},
+    showWaitingStatus: () => {},
+    renderHomeRail: () => {},
+    renderFeed: () => {},
+    syncWaitingButtons: () => {},
+    invalidateWaitingArchived: () => {},
+    scheduleWaitingRefresh: () => { refreshes += 1; },
+    answerChoice: () => {
+      choiceDispatches += 1;
+      return new Promise((resolve) => { choiceResolvers.push(resolve); });
+    },
+    answerPlainAsk: () => {
+      plainDispatches += 1;
+      return new Promise((resolve) => { plainResolvers.push(resolve); });
+    },
+  });
+
+  runInContext(`
+    let sampleMode = false;
+    let renderedAuthUserId = ${JSON.stringify(OWNER)};
+    let waitingAuthGeneration = 0;
+    let activeWorkspaceId = ${JSON.stringify(WORKSPACE)};
+    let session = { user: { id: ${JSON.stringify(OWNER)} }, access_token: "tok-1" };
+    const workspaces = [{ id: ${JSON.stringify(WORKSPACE)} }];
+    const waitingPanelTickets = new Map();
+    const waitingPanelErrors = new Map();
+    const waitingPanelLastSubmissions = new Map();
+    const waitingPanelAsks = new Map([[${JSON.stringify(WORKSPACE)}, [{ id: "ask-1" }]]]);
+    const waitingPlainTickets = new Map();
+    const waitingPlainErrors = new Map();
+    const waitingPlainDrafts = new Map();
+    const waitingPlainLastSubmissions = new Map();
+    const waitingPanelPlainAsks = new Map([[${JSON.stringify(WORKSPACE)}, [{ id: "plain-1" }]]]);
+    const choiceDrafts = new Map();
+    const choiceRows = new Map();
+    const homeOverviewCounts = new Map([[${JSON.stringify(WORKSPACE)}, 2]]);
+    const waitingPanelMod = null;
+    const waitingSurface = null;
+    const waitingActionGuard = (viewer, authGen) => () =>
+      !sampleMode && renderedAuthUserId === viewer && waitingAuthGeneration === authGen;
+  `, ctx);
+  runInContext(transpiled, ctx);
+
+  // 1. Choice ask overlap: A starts -> login replaces (tickets cleared, authGen bumped) -> B starts for same ask-1 ->
+  //    A settles with error/retired -> B's ticket remains pending, zero error, zero extra render/refresh.
+  const choiceItem = `{ id: "ask-1", workspaceId: ${JSON.stringify(WORKSPACE)}, choices: { multi: false } }`;
+  const choiceSub = `{ optionIds: ["yes"], otherText: null }`;
+  const pChoiceA = runInContext(`sendWaitingPanelChoice(${choiceItem}, ${choiceSub})`, ctx) as Promise<void>;
+  assert.equal(choiceDispatches, 1);
+  runInContext("waitingAuthGeneration += 1; waitingPanelTickets.clear();", ctx);
+  const pChoiceB = runInContext(`sendWaitingPanelChoice(${choiceItem}, ${choiceSub})`, ctx) as Promise<void>;
+  assert.equal(choiceDispatches, 2);
+  const rendersBeforeChoiceA = renders;
+  choiceResolvers[0]!({ ok: false, status: 500, error: "server_error", message: "Stale choice error" });
+  await pChoiceA;
+  assert.equal(runInContext('waitingPanelTickets.has("ask-1")', ctx), true, "B's choice ticket must remain pending");
+  assert.equal(runInContext('waitingPanelErrors.has("ask-1")', ctx), false, "A must not set stale choice error");
+  assert.equal(renders, rendersBeforeChoiceA, "A must not repaint over B");
+  assert.equal(refreshes, 0);
+
+  // Still-owned cancelled choice attempt B settles with operation_retired -> clears own ticket & renders pending clear, no error/refresh.
+  choiceResolvers[1]!({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await pChoiceB;
+  assert.equal(runInContext('waitingPanelTickets.has("ask-1")', ctx), false, "still-owned cancelled choice clears its ticket");
+  assert.equal(runInContext('waitingPanelErrors.has("ask-1")', ctx), false, "still-owned cancelled choice sets no error");
+  assert.equal(renders, rendersBeforeChoiceA + 1, "still-owned cancelled choice clears its pending indicator");
+  assert.equal(refreshes, 0, "still-owned cancelled choice triggers no data refresh");
+
+  // 2. Plain ask overlap + still-owned cancelled plain ask.
+  const plainItem = `{ id: "plain-1", workspaceId: ${JSON.stringify(WORKSPACE)} }`;
+  const pPlainA = runInContext(`sendWaitingPlainAsk(${plainItem}, "Reply A", "answer")`, ctx) as Promise<void>;
+  assert.equal(plainDispatches, 1);
+  runInContext("waitingAuthGeneration += 1; waitingPlainTickets.clear();", ctx);
+  const pPlainB = runInContext(`sendWaitingPlainAsk(${plainItem}, "Reply B", "answer")`, ctx) as Promise<void>;
+  assert.equal(plainDispatches, 2);
+  const rendersBeforePlainA = renders;
+  plainResolvers[0]!({ ok: false, status: 500, error: "server_error", message: "Stale plain error" });
+  await pPlainA;
+  assert.equal(runInContext('waitingPlainTickets.has("plain-1")', ctx), true, "B's plain ticket must remain pending");
+  assert.equal(runInContext('waitingPlainErrors.has("plain-1")', ctx), false, "A must not set stale plain error");
+  assert.equal(renders, rendersBeforePlainA, "A must not repaint over B");
+  assert.equal(refreshes, 0);
+
+  plainResolvers[1]!({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await pPlainB;
+  assert.equal(runInContext('waitingPlainTickets.has("plain-1")', ctx), false, "still-owned cancelled plain ask clears its ticket");
+  assert.equal(runInContext('waitingPlainErrors.has("plain-1")', ctx), false, "still-owned cancelled plain ask sets no error");
+  assert.equal(renders, rendersBeforePlainA + 1, "still-owned cancelled plain ask clears its pending indicator");
+  assert.equal(refreshes, 0, "still-owned cancelled plain ask triggers no data refresh");
+});
+
+test("direct (non-VM) guarded postCommand retires with zero POSTs when no client exists without creating one, and verifies via existing cachedSession.client", async () => {
+  const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 1 });
+  const login1Rotated = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 2 });
+  const login2Other = makeJwt({ sub: OWNER, session_id: "sess-direct-2", rev: 1 });
+  const initialSession = makeSession(login1Initial);
+  const rotatedSession = makeSession(login1Rotated, { refreshToken: "refresh-direct-2" });
+  const otherLoginSession = makeSession(login2Other, { refreshToken: "refresh-direct-other" });
+
+  const sentBearers: string[] = [];
+  const origFetch = globalThis.fetch;
+  configureMultiAccountForTesting({
+    deployment: { url: "https://no-client-sentinel.test.invalid", anonKey: "sentinel-public-key" },
+  });
+  globalThis.fetch = (async (input, init) => {
+    const req = new Request(input, init);
+    sentBearers.push(req.headers.get("authorization") ?? "");
+    return Response.json({ status: "accepted", ok: true, event_ids: [] });
+  }) as typeof fetch;
+
+  let initializedClient: ReturnType<typeof directClient> = null;
+  let origGetSession: NonNullable<ReturnType<typeof directClient>>["auth"]["getSession"] | null = null;
+  try {
+    // 1. Before client() is ever created, guarded postCommand retires with operation_retired, zero POSTs, and does not create a client.
+    const beforeClient = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-no-client",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(beforeClient.status, 0);
+    assert.equal(beforeClient.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 0, "guarded postCommand must dispatch zero POSTs when no authoritative client exists");
+
+    // 2. Once client() exists (real cachedSession.client), guarded postCommand calls its auth.getSession().
+    // Changing deployment first proves step 1 did not create and cache a client on the sentinel URL.
+    configureMultiAccountForTesting({
+      deployment: { url: "https://api.test.invalid", anonKey: "synthetic-public-key" },
+    });
+    initializedClient = directClient();
+    assert.ok(initializedClient, "direct client() initialized");
+    assert.equal(
+      (initializedClient as unknown as { supabaseUrl?: string }).supabaseUrl,
+      "https://api.test.invalid",
+      "step 1 must not have created cachedSession.client",
+    );
+    origGetSession = initializedClient.auth.getSession.bind(initializedClient.auth);
+
+    let fakeSession = rotatedSession;
+    let getSessionCalls = 0;
+    initializedClient.auth.getSession = (async () => {
+      getSessionCalls += 1;
+      return { data: { session: fakeSession as never }, error: null };
+    }) as typeof initializedClient.auth.getSession;
+
+    const rotatedRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-rotated",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 1, "guarded acquisition must call cachedSession.client.auth.getSession()");
+    assert.equal(rotatedRes.status, 200);
+    assert.deepEqual(sentBearers, [`Bearer ${login1Rotated}`]);
+
+    // 3. Different session_id from cachedSession.client.auth.getSession() retires silently with 0 dispatches.
+    fakeSession = otherLoginSession;
+    const swappedRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-swapped",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 2);
+    assert.equal(swappedRes.status, 0);
+    assert.equal(swappedRes.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 1, "must not dispatch when direct client returns a different login");
+
+    // 4. Empty session from shared-session acquisition retires without falling back to the supplied token.
+    fakeSession = null as never;
+    const emptyRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-empty",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 3);
+    assert.equal(emptyRes.status, 0);
+    assert.equal(emptyRes.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 1, "must never fall back to supplied token when shared session returns null");
+
+    // 5. Acquisition error or throw retires without falling back to the supplied token.
+    initializedClient.auth.getSession = (async () => {
+      getSessionCalls += 1;
+      return { data: { session: null }, error: new Error("storage_failed") as never };
+    }) as typeof initializedClient.auth.getSession;
+    const errRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-err",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 4);
+    assert.equal(errRes.status, 0);
+    assert.equal(errRes.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 1, "must never fall back to supplied token when shared session errors");
+  } finally {
+    if (initializedClient && origGetSession) {
+      initializedClient.auth.getSession = origGetSession;
+      try { await initializedClient.auth.stopAutoRefresh(); } catch { /* ignore */ }
+    }
+    globalThis.fetch = origFetch;
+    resetAccountManagerForTesting();
+  }
+});

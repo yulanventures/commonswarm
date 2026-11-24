@@ -28,6 +28,7 @@ export interface WaitingSurveyVM {
   skipped: ReadonlySet<string>;
   errors: ReadonlyMap<string, string>;
   sending: boolean;
+  dismissedNotice?: { key: string; pendingUndo?: true } | null;
 }
 
 export interface WaitingSurveyHandlers {
@@ -35,6 +36,8 @@ export interface WaitingSurveyHandlers {
   onStep: (index: number) => void;
   onDraftChange: (item: WaitingAskItem, draft: SurveyDraft, quiet?: boolean) => void;
   onSkip: (item: WaitingAskItem) => void;
+  onDismiss?: (item: WaitingAskItem) => void;
+  onUndoDismiss?: (key: string) => void;
   onReview: () => void;
   onEdit: (item: WaitingAskItem) => void;
   onSendAll: (entries: Array<{ item: WaitingAskItem; submission: ChoiceSubmission }>) => void;
@@ -144,6 +147,8 @@ function captureSurveyFocus(body: HTMLElement): CapturedSurveyFocus | null {
     };
   }
   if (typeof ds.waitingSurveyEdit === "string") return { kind: "edit", id: ds.waitingSurveyEdit };
+  if (ds.waitingSurveyDismiss !== undefined) return { kind: "attr", selector: "[data-waiting-survey-dismiss]" };
+  if (ds.waitingUndo !== undefined) return { kind: "attr", selector: "[data-waiting-undo]" };
   if (ds.waitingSurveyBack !== undefined) return { kind: "attr", selector: "[data-waiting-survey-back]" };
   if (ds.waitingSurveySkip !== undefined) return { kind: "attr", selector: "[data-waiting-survey-skip]" };
   if (ds.waitingSurveyNext !== undefined) return { kind: "attr", selector: "[data-waiting-survey-next]" };
@@ -185,6 +190,8 @@ function surveySignature(vm: WaitingSurveyVM, typingOtherItemId: string | null):
     vm.scope,
     safeIndex,
     vm.sending,
+    vm.dismissedNotice?.key ?? "",
+    vm.dismissedNotice?.pendingUndo ?? false,
     vm.items.map(item => {
       const d = vm.drafts.get(surveyDraftKey(item.workspaceId, item.id));
       const ignoreText = typingOtherItemId !== null && item.id === typingOtherItemId;
@@ -258,6 +265,25 @@ export function renderWaitingSurvey(
   exit.addEventListener("click", () => handlers.onExit());
   top.append(progress, exit);
   wrap.append(top);
+
+  if (vm.dismissedNotice) {
+    const notice = el(doc, "div", "cs-waiting-card cs-waiting-card--dismissed cs-waiting-survey__dismissed");
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
+    notice.dataset.waitingDismissed = vm.dismissedNotice.key;
+    notice.append(el(doc, "span", "cs-waiting-dismissed__label", "Dismissed"));
+    const undo = el(doc, "button", "cs-waiting-dismissed__undo", vm.dismissedNotice.pendingUndo ? "Undoing…" : "Undo");
+    undo.type = "button";
+    undo.dataset.waitingUndo = vm.dismissedNotice.key;
+    if (vm.dismissedNotice.pendingUndo) undo.setAttribute("aria-disabled", "true");
+    const noticeKey = vm.dismissedNotice.key;
+    undo.addEventListener("click", () => {
+      if (vm.dismissedNotice?.pendingUndo) return;
+      handlers.onUndoDismiss?.(noticeKey);
+    });
+    notice.append(undo);
+    wrap.append(notice);
+  }
 
   if (vm.mode === "review") {
     const scroll = el(doc, "div", "cs-waiting-survey__scroll");
@@ -366,6 +392,19 @@ export function renderWaitingSurvey(
   line.append(time);
   meta.append(line, el(doc, "span", "cs-waiting-card__place", formatSurveyDestination(item, vm.scope)));
   head.append(avatar, meta);
+  if (handlers.onDismiss) {
+    const dismiss = el(doc, "button", "cs-waiting-card__dismiss", "Dismiss");
+    dismiss.type = "button";
+    dismiss.dataset.waitingSurveyDismiss = item.id;
+    dismiss.dataset.waitingDismiss = "ask";
+    dismiss.dataset.waitingDismissId = item.id;
+    if (vm.sending) dismiss.setAttribute("aria-disabled", "true");
+    dismiss.addEventListener("click", () => {
+      if (vm.sending) return;
+      handlers.onDismiss?.(item);
+    });
+    head.append(dismiss);
+  }
 
   card.append(head, el(doc, "p", "cs-waiting-card__question", item.what));
   if (item.choices.multi) {
@@ -475,6 +514,120 @@ export function renderWaitingSurvey(
   nav.append(back, skip, next);
   wrap.append(nav);
   commit(wrap);
+}
+
+export interface WaitingSurveyState {
+  active: boolean;
+  mode: "step" | "review";
+  index: number;
+  itemIds: string[];
+  placeKey: string;
+  sending: boolean;
+  sendingAttemptId: number | null;
+}
+
+export function createWaitingSurveyState(): WaitingSurveyState {
+  return {
+    active: false,
+    mode: "step",
+    index: 0,
+    itemIds: [],
+    placeKey: "",
+    sending: false,
+    sendingAttemptId: null,
+  };
+}
+
+export type WaitingSurveySendResult =
+  | { ok: true; optionIds: string[]; otherText: string | null }
+  | { ok: false; status: number; error: string | null; message: string };
+
+export interface WaitingSurveyBatchPorts {
+  getState: () => WaitingSurveyState;
+  nextAttemptId: () => number;
+  isAlive: () => boolean;
+  hasActiveSession: () => boolean;
+  sendEntry: (
+    item: WaitingAskItem,
+    submission: ChoiceSubmission,
+    isAttemptAlive: () => boolean,
+  ) => Promise<WaitingSurveySendResult>;
+  onEntrySucceeded: (
+    item: WaitingAskItem,
+    result: Extract<WaitingSurveySendResult, { ok: true }>,
+  ) => void;
+  onEntryFailed: (item: WaitingAskItem, message: string) => void;
+  onRender: () => void;
+  onComplete: (summary: { sentCount: number; failedCount: number; succeededIds: ReadonlySet<string> }) => void;
+  failureMessage: string;
+}
+
+/**
+ * Runs one survey send batch pinned to its own monotonic attempt id.
+ * Every settlement checks that the current survey state still carries this exact attempt id
+ * before touching sending flags, drafts, errors, or rendering. A non-owner does nothing at all;
+ * a still-owned cancelled batch clears its sending indicator with no stale error and no data repaint.
+ */
+export async function runWaitingSurveyBatch(
+  entries: ReadonlyArray<{ item: WaitingAskItem; submission: ChoiceSubmission }>,
+  ports: WaitingSurveyBatchPorts,
+): Promise<void> {
+  const initialState = ports.getState();
+  if (!ports.hasActiveSession() || !ports.isAlive() || initialState.sending || entries.length === 0) return;
+  const attemptId = ports.nextAttemptId();
+  initialState.sending = true;
+  initialState.sendingAttemptId = attemptId;
+  const ownsBatch = (): boolean => {
+    const current = ports.getState();
+    return current === initialState && current.sending && current.sendingAttemptId === attemptId;
+  };
+  const isAttemptAlive = (): boolean => ports.isAlive() && ownsBatch();
+  ports.onRender();
+
+  let sentCount = 0;
+  let failedCount = 0;
+  const succeededIds = new Set<string>();
+  let retired = false;
+
+  for (const { item, submission } of entries) {
+    if (!ownsBatch()) return;
+    if (!ports.hasActiveSession() || !ports.isAlive()) {
+      retired = true;
+      break;
+    }
+    let result: WaitingSurveySendResult;
+    try {
+      result = await ports.sendEntry(item, submission, isAttemptAlive);
+    } catch {
+      result = { ok: false, status: 0, error: null, message: ports.failureMessage };
+    }
+    if (!ownsBatch()) return;
+    if (!ports.isAlive() || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+      retired = true;
+      break;
+    }
+    if (result.ok) {
+      sentCount += 1;
+      succeededIds.add(item.id);
+      ports.onEntrySucceeded(item, result);
+    } else {
+      failedCount += 1;
+      ports.onEntryFailed(item, result.message);
+    }
+  }
+
+  if (!ownsBatch()) return;
+  if (retired || !ports.isAlive()) {
+    initialState.sending = false;
+    initialState.sendingAttemptId = null;
+    if (ports.isAlive()) ports.onRender();
+    return;
+  }
+
+  initialState.sending = false;
+  initialState.sendingAttemptId = null;
+  initialState.itemIds = initialState.itemIds.filter(id => !succeededIds.has(id));
+  ports.onComplete({ sentCount, failedCount, succeededIds });
 }
 
 export type WaitingSurveyFocusTarget = "step" | "other-input" | "review" | "failed-review" | "exit";
