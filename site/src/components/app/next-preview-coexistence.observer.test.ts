@@ -74,6 +74,8 @@ const CONV_GEN_1 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
 const CONV_GEN_2 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc2";
 const CONV_SECRET_1 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc3";
 const CONV_SECRET_2 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc4";
+const CONV_PUB_1 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc5";
+const CONV_PUB_2 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc6";
 const NOW_ISO = "2026-11-23T12:00:00.000Z";
 
 function makeJwt(userId: string, email: string, sessionId: string, expOffsetSec = 3600): string {
@@ -182,12 +184,22 @@ async function ensureBuiltPreviewDist(repoRoot: string, siteDist: string): Promi
 }
 
 interface ApiEvent {
+  readonly id: number;
   readonly ts: number;
+  readonly method: string;
+  readonly path: string;
+  sid: string;
+  detail: string;
+  status: number | "pending" | "aborted";
+}
+
+interface HeldRequest {
+  readonly id: number;
+  readonly startedAt: number;
   readonly method: string;
   readonly path: string;
   readonly sid: string;
   readonly detail: string;
-  readonly status: number;
 }
 
 interface ScenarioConfig {
@@ -405,9 +417,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
     ): Promise<void> {
       const context = await targetBrowser.newContext({ viewport: { width: 1280, height: 900 } });
       const apiLog: ApiEvent[] = [];
+      const inFlightRequests = new Map<number, HeldRequest>();
       const consoleErrors: string[] = [];
       const counters = { refreshes: 0, rejectedRefreshes: 0, userChecks: 0, logouts: 0 };
-      let inFlightApiRequests = 0;
+      let nextRequestId = 0;
       let currentStep = `${scenario.name}:init`;
       const defaultWorkspaces = scenario.workspaces ?? [
         { id: WS_1, name: "Alpha Vault" },
@@ -423,16 +436,37 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         "x-supabase-api-version": "2024-01-01",
       };
 
-      const fulfillJson = async (route: Route, status: number, payload: unknown, sid: string, detail: string) => {
-        const req = route.request();
-        const reqPath = new URL(req.url()).pathname;
-        apiLog.push({ ts: Date.now(), method: req.method(), path: reqPath, sid, detail, status });
-        if (apiLog.length > 200) apiLog.shift();
-        await route.fulfill({
-          status,
-          headers: { ...corsHeaders, "content-type": "application/json; charset=utf-8" },
-          body: JSON.stringify(payload),
-        });
+      const isAbortedRouteError = (route: Route, err: unknown): boolean => {
+        if (route.request().failure() !== null) return true;
+        const msg = err instanceof Error ? err.message : String(err);
+        return /target (?:page, context or browser )?has been closed|route is already handled|request was aborted|interception/i.test(msg);
+      };
+
+      const fulfillJson = async (
+        route: Route,
+        entry: ApiEvent,
+        status: number,
+        payload: unknown,
+        detail: string,
+        overrideSid?: string,
+      ) => {
+        if (overrideSid !== undefined) entry.sid = overrideSid;
+        entry.detail = detail;
+        entry.status = status;
+        try {
+          await route.fulfill({
+            status,
+            headers: { ...corsHeaders, "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify(payload),
+          });
+        } catch (err) {
+          if (isAbortedRouteError(route, err)) {
+            entry.status = "aborted";
+            entry.detail = `${detail} (aborted-before-fulfill)`;
+            return;
+          }
+          throw err;
+        }
       };
 
       await context.routeWebSocket("wss://api.commonswarm.com/**", (ws) => {
@@ -440,13 +474,11 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       });
 
       await context.route("https://api.commonswarm.com/**", async (route) => {
-        inFlightApiRequests += 1;
-        try {
         const req = route.request();
         const url = new URL(req.url());
         const method = req.method().toUpperCase();
         if (method === "OPTIONS") {
-          await route.fulfill({ status: 204, headers: corsHeaders, body: "" });
+          await route.fulfill({ status: 204, headers: corsHeaders, body: "" }).catch(() => undefined);
           return;
         }
         const headers = req.headers();
@@ -460,41 +492,80 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             return {};
           }
         };
-
+        const reqBodyForDetail = method === "POST" ? parseJsonBody() : {};
+        const initialDetail =
+          url.pathname === "/functions/v1/read"
+            ? `edge-read(${String(reqBodyForDetail.resource ?? "")}:${String(reqBodyForDetail.workspace_id ?? "")})`
+            : url.pathname === "/auth/v1/token"
+              ? `token(${url.searchParams.get("grant_type") ?? ""})`
+              : url.pathname.startsWith("/rest/v1/rpc/")
+                ? `${url.pathname.slice("/rest/v1/rpc/".length)}(${String(reqBodyForDetail.p_workspace_id ?? "")})`
+                : url.pathname;
+        const reqId = ++nextRequestId;
+        const entry: ApiEvent = {
+          id: reqId,
+          ts: Date.now(),
+          method,
+          path: url.pathname,
+          sid,
+          detail: initialDetail,
+          status: "pending",
+        };
+        apiLog.push(entry);
+        if (apiLog.length > 1000) apiLog.shift();
+        inFlightRequests.set(reqId, {
+          id: reqId,
+          startedAt: entry.ts,
+          method,
+          path: url.pathname,
+          sid,
+          detail: initialDetail,
+        });
+        try {
         if (url.pathname === "/auth/v1/settings" && method === "GET") {
-          await fulfillJson(route, 200, { external: { google: false, github: false, email: true } }, sid, "settings");
+          await fulfillJson(route, entry, 200, { external: { google: false, github: false, email: true } }, "settings");
           return;
         }
         if (url.pathname === "/auth/v1/user" && method === "GET") {
           counters.userChecks += 1;
           if (scenario.onUserCheck) {
             const out = await scenario.onUserCheck(sid);
-            await fulfillJson(route, out.status, out.body, sid, `user-hook(${out.status})`);
+            await fulfillJson(route, entry, out.status, out.body, `user-hook(${out.status})`);
             return;
           }
           if (!scenario.activeSessionIds.has(sid)) {
             await fulfillJson(
               route,
+              entry,
               403,
               { code: "session_not_found", error_code: "session_not_found", msg: "Session not found" },
-              sid,
               "user-revoked",
             );
             return;
           }
-          await fulfillJson(route, 200, USER_A, sid, "user-ok");
+          await fulfillJson(route, entry, 200, USER_A, "user-ok");
           return;
         }
         if (url.pathname === "/auth/v1/logout" && method === "POST") {
           counters.logouts += 1;
           scenario.activeSessionIds.delete(sid);
-          apiLog.push({ ts: Date.now(), method, path: url.pathname, sid, detail: "logout", status: 204 });
-          await route.fulfill({ status: 204, headers: corsHeaders, body: "" });
+          entry.detail = "logout";
+          entry.status = 204;
+          try {
+            await route.fulfill({ status: 204, headers: corsHeaders, body: "" });
+          } catch (err) {
+            if (isAbortedRouteError(route, err)) {
+              entry.status = "aborted";
+              entry.detail = "logout (aborted-before-fulfill)";
+              return;
+            }
+            throw err;
+          }
           return;
         }
         if (url.pathname === "/auth/v1/token" && method === "POST") {
           const grant = url.searchParams.get("grant_type") ?? "";
-          const reqBody = parseJsonBody();
+          const reqBody = reqBodyForDetail;
           if (grant === "password") {
             const issued = scenario.onPasswordSignIn
               ? scenario.onPasswordSignIn()
@@ -502,7 +573,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             const issuedSid = decodeSidFromAuthHeader(`Bearer ${issued.access_token}`);
             scenario.activeSessionIds.add(issuedSid);
             scenario.validRefreshToken = issued.refresh_token;
-            await fulfillJson(route, 200, issued, issuedSid, "password-signin");
+            await fulfillJson(route, entry, 200, issued, "password-signin", issuedSid);
             return;
           }
           if (grant === "refresh_token") {
@@ -511,16 +582,16 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             if (scenario.onRefresh) {
               const out = await scenario.onRefresh(rt);
               if (out.status >= 400) counters.rejectedRefreshes += 1;
-              await fulfillJson(route, out.status, out.body, sid, `refresh(${rt})`);
+              await fulfillJson(route, entry, out.status, out.body, `refresh(${rt})`);
               return;
             }
             if (rt !== scenario.validRefreshToken) {
               counters.rejectedRefreshes += 1;
               await fulfillJson(
                 route,
+                entry,
                 400,
                 { code: "refresh_token_already_used", error_code: "refresh_token_already_used", msg: "Already used" },
-                sid,
                 `refresh-rejected(${rt})`,
               );
               return;
@@ -530,19 +601,19 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
               refreshToken: scenario.nextRefreshToken,
             });
             scenario.validRefreshToken = scenario.nextRefreshToken;
-            await fulfillJson(route, 200, nextSession, sid, `refresh-ok(${rt}->${scenario.nextRefreshToken})`);
+            await fulfillJson(route, entry, 200, nextSession, `refresh-ok(${rt}->${scenario.nextRefreshToken})`);
             return;
           }
-          await fulfillJson(route, 400, { error: "unsupported_grant_type" }, sid, `token-${grant}`);
+          await fulfillJson(route, entry, 400, { error: "unsupported_grant_type" }, `token-${grant}`);
           return;
         }
 
         // Authenticated data routes (PostgREST + Edge Functions):
         if (!scenario.activeSessionIds.has(sid)) {
           if (url.pathname.startsWith("/rest/v1/")) {
-            await fulfillJson(route, 401, { code: "session_not_found", message: "Session ended" }, sid, "rest-401");
+            await fulfillJson(route, entry, 401, { code: "session_not_found", message: "Session ended" }, "rest-401");
           } else {
-            await fulfillJson(route, 401, { error: "unauthenticated" }, sid, "edge-401");
+            await fulfillJson(route, entry, 401, { error: "unauthenticated" }, "edge-401");
           }
           return;
         }
@@ -557,22 +628,23 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             lead_agent_principal_id: null,
             channel_creation_policy: "members",
           }));
-          await fulfillJson(route, 200, rows, sid, "workspaces");
+          await fulfillJson(route, entry, 200, rows, "workspaces");
           return;
         }
         if (url.pathname === "/rest/v1/rpc/home_overview" && method === "POST") {
-          await fulfillJson(route, 200, buildHomeOverview(defaultWorkspaces), sid, "home_overview");
+          await fulfillJson(route, entry, 200, buildHomeOverview(defaultWorkspaces), "home_overview");
           return;
         }
         if (url.pathname === "/rest/v1/rpc/decision_queue" && method === "POST") {
-          const reqBody = parseJsonBody();
+          const reqBody = reqBodyForDetail;
           if (scenario.onDecisionQueue) {
             const out = await scenario.onDecisionQueue(reqBody, sid);
-            await fulfillJson(route, out.status, out.body, sid, `decision_queue(${String(reqBody.p_workspace_id ?? "")})`);
+            await fulfillJson(route, entry, out.status, out.body, `decision_queue(${String(reqBody.p_workspace_id ?? "")})`);
             return;
           }
           await fulfillJson(
             route,
+            entry,
             200,
             {
               workspace_id: String(reqBody.p_workspace_id ?? WS_1),
@@ -581,15 +653,15 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
               truncated: false,
               asks: [],
             },
-            sid,
             `decision_queue(${String(reqBody.p_workspace_id ?? "")})`,
           );
           return;
         }
         if (url.pathname === "/rest/v1/rpc/waiting_todos_page" && method === "POST") {
-          const reqBody = parseJsonBody();
+          const reqBody = reqBodyForDetail;
           await fulfillJson(
             route,
+            entry,
             200,
             {
               workspace_id: String(reqBody.p_workspace_id ?? WS_1),
@@ -598,18 +670,17 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
               truncated: false,
               todos: [],
             },
-            sid,
             `waiting_todos(${String(reqBody.p_workspace_id ?? "")})`,
           );
           return;
         }
         if (url.pathname === "/rest/v1/rpc/channel_unread" && method === "POST") {
-          const reqBody = parseJsonBody();
+          const reqBody = reqBodyForDetail;
           await fulfillJson(
             route,
+            entry,
             200,
             { workspace_id: String(reqBody.p_workspace_id ?? WS_1), generated_at: NOW_ISO, channels: [] },
-            sid,
             "channel_unread",
           );
           return;
@@ -617,9 +688,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         if (url.pathname === "/rest/v1/member_profiles" && method === "GET") {
           await fulfillJson(
             route,
+            entry,
             200,
             [{ user_id: USER_A.id, display_name: "Alex Owner", role: "owner" }],
-            sid,
             "member_profiles",
           );
           return;
@@ -627,6 +698,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         if (url.pathname === "/rest/v1/channels" && method === "GET") {
           await fulfillJson(
             route,
+            entry,
             200,
             [
               {
@@ -641,24 +713,23 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 archived_at: null,
               },
             ],
-            sid,
             "channels",
           );
           return;
         }
         if (url.pathname.startsWith("/rest/v1/")) {
-          await fulfillJson(route, 200, [], sid, `rest-empty(${url.pathname})`);
+          await fulfillJson(route, entry, 200, [], `rest-empty(${url.pathname})`);
           return;
         }
         if (url.pathname === "/functions/v1/read" && method === "POST") {
-          const reqBody = parseJsonBody();
+          const reqBody = reqBodyForDetail;
           if (scenario.onEdgeRead) {
             const out = await scenario.onEdgeRead(reqBody, sid);
             await fulfillJson(
               route,
+              entry,
               out.status,
               out.body,
-              sid,
               `edge-read(${String(reqBody.resource ?? "")}:${String(reqBody.workspace_id ?? "")})`,
             );
             return;
@@ -667,47 +738,52 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             const wsId = String(reqBody.workspace_id ?? WS_1);
             await fulfillJson(
               route,
+              entry,
               200,
               {
                 conversations: [
                   makeConversation({
                     id: wsId === WS_2 ? CONV_GEN_2 : CONV_GEN_1,
-                    slug: wsId === WS_2 ? "beta-general" : "alpha-general",
+                    slug: "general",
                     kind: "general",
+                  }),
+                  makeConversation({
+                    id: wsId === WS_2 ? CONV_PUB_2 : CONV_PUB_1,
+                    slug: wsId === WS_2 ? "beta-room" : "alpha-room",
+                    kind: "public_channel",
                   }),
                 ],
               },
-              sid,
               `conversations(${wsId})`,
             );
             return;
           }
           if (reqBody.resource === "conversation_history") {
-            await fulfillJson(route, 200, { signals: [], has_more: false, mentions: [], reactions: [] }, sid, "conv_history");
+            await fulfillJson(route, entry, 200, { signals: [], has_more: false, mentions: [], reactions: [] }, "conv_history");
             return;
           }
           if (reqBody.resource === "seat_admin_status") {
-            await fulfillJson(route, 200, { enabled: false }, sid, "seat_admin_status");
+            await fulfillJson(route, entry, 200, { enabled: false }, "seat_admin_status");
             return;
           }
           if (reqBody.resource === "pending_access") {
-            await fulfillJson(route, 200, { pending: [], agents: [] }, sid, "pending_access");
+            await fulfillJson(route, entry, 200, { pending: [], agents: [] }, "pending_access");
             return;
           }
           if (reqBody.resource === "review_checks") {
-            await fulfillJson(route, 200, { checks: [] }, sid, "review_checks");
+            await fulfillJson(route, entry, 200, { checks: [] }, "review_checks");
             return;
           }
-          await fulfillJson(route, 200, { grants: [], invitations: [] }, sid, `edge-read-other(${String(reqBody.resource ?? "")})`);
+          await fulfillJson(route, entry, 200, { grants: [], invitations: [] }, `edge-read-other(${String(reqBody.resource ?? "")})`);
           return;
         }
         if (url.pathname === "/functions/v1/command" && method === "POST") {
-          await fulfillJson(route, 200, { status: "accepted" }, sid, "command");
+          await fulfillJson(route, entry, 200, { status: "accepted" }, "command");
           return;
         }
-        await fulfillJson(route, 404, { error: "not_found" }, sid, "unknown");
+        await fulfillJson(route, entry, 404, { error: "not_found" }, "unknown");
         } finally {
-          inFlightApiRequests -= 1;
+          inFlightRequests.delete(reqId);
         }
       });
 
@@ -738,9 +814,41 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 }
               }
               const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const signedOutPanel = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+              const closedScreen = document.querySelector<HTMLElement>('[data-testid="closed-screen"]');
+              const signedOutScreen = document.querySelector<HTMLElement>('[data-testid="signed-out-screen"]');
+              const checkingScreen = document.querySelector<HTMLElement>('[data-testid="session-checking-screen"]');
+              const privateRoot = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+              const workspaceUnavailable = document.querySelector<HTMLElement>('[data-testid="workspace-unavailable"]');
+              const sidebarLoading = document.querySelector<HTMLElement>('[data-testid="sidebar-loading"]');
+              const sidebarError = document.querySelector<HTMLElement>('[data-testid="sidebar-error"]');
+              const sessionGate = closedScreen
+                ? { status: "closed", reason: closedScreen.getAttribute("data-closed-reason") ?? "unknown" }
+                : signedOutScreen
+                  ? { status: "signed_out", reason: null }
+                  : checkingScreen
+                    ? { status: "checking", reason: null }
+                    : privateRoot
+                      ? {
+                          status: privateRoot.hidden ? "authenticated_hidden" : "authenticated",
+                          reason: workspaceUnavailable
+                            ? "workspace_unavailable"
+                            : sidebarError
+                              ? "sidebar_error"
+                              : sidebarLoading
+                                ? "sidebar_loading"
+                                : null,
+                        }
+                      : dash
+                        ? {
+                            status: `app:${dash.dataset.state ?? "unknown"}`,
+                            reason: signedOutPanel && !signedOutPanel.hidden ? "signed_out_panel_visible" : null,
+                          }
+                        : { status: "sample_or_unmounted", reason: null };
               const testIds = [...document.querySelectorAll("[data-testid]")].map((el) => el.getAttribute("data-testid"));
               return {
                 href: location.href,
+                sessionGate,
                 dashboardState: dash?.dataset.state ?? null,
                 testIds,
                 storedSummary,
@@ -749,6 +857,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             }, STORAGE_KEY)
             .catch((e: unknown) => `eval-failed: ${e instanceof Error ? e.message : String(e)}`);
         }
+        const now = Date.now();
         return JSON.stringify(
           {
             scenario: scenario.name,
@@ -756,8 +865,16 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             counters,
             activeSessionIds: [...scenario.activeSessionIds],
             domSnapshots,
-            consoleErrors: consoleErrors.slice(-20),
-            recentApiLog: apiLog.slice(-40),
+            heldRequests: [...inFlightRequests.values()].map((r) => ({
+              id: r.id,
+              method: r.method,
+              path: r.path,
+              sid: r.sid,
+              detail: r.detail,
+              ageMs: now - r.startedAt,
+            })),
+            consoleErrors: consoleErrors.slice(-30),
+            recentApiLog: apiLog.slice(-30),
           },
           null,
           2,
@@ -801,7 +918,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         throw new Error(
           `Timed out after ${timeoutMs}ms waiting for signal "${label}"\n` +
           `Signal states: ${JSON.stringify(signalStates)}\n` +
-          `In-flight API requests: ${inFlightApiRequests}\n` +
+          `In-flight API requests: ${inFlightRequests.size}\n` +
           `Diagnostics:\n${diag}`,
         );
       };
@@ -885,7 +1002,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           apiLog,
           counters,
           consoleErrors,
-          getInFlightApiRequests: () => inFlightApiRequests,
+          getInFlightApiRequests: () => inFlightRequests.size,
           setStep: (s) => { currentStep = `${scenario.name}:${s}`; },
           attachPageDiagnostics,
           dumpDiagnostics,
@@ -933,6 +1050,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       };
 
       await withTwoTabScenario(scenario, async (ctx) => {
+        try {
         ctx.setStep("seed-expired-session");
         await ctx.seedStorage(makeSessionPayload({ sessionId: sidA, refreshToken: "rt-overlap-1", expired: true }));
 
@@ -973,6 +1091,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         assert.equal(ctx.counters.rejectedRefreshes, 0, `Expected zero rejected refreshes:\n${await ctx.dumpDiagnostics(pages)}`);
         assert.equal(stored?.refresh_token, "rt-overlap-2", "Rotated refresh token must be persisted");
         assert.equal(await tabB.locator('[data-testid="signed-out-screen"]').count(), 0, "Tab B must remain signed in");
+        } finally {
+          releaseFirstRefresh.resolve();
+        }
       });
     }
 
@@ -1012,6 +1133,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       };
 
       await withTwoTabScenario(scenario, async (ctx) => {
+        try {
         ctx.setStep("seed-stale-unexpired-session");
         await ctx.seedStorage(makeSessionPayload({ sessionId: staleSid, refreshToken: "rt-stale-u1", expired: false }));
 
@@ -1058,6 +1180,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           `Stale terminal user check must NOT remove replacement login:\n${await ctx.dumpDiagnostics(pages)}`,
         );
         assert.equal(await tabB.locator('[data-testid="signed-out-screen"]').count(), 0, "Tab B must remain signed in on replacement login");
+        } finally {
+          releaseStaleUser.resolve();
+        }
       });
     }
 
@@ -1097,6 +1222,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       };
 
       await withTwoTabScenario(scenario, async (ctx) => {
+        try {
         ctx.setStep("seed-stale-expired-session");
         await ctx.seedStorage(makeSessionPayload({ sessionId: staleSid, refreshToken: "rt-stale-1", expired: true }));
 
@@ -1158,6 +1284,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
 
         const storedFinal = await ctx.readStorage(tabA);
         assert.equal(storedFinal?.refresh_token, "rt-replacement-2", "Preserved replacement login must remain intact");
+        } finally {
+          releaseStaleRefresh.resolve();
+        }
       });
     }
 
@@ -1193,7 +1322,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 status: 200,
                 body: {
                   conversations: [
-                    makeConversation({ id: CONV_GEN_2, slug: "beta-general", kind: "general" }),
+                    makeConversation({ id: CONV_GEN_2, slug: "general", kind: "general" }),
                     makeConversation({ id: CONV_SECRET_1, slug: secretSlugForHeld, kind: "private_channel", joined: true }),
                   ],
                 },
@@ -1205,8 +1334,13 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 conversations: [
                   makeConversation({
                     id: wsId === WS_2 ? CONV_GEN_2 : CONV_GEN_1,
-                    slug: wsId === WS_2 ? "beta-public-clean" : "alpha-general",
+                    slug: "general",
                     kind: "general",
+                  }),
+                  makeConversation({
+                    id: wsId === WS_2 ? CONV_PUB_2 : CONV_PUB_1,
+                    slug: wsId === WS_2 ? "beta-public-clean" : "alpha-room",
+                    kind: "public_channel",
                   }),
                 ],
               },
@@ -1223,6 +1357,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       };
 
       await withTwoTabScenario(scenario, async (ctx) => {
+        try {
         ctx.setStep("c1-boot-both-tabs");
         await ctx.seedStorage(makeSessionPayload({ sessionId: sid1, refreshToken: "rt-c-1" }));
         const tabA = await ctx.context.newPage();
@@ -1233,7 +1368,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
 
         await Promise.all([tabA.goto(`${origin}/app`), tabB.goto(`${origin}/next`)]);
         await ctx.waitForAppSignedIn(tabA, pages);
-        await ctx.waitForNextSignedIn(tabB, "alpha-general", pages);
+        await ctx.waitForNextSignedIn(tabB, "alpha-room", pages);
 
         // Hold WS_2 private conversations response in Tab B (Web Lock is FREE!).
         ctx.setStep("c1-hold-ws2-private-response");
@@ -1284,7 +1419,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         await tabA.fill("#dashboard-password", "pw-owner");
         await tabA.click("[data-password-signin]");
         await ctx.waitForAppSignedIn(tabA, pages);
-        await ctx.waitForNextSignedIn(tabB, "alpha-general", pages);
+        await ctx.waitForNextSignedIn(tabB, "alpha-room", pages);
 
         // Hold WS_2 private response under sid2.
         ctx.setStep("c2-hold-ws2-private-response-sid2");
@@ -1312,7 +1447,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         await tabA.fill("#dashboard-password", "pw-owner");
         await tabA.click("[data-password-signin]");
         await ctx.waitForAppSignedIn(tabA, pages);
-        await ctx.waitForNextSignedIn(tabB, "alpha-general", pages);
+        await ctx.waitForNextSignedIn(tabB, "alpha-room", pages);
 
         // Release the held sid2 private response AFTER the same person signed in again with sid3!
         ctx.setStep("c2-release-held-sid2-response-under-sid3");
@@ -1330,6 +1465,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           sid2EventsAtSignOut,
           `Stale sid2 request sent after same-user re-sign-in:\n${await ctx.dumpDiagnostics(pages)}`,
         );
+        } finally {
+          releaseHeldWs2?.resolve();
+        }
       });
     }
 
@@ -1373,7 +1511,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
             return {
               status: 200,
               body: {
-                conversations: [makeConversation({ id: CONV_GEN_1, slug: "alpha-general", kind: "general" })],
+                conversations: [
+                  makeConversation({ id: CONV_GEN_1, slug: "general", kind: "general" }),
+                  makeConversation({ id: CONV_PUB_1, slug: "alpha-room", kind: "public_channel" }),
+                ],
               },
             };
           }
@@ -1402,6 +1543,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       };
 
       await withTwoTabScenario(scenario, async (ctx) => {
+        try {
         ctx.setStep("c3-boot-tabB");
         await ctx.seedStorage(makeSessionPayload({ sessionId: sidRefusal, refreshToken: "rt-c3-1" }));
         const tabB = await ctx.context.newPage();
@@ -1409,7 +1551,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         const pages = { tabB };
 
         await tabB.goto(`${origin}/next`);
-        await ctx.waitForNextSignedIn(tabB, "alpha-general", pages);
+        await ctx.waitForNextSignedIn(tabB, "alpha-room", pages);
 
         ctx.setStep("c3-select-ws2-and-hold-both-conversations-and-decision-queue");
         await tabB.click('button[aria-label="Revoked Vault workspace"]');
@@ -1448,6 +1590,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           0,
           `Stale WS_2 requests sent after refusal:\n${await ctx.dumpDiagnostics(pages)}`,
         );
+        } finally {
+          ws2DecisionRelease.resolve();
+          ws2ConvRelease.resolve();
+        }
       });
     }
 
@@ -1557,7 +1703,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                 status: 200,
                 body: {
                   conversations: [
-                    makeConversation({ id: CONV_GEN_1, slug: "alpha-general", kind: "general" }),
+                    makeConversation({ id: CONV_GEN_1, slug: "general", kind: "general" }),
                     makeConversation({ id: privateId, slug: privateSlug, kind: "private_channel", joined: true }),
                   ],
                 },
