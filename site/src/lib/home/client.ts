@@ -23,6 +23,7 @@ import type {
   Uuid,
   WaitingArchivedEntry,
   WaitingArchivedKind,
+  KnownWaitingArchivedOutcomeKind,
   WaitingArchivedOutcomeKind,
   WaitingArchivedPage,
   WaitingArchivedPlacement,
@@ -323,10 +324,14 @@ export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): Waitin
 }
 
 const WAITING_ARCHIVED_KINDS = new Set<WaitingArchivedKind>(['ask', 'todo', 'review']);
-const WAITING_ARCHIVED_OUTCOMES = new Set<WaitingArchivedOutcomeKind>(['answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed']);
+export const WAITING_ARCHIVED_OUTCOMES = new Set<KnownWaitingArchivedOutcomeKind>([
+  'answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed',
+  'agent_removed', 'sender_left', 'channel_archived', 'withdrawn', 'expired',
+]);
 const WAITING_ARCHIVED_PLACEMENTS = new Set<WaitingArchivedPlacement>(['channel', 'general', 'dm', 'group_dm', 'workspace', 'redacted']);
 
 function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
+  const outcomeKind = record(value) && typeof value.outcome_kind === 'string' ? value.outcome_kind.trim() : '';
   if (!record(value)
     || typeof value.item_key !== 'string' || !value.item_key
     || typeof value.kind !== 'string' || !WAITING_ARCHIVED_KINDS.has(value.kind as WaitingArchivedKind)
@@ -334,7 +339,7 @@ function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
     || (value.todo_id !== null && typeof value.todo_id !== 'string')
     || (value.ask_kind !== null && value.ask_kind !== 'choice' && value.ask_kind !== 'plain')
     || typeof value.title !== 'string'
-    || typeof value.outcome_kind !== 'string' || !WAITING_ARCHIVED_OUTCOMES.has(value.outcome_kind as WaitingArchivedOutcomeKind)
+    || !outcomeKind
     || typeof value.outcome_text !== 'string'
     || !isoTime(value.archived_at)
     || typeof value.placement !== 'string' || !WAITING_ARCHIVED_PLACEMENTS.has(value.placement as WaitingArchivedPlacement)
@@ -381,7 +386,7 @@ function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
     ask_kind: value.ask_kind,
     title: value.title,
     from,
-    outcome_kind: value.outcome_kind as WaitingArchivedOutcomeKind,
+    outcome_kind: outcomeKind as WaitingArchivedOutcomeKind,
     outcome_text: value.outcome_text,
     archived_at: value.archived_at,
     answered_by: answeredBy,

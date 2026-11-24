@@ -2225,6 +2225,111 @@ test("waiting-dismissal controller (C3): passes scoped action lifetime guard to 
   await restoreP;
 });
 
+test("Waiting Archived decodes and renders auto-clear outcomes (muted, no Restore) and tolerates unknown future outcomes", () => {
+  const cases = [
+    { kind: "ask", item_key: "ask:10000000-0000-4000-8000-000000000001", id: "10000000-0000-4000-8000-000000000001", todo_id: null, ask_kind: "choice", title: "Removed agent ask?", outcome_kind: "agent_removed", outcome_text: "Agent removed", archived_at: "2026-11-23T11:55:00Z", answered_by: null },
+    { kind: "ask", item_key: "ask:10000000-0000-4000-8000-000000000002", id: "10000000-0000-4000-8000-000000000002", todo_id: null, ask_kind: "plain", title: "Departed sender ask?", outcome_kind: "sender_left", outcome_text: "Sender left", archived_at: "2026-11-23T11:54:00Z", answered_by: null },
+    { kind: "ask", item_key: "ask:10000000-0000-4000-8000-000000000003", id: "10000000-0000-4000-8000-000000000003", todo_id: null, ask_kind: "choice", title: "Archived channel ask?", outcome_kind: "channel_archived", outcome_text: "Channel archived", archived_at: "2026-11-23T11:53:00Z", answered_by: null },
+    { kind: "review", item_key: "review:10000000-0000-4000-8000-000000000004", id: "10000000-0000-4000-8000-000000000004", todo_id: "20000000-0000-4000-8000-000000000004", ask_kind: null, title: "Withdrawn work request", outcome_kind: "withdrawn", outcome_text: "Withdrawn", archived_at: "2026-11-23T11:52:00Z", answered_by: { kind: "user", id: "u-maya", name: "Maya", by_viewer: false } },
+    { kind: "ask", item_key: "ask:10000000-0000-4000-8000-000000000005", id: "10000000-0000-4000-8000-000000000005", todo_id: null, ask_kind: "plain", title: "Timed ask?", outcome_kind: "expired", outcome_text: "Expired", archived_at: "2026-11-23T11:51:00Z", answered_by: null },
+    { kind: "ask", item_key: "ask:10000000-0000-4000-8000-000000000006", id: "10000000-0000-4000-8000-000000000006", todo_id: null, ask_kind: "choice", title: "Future outcome ask?", outcome_kind: "future_superseded", outcome_text: "Replaced by newer ask", archived_at: "2026-11-23T11:50:00Z", answered_by: null },
+  ];
+
+  const page = parseWaitingArchivedPage({
+    workspace_id: "ws-1",
+    generated_at: "2026-11-23T12:00:00Z",
+    total: cases.length,
+    truncated: false,
+    items: cases.map(c => ({
+      ...c,
+      from: { kind: "agent", id: "a-1", name: "Scout" },
+      placement: "general",
+      channel_id: null,
+      conversation_id: null,
+      conversation_kind: "general",
+    })),
+  }, "ws-1");
+  assert.ok(page);
+  assert.equal(page.items.length, cases.length);
+  assert.deepEqual(page.items.map(i => i.outcome_kind), cases.map(c => c.outcome_kind));
+
+  // Empty/whitespace or non-string outcome_kind still fails closed as malformed.
+  for (const badOutcome of ["", "   ", null, 42]) {
+    assert.throws(() => parseWaitingArchivedPage({
+      workspace_id: "ws-1",
+      generated_at: "2026-11-23T12:00:00Z",
+      total: 1,
+      truncated: false,
+      items: [{
+        ...cases[0],
+        outcome_kind: badOutcome,
+        from: null,
+        placement: "general",
+        channel_id: null,
+        conversation_id: null,
+        conversation_kind: "general",
+      }],
+    }, "ws-1"), /home_waiting_archived_malformed/);
+  }
+
+  const mapped = page.items.map(entry => mapWaitingArchivedEntry(entry, {
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    channelLabel: "#general",
+    href: null,
+    viewerId: "u-viewer",
+    now: Date.parse("2026-11-23T12:00:00Z"),
+  }));
+
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "workspace",
+    place,
+    items: [],
+    archived: {
+      items: mapped,
+      counts: {
+        channel: { min: mapped.length, complete: true },
+        workspace: { min: mapped.length, complete: true },
+        all: { min: mapped.length, complete: true },
+      },
+      loading: false,
+      loadingMore: false,
+      complete: true,
+      failed: false,
+      hasMore: false,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false,
+    complete: true,
+    failed: false,
+    statusMessage: "",
+    statusSeq: 0,
+  }, {
+    onScopeChange: () => {},
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+    onRestoreArchived: () => { throw new Error("auto-cleared and unknown outcomes must never expose Restore"); },
+  });
+
+  for (const c of cases) {
+    const card = host.querySelector(`[data-waiting-archived-item="${c.item_key}"]`);
+    assert.ok(card, `card rendered for ${c.outcome_kind}`);
+    const outcome = card.querySelector(`[data-waiting-archived-outcome="${c.outcome_kind}"]`);
+    assert.ok(outcome, `outcome node rendered for ${c.outcome_kind}`);
+    assert.equal(outcome.dataset.outcomeTone, "muted", `${c.outcome_kind} must render with muted tone`);
+    assert.equal(outcome.querySelector(".cs-waiting-archived__answer").textContent, c.outcome_text);
+    assert.equal(card.querySelector("[data-waiting-archived-restore]"), null, `${c.outcome_kind} must not render Restore`);
+  }
+});
+
 test("waiting-dismissal controller (C3): attempt ownership prevents retired Dismiss, Undo, and Archived Restore from touching fresh overlapping attempts across all settlement forms", async () => {
   const outcomes = [
     { label: "success", dismiss: { ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" }, restore: { ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:00:00Z" } },
