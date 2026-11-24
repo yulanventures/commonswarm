@@ -3,12 +3,15 @@
 --      ask) of its own open ask. No client role can read or write it directly.
 --   2. swarm.ask_is_withdrawn (swarm_command only) lets command handlers refuse answering or
 --      re-raising a withdrawn/replaced ask with the same refusal semantics as an expired/closed ask.
---   3. Internal withdrawal helpers (swarm_admin-owned, swarm_command EXECUTE only, no client roles):
+--   3. Internal withdrawal helpers (swarm_admin-owned, no client roles; ask_complete_for_withdrawal
+--      is owner-only with no runtime-role EXECUTE grants, while the other three grant swarm_command
+--      EXECUTE only):
 --      - swarm.ask_sender_can_access_placement: exact sender, live workspace authority, canonical
 --        channel access (non-archived), direct/group conversation membership via
 --        swarm.actor_can_access_direct_conversation (non-archived), or explicit legacy unfiled fallback.
---      - swarm.ask_complete_for_withdrawal: true when swarm.ask_answered is true, a choice action
---        completed in swarm.ui_actions, or a directly addressed agent replied (without changing
+--      - swarm.ask_complete_for_withdrawal (owner-only, called only inside swarm.withdraw_ask and
+--        swarm_read.my_open_asks): true when swarm.ask_answered is true, a choice action completed
+--        in swarm.ui_actions, or a directly addressed agent replied (without changing
 --        swarm.ask_answered or any Waiting rule).
 --      - swarm.ask_withdrawal_release_allowed: exact sender, live placement access, and existing
 --        withdrawal row by this actor (with expected replacement id when expected) for post-fence
@@ -28,10 +31,12 @@
 --      passive auto-clear reasons because withdrawal/replacement is the sender's explicit act.
 --      swarm.waiting_ask_eligible, decision_queue*, home_overview, waiting_archived_page, and
 --      waiting dismissal/restore/replay all inherit this automatically.
---   6. swarm_read.my_open_asks lists only the caller's own open asks (person via JWT claims,
---      agent via agent token hash or verified agent_principal_id claim) using the shared placement
---      and completion helpers, capped and keyset-paged, returning id, created_at, until, addressee
---      names, where label, and first 120 chars of body (never exposing addressee dismissals).
+--   6. swarm_read.my_open_asks (swarm_read EXECUTE only; served through the read edge, no direct
+--      authenticated PostgREST RPC grant) lists only the caller's own open asks (person via JWT
+--      claims installed by the read edge, agent via agent token hash or verified
+--      agent_principal_id claim) using the shared placement and completion helpers, capped and
+--      keyset-paged, returning id, created_at, until, addressee names, where label, and first 120
+--      chars of body (never exposing addressee dismissals).
 --   7. swarm_read.audit_log adds one condition so withdraw_ask rows are visible only when they
 --      carry at least one channel tag (direct/group-conversation and unfiled withdrawals stay
 --      server-only in swarm.audit_log).
@@ -397,7 +402,9 @@ REVOKE ALL ON FUNCTION swarm.ask_sender_can_access_placement(uuid, uuid, text, u
 GRANT EXECUTE ON FUNCTION swarm.ask_sender_can_access_placement(uuid, uuid, text, uuid) TO swarm_command;
 
 -- C2 single-source completion predicate for sender withdrawal and my_open_asks (internal:
--- swarm_admin-owned, swarm_command EXECUTE only; preserves swarm.ask_answered and all Waiting rules).
+-- swarm_admin-owned, owner-only with no runtime-role EXECUTE grants — called only inside the
+-- swarm_admin-owned SECURITY DEFINER functions swarm.withdraw_ask and swarm_read.my_open_asks;
+-- preserves swarm.ask_answered and all Waiting rules).
 -- True when swarm.ask_answered is true, OR a choice action on this ask has completed in
 -- swarm.ui_actions (including an unaddressed choice ask), OR a directly addressed agent replied.
 CREATE FUNCTION swarm.ask_complete_for_withdrawal(
@@ -451,7 +458,6 @@ $$;
 ALTER FUNCTION swarm.ask_complete_for_withdrawal(uuid, uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.ask_complete_for_withdrawal(uuid, uuid)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT EXECUTE ON FUNCTION swarm.ask_complete_for_withdrawal(uuid, uuid) TO swarm_command;
 
 -- C3 release & replay reauthorization predicate (command-role only; no client roles).
 -- Verifies exact sender, live workspace authority, current placement access (C1), and that the
@@ -760,10 +766,12 @@ REVOKE ALL ON FUNCTION swarm.withdraw_ask(uuid, text, uuid, uuid, uuid)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.withdraw_ask(uuid, text, uuid, uuid, uuid) TO swarm_command;
 
--- List only the caller's own open asks in one workspace (capped and keyset-paged).
--- Person identity comes from request.jwt.claims; agent identity comes from p_agent_token_hash
--- (local agent via read edge, matching signal_delivery_receipts) or verified agent_principal_id
--- claim installed by the read edge for a hosted seat.
+-- List only the caller's own open asks in one workspace (capped and keyset-paged; swarm_read
+-- EXECUTE only, served through the read edge — no direct PostgREST RPC grant to authenticated).
+-- Person identity comes from request.jwt.claims installed by the read edge after GoTrue JWT
+-- verification; agent identity comes from p_agent_token_hash (local agent via read edge, matching
+-- signal_delivery_receipts) or verified agent_principal_id claim installed by the read edge for a
+-- hosted seat.
 CREATE FUNCTION swarm_read.my_open_asks(
   p_workspace_id uuid,
   p_limit integer DEFAULT 50,
@@ -1014,7 +1022,7 @@ ALTER FUNCTION swarm_read.my_open_asks(uuid, integer, timestamptz, uuid, bytea) 
 REVOKE ALL ON FUNCTION swarm_read.my_open_asks(uuid, integer, timestamptz, uuid, bytea)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.my_open_asks(uuid, integer, timestamptz, uuid, bytea)
-  TO authenticated, swarm_read;
+  TO swarm_read;
 
 -- ---------------------------------------------------------------------------
 -- HezSec C1 on #735: Dismissal instance binding (dismissal_id uuid).

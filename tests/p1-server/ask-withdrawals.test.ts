@@ -770,11 +770,14 @@ after(async () => {
 });
 
 test(
-  "20261125000001 passes catalog + functional proofs, rolls back cleanly, re-applies, and denies direct table access",
+  "20261125000001 passes catalog + functional proofs, rolls back cleanly, re-applies, and denies direct table and ungranted function access",
   { timeout: TEST_TIMEOUT_MS },
   () => {
     step("T1: catalog + functional + direct-deny + rollback + reapply proofs");
-    const directDenyCheck = ["anon", "authenticated", "swarm_read", "swarm_command"]
+    const denyMemberId = randomUUID();
+    const denyWsId = randomUUID();
+    const denySigId = randomUUID();
+    const directTableDenyCheck = ["anon", "authenticated", "swarm_read", "swarm_command"]
       .map((role) => `
         DO $deny$
         BEGIN
@@ -789,6 +792,48 @@ test(
         END $deny$;
       `)
       .join("\n");
+    const directFunctionDenyCheck = `
+      SAVEPOINT direct_fn_deny;
+      INSERT INTO auth.users(id, aud, role, email)
+      VALUES ('${denyMemberId}'::uuid, 'authenticated', 'authenticated', 'deny-${denyMemberId}@example.test');
+      INSERT INTO swarm.users(user_id, display_name)
+      VALUES ('${denyMemberId}'::uuid, 'DenyMember');
+      INSERT INTO swarm.workspaces(workspace_id, name, created_by)
+      VALUES ('${denyWsId}'::uuid, 'DenyWS', '${denyMemberId}'::uuid);
+      INSERT INTO swarm.memberships(workspace_id, user_id, role)
+      VALUES ('${denyWsId}'::uuid, '${denyMemberId}'::uuid, 'member');
+
+      DO $deny_my_open_asks$
+      BEGIN
+        PERFORM set_config(
+          'request.jwt.claims',
+          '${JSON.stringify({ role: "authenticated", sub: denyMemberId })}',
+          true
+        );
+        EXECUTE 'SET LOCAL ROLE authenticated';
+        BEGIN
+          EXECUTE $q$SELECT swarm_read.my_open_asks('${denyWsId}'::uuid, 50, NULL::timestamptz, NULL::uuid, NULL::bytea)$q$;
+          RAISE EXCEPTION 'role authenticated must not execute swarm_read.my_open_asks directly';
+        EXCEPTION WHEN insufficient_privilege THEN
+          NULL;
+        END;
+        RESET ROLE;
+      END $deny_my_open_asks$;
+
+      DO $deny_ask_complete$
+      BEGIN
+        EXECUTE 'SET LOCAL ROLE swarm_command';
+        BEGIN
+          EXECUTE $q$SELECT swarm.ask_complete_for_withdrawal('${denyWsId}'::uuid, '${denySigId}'::uuid)$q$;
+          RAISE EXCEPTION 'role swarm_command must not execute swarm.ask_complete_for_withdrawal directly';
+        EXCEPTION WHEN insufficient_privilege THEN
+          NULL;
+        END;
+        RESET ROLE;
+      END $deny_ask_complete$;
+      ROLLBACK TO SAVEPOINT direct_fn_deny;
+    `;
+    const directDenyCheck = directTableDenyCheck + "\n" + directFunctionDenyCheck;
 
     runSql(
       sqlPhase("ask-withdraw-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +

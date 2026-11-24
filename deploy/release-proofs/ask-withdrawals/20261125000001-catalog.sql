@@ -52,7 +52,7 @@ SELECT
       AND position('ui_actions' IN p.prosrc) > 0
       AND position('to_agent_principal_id' IN p.prosrc) > 0
   )
-  AND has_function_privilege('swarm_command', 'swarm.ask_complete_for_withdrawal(uuid,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.ask_complete_for_withdrawal(uuid,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('public', 'swarm.ask_complete_for_withdrawal(uuid,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm.ask_complete_for_withdrawal(uuid,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('authenticated', 'swarm.ask_complete_for_withdrawal(uuid,uuid)', 'EXECUTE')
@@ -115,10 +115,10 @@ SELECT
       AND position('ask_sender_can_access_placement' IN p.prosrc) > 0
       AND position('ask_complete_for_withdrawal' IN p.prosrc) > 0
   )
-  AND has_function_privilege('authenticated', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND has_function_privilege('swarm_read', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND NOT has_function_privilege('public', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_command', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND EXISTS (
     SELECT 1 FROM pg_proc p
