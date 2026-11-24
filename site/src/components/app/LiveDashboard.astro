@@ -1656,6 +1656,7 @@ import "../../styles/kylon-image-viewer.css";
   import {
     createWaitingDismissalController,
     type WaitingAccessLossEvent,
+    type WaitingDismissBatchTarget,
     type WaitingDismissPlacementKind,
     type WaitingDismissTarget,
   } from "../../lib/waiting-dismissal";
@@ -6605,6 +6606,8 @@ import "../../styles/kylon-image-viewer.css";
     const waitingLinks: (HTMLAnchorElement | undefined)[] = [];
     let waitingAuthGeneration = 0;
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
+    let waitingRefreshPromise: Promise<void> | null = null;
+    let waitingAgainMaxPages: number | undefined;
     let waitingScope: WaitingScope = "channel";
     let waitingPanelViewer = "";
     const waitingActionGuard = (
@@ -7557,7 +7560,10 @@ import "../../styles/kylon-image-viewer.css";
           if (typeof closeEntityPanel === "function") closeEntityPanel(false);
         },
         onStateChange: (open) => {
-          if (!open) clearWaitingArchivedCache();
+          if (!open) {
+            clearWaitingArchivedCache();
+            waitingDismissalCtrl.retireBatch(false);
+          }
           syncWaitingButtons();
         },
       });
@@ -7876,6 +7882,8 @@ import "../../styles/kylon-image-viewer.css";
       waitingGeneration += 1;
       waitingInFlight = false;
       waitingAgain = false;
+      if (typeof waitingAgainMaxPages !== "undefined") waitingAgainMaxPages = undefined;
+      if (typeof waitingRefreshPromise !== "undefined") waitingRefreshPromise = null;
       window.clearTimeout(waitingTimer);
       waitingTimer = undefined;
       if (workspaceId) waitingWorkspaceChannels.delete(workspaceId);
@@ -7985,6 +7993,18 @@ import "../../styles/kylon-image-viewer.css";
       reloadWaiting: async () => {
         await refreshWaitingCounts();
       },
+      reloadWaitingBatch: async () => {
+        await reloadWaitingFresh();
+      },
+      isItemListed: (workspaceId, slotKind, cardId) => {
+        if (slotKind === "ask") {
+          return (waitingPanelAsks.get(workspaceId) ?? []).some(item => item.id === cardId);
+        }
+        if (slotKind === "plain") {
+          return (waitingPanelPlainAsks.get(workspaceId) ?? []).some(item => item.id === cardId);
+        }
+        return (waitingPanelTodos.get(workspaceId) ?? []).some(item => item.id === cardId);
+      },
       invalidateArchived: (workspaceId) => {
         invalidateWaitingArchived(workspaceId);
       },
@@ -8029,7 +8049,132 @@ import "../../styles/kylon-image-viewer.css";
           });
         }
       },
+      onBatchConfirmOpened: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-confirm" });
+        }
+      },
+      onBatchCancelled: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-cancel" });
+        }
+      },
+      onBatchStarted: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-running" });
+        }
+      },
+      onBatchFinished: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-done" });
+        }
+      },
+      onBatchUndoFinished: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-undone" });
+        }
+      },
     });
+
+    const collectWaitingBatchTargets = (scope: WaitingScope, place: WaitingPlace): WaitingDismissBatchTarget[] => {
+      if (!waitingPanelMod) return [];
+      const allItems = allWaitingAskItems();
+      const allPlainAsks = allWaitingPlainAskItems();
+      const allTodos = allWaitingTodoItems();
+      const visibleItems = waitingPanelMod.filterWaitingItems(allItems, scope, place);
+      const visibleTodos = waitingPanelMod.filterWaitingTodos(allTodos, scope, place);
+      const visiblePlainAsks = waitingPanelMod.filterWaitingItems(allPlainAsks, scope, place);
+      const out: WaitingDismissBatchTarget[] = [];
+      for (const item of visibleItems) {
+        const conv = item.conversation;
+        out.push({
+          slotKind: "ask",
+          itemKind: "ask",
+          itemId: item.id,
+          cardId: item.id,
+          workspaceId: item.workspaceId,
+          channelId: conv.kind === "channel" ? conv.channelId : null,
+          conversationId: conv.kind === "dm" || conv.kind === "group_dm" ? (conv.conversationId ?? null) : null,
+          placementKind: conv.kind,
+        });
+      }
+      for (const item of visibleTodos) {
+        const itemKind: WaitingDismissalItemKind = item.reason === "request" ? "review" : "todo";
+        out.push({
+          slotKind: "todo",
+          itemKind,
+          itemId: itemKind === "review" ? "" : item.id,
+          cardId: item.id,
+          workspaceId: item.workspaceId,
+          channelId: item.channelId ?? null,
+          conversationId: item.conversationId ?? null,
+          placementKind: item.placement ?? "workspace",
+        });
+      }
+      for (const item of visiblePlainAsks) {
+        const conv = item.conversation;
+        out.push({
+          slotKind: "plain",
+          itemKind: "ask",
+          itemId: item.id,
+          cardId: item.id,
+          workspaceId: item.workspaceId,
+          channelId: conv.kind === "channel" ? conv.channelId : null,
+          conversationId: conv.kind === "dm" || conv.kind === "group_dm" ? (conv.conversationId ?? null) : null,
+          placementKind: conv.kind,
+        });
+      }
+      return out;
+    };
+
+    const startWaitingDismissAll = (): void => {
+      if (!waitingActionContext() || !waitingPanelMod) return;
+      clearWaitingStatus();
+      const scope = waitingScope;
+      const place = currentWaitingPlace();
+      const placeKey = waitingPlaceKeyFor(place);
+      const scopeWorkspaceIds = scope === "all"
+        ? workspaces.map(ws => ws.id)
+        : (place.workspaceId ? [place.workspaceId] : []);
+      if (scopeWorkspaceIds.length === 0) return;
+      const scopeComplete =
+        !waitingInFlight &&
+        !waitingPanelOverviewFailed &&
+        scopeWorkspaceIds.every(wsId =>
+          waitingPanelLoadedWorkspaces.has(wsId) &&
+          !waitingPanelTruncatedWorkspaces.has(wsId) &&
+          !waitingPanelFailedWorkspaces.has(wsId),
+        );
+      if (scopeComplete) {
+        void waitingDismissalCtrl.beginBatchConfirm({
+          scope,
+          placeKey,
+          workspaceIds: scopeWorkspaceIds,
+          targets: collectWaitingBatchTargets(scope, place),
+        });
+        return;
+      }
+      void waitingDismissalCtrl.beginBatchConfirm({
+        scope,
+        placeKey,
+        workspaceIds: scopeWorkspaceIds,
+        loadTargets: async (isAlive) => {
+          await reloadWaitingFresh({ maxPages: 200 });
+          if (!isAlive()) return null;
+          return collectWaitingBatchTargets(scope, place);
+        },
+      });
+    };
 
     const dismissWaitingPanelItem = async (
       target:
@@ -8238,6 +8383,15 @@ import "../../styles/kylon-image-viewer.css";
           hasMore: anyArchHasMore,
         };
       }
+      const activeBatchScope = waitingDismissalCtrl.batchScope();
+      if (
+        activeBatchScope &&
+        (activeBatchScope.scope !== waitingScope ||
+          (activeBatchScope.scope === "channel" && activeBatchScope.placeKey !== placeKey) ||
+          (activeBatchScope.scope === "workspace" && !activeBatchScope.workspaceIds.has(place.workspaceId.trim().toLowerCase())))
+      ) {
+        waitingDismissalCtrl.retireBatch(false);
+      }
       const activeDismissedPlaceholders = waitingDismissalCtrl.placeholdersFor(placeKey, waitingScope);
       waitingPanelMod.renderWaitingPanel(
         container,
@@ -8249,6 +8403,7 @@ import "../../styles/kylon-image-viewer.css";
           plainAsks: visiblePlainAsks,
           todos: visibleTodos,
           dismissedPlaceholders: activeDismissedPlaceholders,
+          dismissBatch: waitingDismissalCtrl.batchState(),
           archived: archivedVM,
           counts: {
             channel: { min: channelItems.length + channelPlainAsks.length + channelTodos.length, complete: wsLoaded },
@@ -8340,6 +8495,11 @@ import "../../styles/kylon-image-viewer.css";
           },
           onDismissTodo: (item) => void dismissWaitingPanelItem({ slotKind: "todo", item }),
           onUndoDismiss: (placeholder) => void undoWaitingDismissal(placeholder.key),
+          onDismissAllStart: () => startWaitingDismissAll(),
+          onDismissAllConfirm: () => void waitingDismissalCtrl.confirmBatch(),
+          onDismissAllCancel: () => waitingDismissalCtrl.cancelBatchConfirm(),
+          onDismissAllStop: () => waitingDismissalCtrl.stopBatch(),
+          onUndoDismissBatch: () => void waitingDismissalCtrl.undoBatch(),
           onOpenCatchUp: (href) => {
             clearWaitingStatus();
             waitingSurface?.close(false);
@@ -8347,6 +8507,7 @@ import "../../styles/kylon-image-viewer.css";
           },
           onStartSurvey: () => {
             clearWaitingStatus();
+            waitingDismissalCtrl.retireBatch(false);
             waitingSurvey = {
               active: true,
               mode: "step",
@@ -8523,6 +8684,8 @@ import "../../styles/kylon-image-viewer.css";
       waitingOpenEpoch += 1;
       waitingInFlight = false;
       waitingAgain = false;
+      if (typeof waitingAgainMaxPages !== "undefined") waitingAgainMaxPages = undefined;
+      if (typeof waitingRefreshPromise !== "undefined") waitingRefreshPromise = null;
       window.clearTimeout(waitingTimer);
       waitingTimer = undefined;
       if (typeof waitingStatusTimer !== "undefined") {
@@ -8559,16 +8722,42 @@ import "../../styles/kylon-image-viewer.css";
     const retireWaitingState = (): void => {
       resetWaitingPanelState();
     };
-    const refreshWaitingCounts = async (): Promise<void> => {
+    const reloadWaitingFresh = async (options?: { maxPages?: number }): Promise<void> => {
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const genAtCall = waitingGeneration;
+      if (waitingInFlight && waitingRefreshPromise) {
+        waitingAgain = true;
+        if (options?.maxPages !== undefined) {
+          waitingAgainMaxPages = Math.max(waitingAgainMaxPages ?? 0, options.maxPages);
+        }
+        await waitingRefreshPromise;
+        if (typeof waitingAuthGeneration !== "undefined" && authGen !== waitingAuthGeneration) return;
+        if (waitingInFlight && waitingRefreshPromise) {
+          await waitingRefreshPromise;
+          return;
+        }
+        if (waitingGeneration > genAtCall) return;
+      }
+      await refreshWaitingCounts(options);
+    };
+    const refreshWaitingCounts = (options?: { maxPages?: number }): Promise<void> => {
       // Catch up counts for itself, into the same map, and starts by clearing it.
       if (
         sampleMode ||
         !session ||
         (typeof renderedAuthUserId !== "undefined" && (!renderedAuthUserId || renderedAuthUserId !== session.user.id)) ||
         homeRoute.view === "catchup"
-      ) return;
-      if (waitingInFlight) { waitingAgain = true; return; }
+      ) return Promise.resolve();
+      if (waitingInFlight) {
+        waitingAgain = true;
+        if (options?.maxPages !== undefined && typeof waitingAgainMaxPages !== "undefined") {
+          waitingAgainMaxPages = Math.max(waitingAgainMaxPages ?? 0, options.maxPages);
+        }
+        return Promise.resolve();
+      }
       waitingInFlight = true;
+      const pageOpts = options?.maxPages !== undefined ? { maxPages: options.maxPages } : undefined;
+      const run = (async (): Promise<void> => {
       const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
       const generation = ++waitingGeneration, viewer = (typeof renderedAuthUserId !== "undefined" && renderedAuthUserId) || homeViewerId();
       const pinned =
@@ -8650,7 +8839,7 @@ import "../../styles/kylon-image-viewer.css";
             const hasTodos = row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0;
 
             let queue: DecisionQueue | null = hasAsks
-              ? await Promise.resolve().then(() => homeServer(pinned)?.decisionQueue(workspace.id) ?? null).catch(() => null)
+              ? await Promise.resolve().then(() => homeServer(pinned)?.decisionQueue(workspace.id, pageOpts) ?? null).catch(() => null)
               : { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] };
             if (!live()) return;
             if (!liveWorkspace(workspace.id)) continue;
@@ -8804,7 +8993,7 @@ import "../../styles/kylon-image-viewer.css";
             let todosReadFailed = false;
             if (hasTodos) {
               try {
-                todosQueue = await homeServer(pinned)?.waitingTodos(workspace.id) ?? null;
+                todosQueue = await homeServer(pinned)?.waitingTodos(workspace.id, pageOpts) ?? null;
                 if (!live()) return;
                 if (!liveWorkspace(workspace.id)) continue;
                 if (!todosQueue) todosReadFailed = true;
@@ -8942,14 +9131,20 @@ import "../../styles/kylon-image-viewer.css";
       } finally {
         if (generation === waitingGeneration) {
           waitingInFlight = false;
+          if (typeof waitingRefreshPromise !== "undefined" && waitingRefreshPromise === run) waitingRefreshPromise = null;
+          const nextMaxPages = typeof waitingAgainMaxPages !== "undefined" ? waitingAgainMaxPages : undefined;
+          if (typeof waitingAgainMaxPages !== "undefined") waitingAgainMaxPages = undefined;
           if (waitingAgain && (typeof waitingAuthGeneration === "undefined" || authGen === waitingAuthGeneration) && live()) {
             waitingAgain = false;
-            void refreshWaitingCounts();
+            void refreshWaitingCounts(nextMaxPages !== undefined ? { maxPages: nextMaxPages } : undefined);
           } else {
             waitingAgain = false;
           }
         }
       }
+      })();
+      if (typeof waitingRefreshPromise !== "undefined") waitingRefreshPromise = run;
+      return run;
     };
     /** Soon, once: after an answer, an arrival or a return to the tab. */
     const scheduleWaitingRefresh = (delay = 1_500): void => {

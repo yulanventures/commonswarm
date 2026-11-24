@@ -472,7 +472,7 @@ export function createHomeServer(
       return data as unknown as HomeOverview;
     },
 
-    async decisionQueue(workspaceId): Promise<DecisionQueue | null> {
+    async decisionQueue(workspaceId, options?: { maxPages?: number }): Promise<DecisionQueue | null> {
       const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
       if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
@@ -488,8 +488,8 @@ export function createHomeServer(
       let page = first;
       let truncated = true;
       let pages = 1;
-      const MAX_PAGES = 20;
-      while (truncated && pages < MAX_PAGES && page.asks.length > 0) {
+      const maxPages = Math.max(1, options?.maxPages ?? 20);
+      while (truncated && pages < maxPages && page.asks.length > 0) {
         if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.asks[page.asks.length - 1]!;
         let next: DecisionQueue | null = null;
@@ -534,10 +534,10 @@ export function createHomeServer(
       };
     },
 
-    async waitingTodos(workspaceId): Promise<WaitingTodosQueue | null> {
+    async waitingTodos(workspaceId, options?: { maxPages?: number }): Promise<WaitingTodosQueue | null> {
       const { c, pinned } = resolvePinnedClient();
       const PAGE_LIMIT = 50;
-      const MAX_PAGES = 20;
+      const maxPages = Math.max(1, options?.maxPages ?? 20);
       const { data, error } = await c.schema('swarm_read').rpc('waiting_todos_page', {
         p_workspace_id: workspaceId,
         p_limit: PAGE_LIMIT,
@@ -552,7 +552,7 @@ export function createHomeServer(
       let page = first;
       let truncated = true;
       let pages = 1;
-      while (truncated && pages < MAX_PAGES && page.todos.length > 0) {
+      while (truncated && pages < maxPages && page.todos.length > 0) {
         if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.todos[page.todos.length - 1]!;
         let next: WaitingTodosQueue | null = null;
