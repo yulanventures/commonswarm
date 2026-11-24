@@ -805,7 +805,8 @@ without a scope.
    `file_id`. The result carries `file_id`, `version_id`, `version_n`, `upload_path`
    and `upload_token`.
 2. `PUT <PROJECT_URL><upload_path>` with the bytes and the same `content-type`. The URL
-   lasts two hours; an uncommitted slot is swept after three.
+   lasts two hours; an uncommitted upload stops counting toward the workspace byte
+   limit three hours after the slot is created.
 3. `file_version_commit`. The result carries `version_n`, `size_bytes`, `sha256` (your
    claim, not verified) and `reference`, a stable `file:<file_id>@v<n>` link.
 

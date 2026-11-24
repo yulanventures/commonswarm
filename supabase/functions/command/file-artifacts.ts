@@ -705,7 +705,7 @@ export async function fileVersionCreate(
       return refuse(
         409,
         "workspace_file_count",
-        `this workspace already has ${FILE_WORKSPACE_MAX_NAMES} file names; the purge frees a name 30 days after its tombstone — tombstoning alone does not`,
+        `this workspace already has ${FILE_WORKSPACE_MAX_NAMES} file names; removing a file does not free its name at once, the name becomes eligible to be freed after the 30-day restore window`,
         "workspace name cap",
       );
     }
@@ -793,7 +793,7 @@ export async function fileVersionCreate(
       upload_token: upload.token,
       upload_expires_in_seconds: 7200,
       commit_deadline_note:
-        "PUT the bytes to <your deployment URL> + upload_path, then send file_version_commit. The upload URL lasts two hours; the pending slot is swept three hours from now.",
+        "PUT the bytes to <your deployment URL> + upload_path, then send file_version_commit. The upload URL lasts two hours; an uncommitted upload stops counting toward the workspace byte limit three hours after the slot is created.",
     },
   };
 }
