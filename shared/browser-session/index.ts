@@ -225,6 +225,8 @@ export interface BrowserSession {
   verifiedSession(): Promise<Session | null>;
   boundedAuth<T>(operation: Promise<T>): Promise<T>;
   signOut(): Promise<void>;
+  /** Stop this instance's background auth work without modifying stored credentials or signing out. */
+  quiesce(): Promise<void>;
 }
 
 export interface BrowserSessionLocksUnavailable {
@@ -252,6 +254,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   }
 
   let deadSession = false;
+  let quiesced = false;
+  let quiescePromise: Promise<void> | null = null;
+  const quiesceController = new AbortController();
   let sessionStorageKey: string | null = null;
   let removalSnapshot: string | null = null;
   const authMemory = new Map<string, string>();
@@ -264,6 +269,8 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   let storageRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let storageRetryDelay = 1_000;
   let storageRetryInFlight = false;
+  let activeStorageRetry: Promise<void> | null = null;
+  const activeAuthFetches = new Set<Promise<unknown>>();
 
   function storageBackend(): Storage | null {
     if (persistentStorage) return persistentStorage;
@@ -302,39 +309,50 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
 
   async function retryStorageWrites(): Promise<void> {
     storageRetryTimer = undefined;
+    if (quiesced) return;
     storageRetryInFlight = true;
-    try {
-      const lock = hasWebLocks()
-        ? navigatorLock
-        : options.allowProcessLockFallback
-          ? processLock
-          : null;
-      if (!lock) return;
-      for (const [key, pending] of pendingStorageWrites) {
-        // A fresh sign-in identifies its SDK key before the first successful read.
-        // Try once without waiting or stealing; a busy owner gets the next tick.
-        try {
-          await lock(`lock:${sessionStorageKey ?? key}`, 0, async () => {
-            const storage = storageBackend();
-            reconcileAuthItem(key);
-            if (pendingStorageWrites.get(key) !== pending || !storage ||
-                pending.expected === undefined || readPersistentAuthItem(key) === undefined) return;
-            try {
-              storage.setItem(key, pending.value);
-              if (storage.getItem(key) === pending.value) acceptPersistentAuthItem(key, pending.value);
-            } catch { persistentStorage = null; }
-          });
-        } catch { /* A busy SDK lock is retried without stealing or queueing. */ }
+    const run = (async () => {
+      try {
+        const lock = hasWebLocks()
+          ? navigatorLock
+          : options.allowProcessLockFallback
+            ? processLock
+            : null;
+        if (!lock) return;
+        for (const [key, pending] of pendingStorageWrites) {
+          if (quiesced) return;
+          // A fresh sign-in identifies its SDK key before the first successful read.
+          // Try once without waiting or stealing; a busy owner gets the next tick.
+          try {
+            await lock(`lock:${sessionStorageKey ?? key}`, 0, async () => {
+              if (quiesced) return;
+              const storage = storageBackend();
+              reconcileAuthItem(key);
+              if (quiesced || pendingStorageWrites.get(key) !== pending || !storage ||
+                  pending.expected === undefined || readPersistentAuthItem(key) === undefined) return;
+              try {
+                storage.setItem(key, pending.value);
+                if (storage.getItem(key) === pending.value) acceptPersistentAuthItem(key, pending.value);
+              } catch { persistentStorage = null; }
+            });
+          } catch { /* A busy SDK lock is retried without stealing or queueing. */ }
+        }
+      } catch { persistentStorage = null; }
+      finally {
+        storageRetryInFlight = false;
+        activeStorageRetry = null;
+        if (!quiesced) {
+          storageRetryDelay = Math.min(storageRetryDelay * 2, 30_000);
+          scheduleStorageRetry();
+        }
       }
-    } catch { persistentStorage = null; }
-    finally {
-      storageRetryInFlight = false;
-      storageRetryDelay = Math.min(storageRetryDelay * 2, 30_000);
-      scheduleStorageRetry();
-    }
+    })();
+    activeStorageRetry = run;
+    await run;
   }
 
   function scheduleStorageRetry(): void {
+    if (quiesced) return;
     if (!("localStorage" in globalThis)) return;
     if (storageRetryTimer !== undefined || storageRetryInFlight || pendingStorageWrites.size === 0) return;
     storageRetryTimer = setTimeout(retryStorageWrites, storageRetryDelay);
@@ -343,6 +361,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   }
 
   const onStorage = (event: StorageEvent): void => {
+    if (quiesced) return;
     if (event.storageArea !== globalThis.localStorage) return;
     const keys = event.key === null ? [...importedStorageKeys] : [event.key];
     for (const key of keys) {
@@ -379,6 +398,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   // page's successor until a still-owned save can be written and read back.
   const authStorage = {
     getItem(key: string): string | null {
+      if (quiesced) return null;
       importedStorageKeys.add(key);
       reconcileAuthItem(key);
       const value = authMemory.get(key) ?? null;
@@ -386,6 +406,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       return value;
     },
     setItem(key: string, value: string): void {
+      if (quiesced) {
+        throw new AuthRetryableFetchError("Session quiesced", 0);
+      }
       importedStorageKeys.add(key);
       const pending = pendingStorageWrites.get(key);
       const disk = readPersistentAuthItem(key);
@@ -410,6 +433,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       scheduleStorageRetry();
     },
     removeItem(key: string): void {
+      if (quiesced) {
+        throw new AuthRetryableFetchError("Session quiesced", 0);
+      }
       if (key === sessionStorageKey && removalSnapshot !== null) {
         const expected = removalSnapshot;
         removalSnapshot = null;
@@ -436,8 +462,29 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
    * at a time; the removal's SIGNED_OUT drives the page's signed-out view.
    */
   function checkSessionAfterRestRefusal(verify: () => Promise<unknown> = () => verifiedSession()): void {
-    if (restSessionCheck) return;
+    if (quiesced || restSessionCheck) return;
     restSessionCheck = Promise.resolve().then(verify).catch(() => undefined).finally(() => { restSessionCheck = null; });
+  }
+
+  function quiescedRefreshResponse(): Response {
+    // Returning a synthetic session payload while authStorage.getItem returns null
+    // triggers GoTrue's built-in commit guard (AuthRefreshDiscardedError): exits
+    // immediately on attempt 0 with zero backoff retries, zero storage writes or
+    // removals, zero SIGNED_OUT broadcast, and clean Web Lock release. authStorage
+    // independently throws on any direct write/removal while quiesced.
+    return new Response(
+      JSON.stringify({
+        access_token: "quiesced",
+        refresh_token: "quiesced",
+        expires_in: 1,
+        token_type: "bearer",
+        user: { id: "quiesced" },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
   }
 
   /** Adapt only refresh failures that the pinned SDK would otherwise destroy.
@@ -445,77 +492,113 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
    * Other endpoints keep their SDK method, body and error contracts.
    */
   const authFetch: typeof fetch = async (input, init) => {
-    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-    const isRefresh = method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "refresh_token";
-    const isUser = method === "GET" && url.pathname.endsWith("/auth/v1/user");
-    if (!isRefresh && !isUser) {
-      const response = await fetch(input, init);
-      if (url.pathname.includes("/rest/v1/") && await isRestSessionEnded(response)) checkSessionAfterRestRefusal();
-      return response;
-    }
-    if (isRefresh && Date.now() < refreshRetryAfter) {
-      // Keep the SDK's single-flight refresh pending through our cooldown. Fast
-      // failures exhaust its backoff and then cache the failure for another 60s,
-      // preventing a recovered backend from being reached by Try again.
-      // The caller's 4s deadline still owns the UI; the SDK retains its lock.
-      await new Promise(resolve => setTimeout(resolve, Math.min(refreshRetryAfter - Date.now(), 30_000)));
-      if (Date.now() < refreshRetryAfter) {
-        throw new AuthRetryableFetchError("Sign-in check interrupted", 0);
+    const run = (async (): Promise<Response> => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const isRefresh = method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "refresh_token";
+      const isUser = method === "GET" && url.pathname.endsWith("/auth/v1/user");
+      if (quiesced) {
+        if (isRefresh) return quiescedRefreshResponse();
+        throw new AuthRetryableFetchError("Session quiesced", 0);
       }
-    }
-    const savedAtStart = sessionStorageKey ? authStorage.getItem(sessionStorageKey) : null;
-    const savedCredential = savedSession(savedAtStart);
-    let requestRefresh: unknown;
-    if (isRefresh && typeof init?.body === "string") {
-      try { requestRefresh = JSON.parse(init.body)?.refresh_token; } catch { /* SDK owns request validation. */ }
-    }
-    const access = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
-      .get("authorization")?.replace(/^Bearer /i, "");
-    let response: Response;
+      if (!isRefresh && !isUser) {
+        const response = await fetch(input, init);
+        if (url.pathname.includes("/rest/v1/") && await isRestSessionEnded(response)) checkSessionAfterRestRefusal();
+        return response;
+      }
+      if (isRefresh && Date.now() < refreshRetryAfter) {
+        // Keep the SDK's single-flight refresh pending through our cooldown. Fast
+        // failures exhaust its backoff and then cache the failure for another 60s,
+        // preventing a recovered backend from being reached by Try again.
+        // The caller's 4s deadline still owns the UI; the SDK retains its lock.
+        const delayMs = Math.min(refreshRetryAfter - Date.now(), 30_000);
+        await new Promise<void>((resolve) => {
+          if (quiesced || quiesceController.signal.aborted) { resolve(); return; }
+          const onAbort = (): void => { clearTimeout(timer); resolve(); };
+          const timer = setTimeout(() => {
+            quiesceController.signal.removeEventListener("abort", onAbort);
+            resolve();
+          }, delayMs);
+          quiesceController.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        if (quiesced) return quiescedRefreshResponse();
+        if (Date.now() < refreshRetryAfter) {
+          throw new AuthRetryableFetchError("Sign-in check interrupted", 0);
+        }
+      }
+      const savedAtStart = sessionStorageKey ? authStorage.getItem(sessionStorageKey) : null;
+      const savedCredential = savedSession(savedAtStart);
+      let requestRefresh: unknown;
+      if (isRefresh && typeof init?.body === "string") {
+        try { requestRefresh = JSON.parse(init.body)?.refresh_token; } catch { /* SDK owns request validation. */ }
+      }
+      const access = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+        .get("authorization")?.replace(/^Bearer /i, "");
+      let response: Response;
+      try {
+        response = await fetch(input, { ...init, signal: AbortSignal.any([
+          ...((init?.signal ?? (input instanceof Request ? input.signal : null))
+            ? [init?.signal ?? (input as Request).signal] : []),
+          quiesceController.signal,
+          AbortSignal.timeout(4_000),
+        ]) });
+      } catch (error) {
+        if (quiesced) {
+          if (isRefresh) return quiescedRefreshResponse();
+          throw new AuthRetryableFetchError("Session quiesced", 0);
+        }
+        if (isRefresh) refreshRetryAfter = Date.now() + 30_000;
+        throw error;
+      }
+      if (quiesced) {
+        if (isRefresh) return quiescedRefreshResponse();
+        throw new AuthRetryableFetchError("Session quiesced", 0);
+      }
+      if (response.ok) {
+        if (isRefresh) {
+          refreshRetryAfter = 0;
+          // auth-js's storedAfter guard discards a peer replacement/logout without
+          // re-sending the now-consumed predecessor or entering a retry cooldown.
+        }
+        return response;
+      }
+      const body = await response.clone().json().catch(() => null);
+      if (quiesced) {
+        if (isRefresh) return quiescedRefreshResponse();
+        throw new AuthRetryableFetchError("Session quiesced", 0);
+      }
+      // Match auth-js's versioned GoTrue error contract.
+      const version = response.headers.get("x-supabase-api-version");
+      const code = version && version >= "2024-01-01" && typeof body?.code === "string"
+        ? body.code : body?.error_code;
+      const terminal = [400, 401, 403, 404].includes(response.status) && terminalRefreshCodes.has(code);
+      const matches = isRefresh ? savedCredential?.refresh_token === requestRefresh
+        : savedCredential?.access_token === access;
+      if (terminal && (!matches || !savedAtStart ||
+          (sessionStorageKey && authStorage.getItem(sessionStorageKey) !== savedAtStart))) {
+        if (isRefresh) refreshRetryAfter = Date.now() + 30_000;
+        throw new AuthRetryableFetchError("Sign-in changed during verification", 0);
+      }
+      if (terminal && ((isUser && code === "session_not_found") ||
+          (isRefresh && savedCredential?.expires_at && savedCredential.expires_at * 1000 <= Date.now()))) {
+        removalSnapshot = savedAtStart;
+      }
+      if (isRefresh && !terminal) {
+        // already_used is ambiguous rotation evidence, never terminal proof.
+        const retryAfter = response.headers.get("retry-after");
+        const seconds = retryAfter === null ? NaN : Number(retryAfter);
+        const until = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : Date.parse(retryAfter ?? "");
+        refreshRetryAfter = Math.max(Date.now() + 30_000, Number.isFinite(until) ? until : 0);
+        throw new AuthRetryableFetchError("Sign-in check interrupted", response.status);
+      }
+      return response;
+    })();
+    activeAuthFetches.add(run);
     try {
-      response = await fetch(input, { ...init, signal: AbortSignal.any([
-        ...((init?.signal ?? (input instanceof Request ? input.signal : null))
-          ? [init?.signal ?? (input as Request).signal] : []), AbortSignal.timeout(4_000),
-      ]) });
-    } catch (error) {
-      if (isRefresh) refreshRetryAfter = Date.now() + 30_000;
-      throw error;
+      return await run;
+    } finally {
+      activeAuthFetches.delete(run);
     }
-    if (response.ok) {
-      if (isRefresh) {
-        refreshRetryAfter = 0;
-        // auth-js's storedAfter guard discards a peer replacement/logout without
-        // re-sending the now-consumed predecessor or entering a retry cooldown.
-      }
-      return response;
-    }
-    const body = await response.clone().json().catch(() => null);
-    // Match auth-js's versioned GoTrue error contract.
-    const version = response.headers.get("x-supabase-api-version");
-    const code = version && version >= "2024-01-01" && typeof body?.code === "string"
-      ? body.code : body?.error_code;
-    const terminal = [400, 401, 403, 404].includes(response.status) && terminalRefreshCodes.has(code);
-    const matches = isRefresh ? savedCredential?.refresh_token === requestRefresh
-      : savedCredential?.access_token === access;
-    if (terminal && (!matches || !savedAtStart ||
-        (sessionStorageKey && authStorage.getItem(sessionStorageKey) !== savedAtStart))) {
-      if (isRefresh) refreshRetryAfter = Date.now() + 30_000;
-      throw new AuthRetryableFetchError("Sign-in changed during verification", 0);
-    }
-    if (terminal && ((isUser && code === "session_not_found") ||
-        (isRefresh && savedCredential?.expires_at && savedCredential.expires_at * 1000 <= Date.now()))) {
-      removalSnapshot = savedAtStart;
-    }
-    if (isRefresh && !terminal) {
-      // already_used is ambiguous rotation evidence, never terminal proof.
-      const retryAfter = response.headers.get("retry-after");
-      const seconds = retryAfter === null ? NaN : Number(retryAfter);
-      const until = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : Date.parse(retryAfter ?? "");
-      refreshRetryAfter = Math.max(Date.now() + 30_000, Number.isFinite(until) ? until : 0);
-      throw new AuthRetryableFetchError("Sign-in check interrupted", response.status);
-    }
-    return response;
   };
 
   const client = createClient(options.url, options.anonKey, {
@@ -540,8 +623,10 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   });
 
   async function verifiedSession(): Promise<Session | null> {
+    if (quiesced) throw new AuthRecoveryRequired();
     try {
       const { data, error: sessionError } = await client.auth.getSession();
+      if (quiesced) throw new AuthRecoveryRequired();
       if (sessionError) {
         if (isAuthSessionMissingError(sessionError) || terminalRefreshCodes.has(sessionError.code ?? "")) {
           const successor = await client.auth.getSession();
@@ -559,7 +644,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       // holding its lock, including terminal removal. A stale caller cannot clear a
       // successor by validating an old token outside that lock.
       const { data: userData, error } = await client.auth.getUser();
+      if (quiesced) throw new AuthRecoveryRequired();
       const latest = await client.auth.getSession();
+      if (quiesced) throw new AuthRecoveryRequired();
       if (error) {
         if (latest.data.session && !sameCredentials(session, latest.data.session)) {
           throw new AuthRecoveryRequired();
@@ -589,6 +676,46 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     deadSession = false;
   }
 
+  function quiesce(): Promise<void> {
+    if (quiescePromise) return quiescePromise;
+    quiesced = true;
+    removalSnapshot = null;
+    pendingStorageWrites.clear();
+    if (storageRetryTimer !== undefined) {
+      clearTimeout(storageRetryTimer);
+      storageRetryTimer = undefined;
+    }
+    if (typeof globalThis.removeEventListener === "function") {
+      globalThis.removeEventListener("storage", onStorage);
+    }
+    quiesceController.abort();
+
+    const authApi = client.auth as unknown as {
+      dispose?: () => Promise<void>;
+      stopAutoRefresh?: () => Promise<void>;
+      initializePromise?: Promise<unknown> | null;
+    };
+    const sdkDispose =
+      typeof authApi.dispose === "function"
+        ? authApi.dispose()
+        : typeof authApi.stopAutoRefresh === "function"
+          ? authApi.stopAutoRefresh()
+          : Promise.resolve();
+
+    quiescePromise = (async () => {
+      await Promise.allSettled([
+        sdkDispose,
+        ...(authApi.initializePromise ? [authApi.initializePromise] : []),
+        ...activeAuthFetches,
+        ...(activeStorageRetry ? [activeStorageRetry] : []),
+        ...(restSessionCheck ? [restSessionCheck] : []),
+      ]);
+      // Allow any SDK lock callback catching our abort/quiesce error to finish its finally block.
+      await Promise.resolve();
+    })();
+    return quiescePromise;
+  }
+
   return {
     ok: true,
     client,
@@ -597,5 +724,6 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     verifiedSession,
     boundedAuth,
     signOut,
+    quiesce,
   };
 }

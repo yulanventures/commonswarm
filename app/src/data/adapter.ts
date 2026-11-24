@@ -221,12 +221,6 @@ export function adaptAgents(input: AdaptAgentsInput): Agent[] {
         agentsWithOpenAsk.add(ask.from.id.toLowerCase());
       }
     }
-  } else if (overviewWorkspace) {
-    for (const ask of overviewWorkspace.needs_you.asks) {
-      if (ask.from.kind === 'agent') {
-        agentsWithOpenAsk.add(ask.from.id.toLowerCase());
-      }
-    }
   }
 
   return input.principals.map((principal) => {

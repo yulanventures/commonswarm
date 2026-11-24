@@ -13,6 +13,7 @@ export interface Fence {
   readonly workspaceGeneration: number;
   readonly conversationId: string | null;
   readonly conversationGeneration: number;
+  readonly overviewGeneration?: number;
 }
 
 export interface FenceCheckOptions {
@@ -119,8 +120,10 @@ export class FenceTracker {
   private _loginIdentity: LoginIdentity | null = null;
   private _activeWorkspaceId: string | null = null;
   private _activeConversationId: string | null = null;
+  private _overviewGeneration = 0;
   private readonly workspaceGenerations = new Map<string, number>();
   private readonly conversationGenerations = new Map<string, number>();
+  private readonly revokedWorkspaces = new Set<string>();
 
   get loginGeneration(): number {
     return this._loginGeneration;
@@ -140,6 +143,15 @@ export class FenceTracker {
 
   get activeConversationId(): string | null {
     return this._activeConversationId;
+  }
+
+  get overviewGeneration(): number {
+    return this._overviewGeneration;
+  }
+
+  isWorkspaceRevoked(workspaceId: string | null | undefined): boolean {
+    const normalized = normalizeScopeId(workspaceId);
+    return normalized !== null && this.revokedWorkspaces.has(normalized);
   }
 
   getWorkspaceGeneration(workspaceId: string | null | undefined): number {
@@ -191,9 +203,11 @@ export class FenceTracker {
     }
 
     this._loginGeneration += 1;
+    this._overviewGeneration = 0;
     this._loginIdentity = nextIdentity;
     this._activeWorkspaceId = null;
     this._activeConversationId = null;
+    this.revokedWorkspaces.clear();
     return {
       changed: true,
       identity: nextIdentity,
@@ -203,18 +217,23 @@ export class FenceTracker {
 
   /**
    * Unconditionally bump `loginGeneration` and clear the tracked login identity.
-   * Used on sign-out, storage removal, terminal session loss, and bfcache restore.
+   * Used on sign-out, storage removal, terminal session loss, and bfcache retirement.
    */
   forceLoginLoss(): number {
     this._loginGeneration += 1;
+    this._overviewGeneration = 0;
     this._loginIdentity = null;
     this._activeWorkspaceId = null;
     this._activeConversationId = null;
+    this.revokedWorkspaces.clear();
     return this._loginGeneration;
   }
 
   setActiveWorkspace(workspaceId: string | null): void {
     const normalized = normalizeScopeId(workspaceId);
+    if (normalized !== null && this.revokedWorkspaces.has(normalized)) {
+      return;
+    }
     if (this._activeWorkspaceId === normalized) return;
     this._activeWorkspaceId = normalized;
     this._activeConversationId = null;
@@ -229,7 +248,10 @@ export class FenceTracker {
     if (!normalized) return 0;
     const next = (this.workspaceGenerations.get(normalized) ?? 0) + 1;
     this.workspaceGenerations.set(normalized, next);
+    this.revokedWorkspaces.add(normalized);
+    this._overviewGeneration += 1;
     if (this._activeWorkspaceId === normalized) {
+      this._activeWorkspaceId = null;
       this._activeConversationId = null;
     }
     return next;
@@ -240,6 +262,7 @@ export class FenceTracker {
     if (!normalized) return 0;
     const next = (this.conversationGenerations.get(normalized) ?? 0) + 1;
     this.conversationGenerations.set(normalized, next);
+    this._overviewGeneration += 1;
     if (this._activeConversationId === normalized) {
       this._activeConversationId = null;
     }
@@ -249,6 +272,7 @@ export class FenceTracker {
   capture(scope?: {
     workspaceId?: string | null;
     conversationId?: string | null;
+    includeOverview?: boolean;
   }): Fence {
     const workspaceId =
       scope && 'workspaceId' in scope
@@ -267,6 +291,9 @@ export class FenceTracker {
       workspaceGeneration: this.getWorkspaceGeneration(workspaceId),
       conversationId,
       conversationGeneration: this.getConversationGeneration(conversationId),
+      ...(scope?.includeOverview
+        ? { overviewGeneration: this._overviewGeneration }
+        : {}),
     };
   }
 
@@ -286,7 +313,17 @@ export class FenceTracker {
       return false;
     }
 
+    if (
+      fence.overviewGeneration !== undefined &&
+      fence.overviewGeneration !== this._overviewGeneration
+    ) {
+      return false;
+    }
+
     if (fence.workspaceId !== null) {
+      if (this.revokedWorkspaces.has(fence.workspaceId)) {
+        return false;
+      }
       if (this.getWorkspaceGeneration(fence.workspaceId) !== fence.workspaceGeneration) {
         return false;
       }

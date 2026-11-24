@@ -50,13 +50,13 @@ export interface SessionSnapshot {
 export interface AcquiredAccessToken {
   readonly accessToken: string;
   readonly identity: LoginIdentity;
-  readonly client: SupabaseClient;
   readonly url: string;
   readonly anonKey: string;
 }
 
 export type SessionListener = () => void;
 export type LoginPurgeListener = (loginGeneration: number) => void;
+export type SynchronousViewRetireListener = () => void;
 
 export interface SessionGateDependencies {
   /** Override document used to read `<meta>` runtime config. */
@@ -69,13 +69,13 @@ export interface SessionGateDependencies {
   hasWebLocks?: () => boolean;
   /** Override storage probed for multi-account keys and listened on for storage events. */
   storage?: StorageKeysLike | null;
-  /** Override window-like target for `storage` and `pageshow` listeners. */
+  /** Override window-like target for `storage`, `pagehide`, and `pageshow` listeners. */
   eventTarget?: Pick<Window, 'addEventListener' | 'removeEventListener'> | null;
   /** Override session factory (defaults to shared `createBrowserSession`). */
   createSession?: (
     options: CreateBrowserSessionOptions,
   ) => CreateBrowserSessionResult;
-  /** Override fetch implementation used by edge reads. */
+  /** Override fetch implementation used by edge and PostgREST reads. */
   fetchImpl?: typeof fetch;
   /** Override SDK passed into `createBrowserSession`. */
   sdk?: BrowserSessionSdk;
@@ -92,8 +92,10 @@ export interface SessionGate {
   getSnapshot(): SessionSnapshot;
   subscribe(listener: SessionListener): () => void;
   onLoginPurge(listener: LoginPurgeListener): () => void;
+  onSynchronousViewRetire(listener: SynchronousViewRetireListener): () => void;
   acquireAccessToken(): Promise<AcquiredAccessToken | null>;
   handleUnauthorized(): void;
+  handlePagehide(): void;
   handlePageshow(persisted: boolean): void;
   reverify(): Promise<void>;
   dispose(): void;
@@ -155,6 +157,7 @@ export function createSessionGate(
   const fenceTracker = createFenceTracker();
   const listeners = new Set<SessionListener>();
   const purgeListeners = new Set<LoginPurgeListener>();
+  const viewRetireListeners = new Set<SynchronousViewRetireListener>();
   const fetchImpl: typeof fetch =
     deps.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 
@@ -175,8 +178,9 @@ export function createSessionGate(
   let deployment: { readonly url: string; readonly anonKey: string } | null =
     null;
   let state: SessionGateState;
-  let verifySequence = 0;
+  let gateGeneration = 0;
   let disposed = false;
+  let hiddenByPagehide = false;
   let authSubscription: { unsubscribe(): void } | null = null;
 
   let cachedSnapshot: SessionSnapshot;
@@ -204,8 +208,45 @@ export function createSessionGate(
     }
   };
 
+  const runSynchronousViewRetire = (): void => {
+    for (const listener of [...viewRetireListeners]) {
+      try {
+        listener();
+      } catch {
+        // Isolate subscriber errors so retirement still completes synchronously.
+      }
+    }
+  };
+
+  const detachAndQuiesceClient = (): void => {
+    authSubscription?.unsubscribe();
+    authSubscription = null;
+    eventTarget?.removeEventListener('storage', handleStorageEvent);
+    eventTarget?.removeEventListener('pagehide', onPagehideEvent);
+    eventTarget?.removeEventListener('pageshow', onPageshowEvent);
+
+    const sessionToQuiesce = browserSession;
+    browserSession = null;
+    if (!sessionToQuiesce) return;
+
+    if (typeof sessionToQuiesce.quiesce === 'function') {
+      void sessionToQuiesce.quiesce().catch(() => undefined);
+    } else {
+      const auth = sessionToQuiesce.client?.auth as
+        | { dispose?: () => Promise<void>; stopAutoRefresh?: () => Promise<void> }
+        | undefined;
+      if (typeof auth?.dispose === 'function') {
+        void auth.dispose().catch(() => undefined);
+      } else if (typeof auth?.stopAutoRefresh === 'function') {
+        void auth.stopAutoRefresh().catch(() => undefined);
+      }
+    }
+  };
+
   const failClosedSignedOut = (): void => {
-    verifySequence += 1;
+    if (state.status === 'closed') return;
+    gateGeneration += 1;
+    hiddenByPagehide = false;
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'signed_out' };
     runPurgeSynchronously(nextGen);
@@ -213,9 +254,11 @@ export function createSessionGate(
   };
 
   const closeFailClosed = (reason: SessionClosedReason): void => {
-    verifySequence += 1;
+    gateGeneration += 1;
+    hiddenByPagehide = false;
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'closed', reason };
+    detachAndQuiesceClient();
     runPurgeSynchronously(nextGen);
     emit();
   };
@@ -223,6 +266,7 @@ export function createSessionGate(
   const checkClosedBeforeSession = (
     url: string,
   ): SessionClosedReason | null => {
+    if (runtimeConfig.status === 'invalid') return 'invalid_config';
     if (multiAccountFlag) return 'multi_account_flag';
     if (!checkWebLocks()) return 'locks_unavailable';
     const probe = multiAccountInUse(resolveStorage(), url);
@@ -231,8 +275,28 @@ export function createSessionGate(
     return null;
   };
 
+  const retireAndRevalidate = (): void => {
+    if (disposed || !browserSession || !deployment || state.status === 'closed') {
+      return;
+    }
+    const closedReason = checkClosedBeforeSession(deployment.url);
+    if (closedReason) {
+      closeFailClosed(closedReason);
+      return;
+    }
+    gateGeneration += 1;
+    hiddenByPagehide = false;
+    const nextGen = fenceTracker.forceLoginLoss();
+    state = { status: 'checking' };
+    runPurgeSynchronously(nextGen);
+    emit();
+    void reverify();
+  };
+
   const reverify = async (): Promise<void> => {
-    if (disposed || !browserSession || !deployment) return;
+    if (disposed || !browserSession || !deployment || state.status === 'closed') {
+      return;
+    }
 
     const closedReason = checkClosedBeforeSession(deployment.url);
     if (closedReason) {
@@ -240,22 +304,29 @@ export function createSessionGate(
       return;
     }
 
-    const seq = ++verifySequence;
-    const expectedGenAtStart = fenceTracker.loginGeneration;
+    const capturedGateGen = ++gateGeneration;
+    const expectedLoginGenAtStart = fenceTracker.loginGeneration;
+    const capturedSession = browserSession;
+    const capturedDeployment = deployment;
 
     let session: Session | null;
     try {
-      session = await browserSession.currentSession();
+      session = await capturedSession.currentSession();
     } catch {
-      if (disposed || seq !== verifySequence) return;
+      if (disposed || gateGeneration !== capturedGateGen) return;
+      const postClosed = checkClosedBeforeSession(capturedDeployment.url);
+      if (postClosed) {
+        closeFailClosed(postClosed);
+        return;
+      }
       failClosedSignedOut();
       return;
     }
 
-    if (disposed || seq !== verifySequence) return;
+    if (disposed || gateGeneration !== capturedGateGen) return;
 
-    // Re-check multi-account storage probe after async verification before painting.
-    const postClosed = checkClosedBeforeSession(deployment.url);
+    // Re-run all closed-gate checks at publication, not only at startup.
+    const postClosed = checkClosedBeforeSession(capturedDeployment.url);
     if (postClosed) {
       closeFailClosed(postClosed);
       return;
@@ -275,8 +346,20 @@ export function createSessionGate(
       return;
     }
 
+    if (
+      !session?.access_token ||
+      !session.access_token.trim() ||
+      session.access_token === capturedDeployment.anonKey
+    ) {
+      failClosedSignedOut();
+      return;
+    }
+
     const reconciled = fenceTracker.reconcileSession(session);
-    if (reconciled.changed || fenceTracker.loginGeneration !== expectedGenAtStart) {
+    if (
+      reconciled.changed ||
+      fenceTracker.loginGeneration !== expectedLoginGenAtStart
+    ) {
       runPurgeSynchronously(fenceTracker.loginGeneration);
     }
     state = { status: 'authenticated' };
@@ -284,7 +367,9 @@ export function createSessionGate(
   };
 
   const handleStorageEvent = (event: Event): void => {
-    if (disposed || !browserSession || !deployment) return;
+    if (disposed || !browserSession || !deployment || state.status === 'closed') {
+      return;
+    }
     const storageEvent = event as StorageEvent;
     const probedStorage = resolveStorage();
     if (
@@ -295,14 +380,10 @@ export function createSessionGate(
       return;
     }
 
-    // Fail closed immediately if multi-account keys appear or storage breaks.
-    const probe = multiAccountInUse(probedStorage, deployment.url);
-    if (probe === 'in_use') {
-      closeFailClosed('multi_account_in_use');
-      return;
-    }
-    if (probe === 'unknown') {
-      closeFailClosed('multi_account_unknown');
+    // Fail closed immediately if any closed-gate check (including multi-account probe) fails.
+    const closedReason = checkClosedBeforeSession(deployment.url);
+    if (closedReason) {
+      closeFailClosed(closedReason);
       return;
     }
 
@@ -326,30 +407,57 @@ export function createSessionGate(
       return;
     }
 
-    // Same login (refresh of same session_id): keep state intact.
-    if (sameLoginIdentity(fenceTracker.loginIdentity, nextIdentity)) {
+    // Same login (refresh of same session_id while authenticated): keep state intact.
+    if (
+      state.status === 'authenticated' &&
+      sameLoginIdentity(fenceTracker.loginIdentity, nextIdentity)
+    ) {
       return;
     }
 
-    // Different user OR same user with new session_id: synchronously purge old login, then reverify.
-    verifySequence += 1;
+    // Different user, same user with new session_id, or sign-in from non-authenticated state:
+    // synchronously purge old login, then reverify through the shared module.
+    retireAndRevalidate();
+  };
+
+  const handlePagehide = (): void => {
+    if (disposed || !browserSession || !deployment || state.status === 'closed') {
+      return;
+    }
+    // Synchronously retire requests, caches, store, and mounted private DOM BEFORE the browser
+    // can snapshot this page into history / back-forward cache. Do not start network verification
+    // while leaving; `pageshow` triggers revalidation on return.
+    hiddenByPagehide = true;
+    gateGeneration += 1;
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'checking' };
     runPurgeSynchronously(nextGen);
     emit();
-    void reverify();
+    runSynchronousViewRetire();
   };
 
   const handlePageshow = (persisted: boolean): void => {
-    if (disposed || !persisted) return;
-    if (!browserSession || !deployment) return;
-    // Retire all private state synchronously BEFORE bfcache restore can show it, then revalidate.
-    verifySequence += 1;
+    if (disposed || (!persisted && !hiddenByPagehide)) return;
+    if (!browserSession || !deployment || state.status === 'closed') return;
+    // Keep private state retired until verified current-login data settles.
+    hiddenByPagehide = false;
+    const closedReason = checkClosedBeforeSession(deployment.url);
+    if (closedReason) {
+      closeFailClosed(closedReason);
+      runSynchronousViewRetire();
+      return;
+    }
+    gateGeneration += 1;
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'checking' };
     runPurgeSynchronously(nextGen);
     emit();
+    runSynchronousViewRetire();
     void reverify();
+  };
+
+  const onPagehideEvent = (): void => {
+    handlePagehide();
   };
 
   const onPageshowEvent = (event: Event): void => {
@@ -384,15 +492,28 @@ export function createSessionGate(
 
         const subResult = browserSession.client.auth.onAuthStateChange(
           (event, nextSession) => {
-            if (disposed) return;
-
-            if (event === 'SIGNED_OUT' || !nextSession) {
-              failClosedSignedOut();
+            if (
+              disposed ||
+              !browserSession ||
+              !deployment ||
+              state.status === 'closed'
+            ) {
               return;
             }
 
             // Wait for verifiedSession() on initial load; never trust unverified storage alone.
             if (event === 'INITIAL_SESSION') {
+              return;
+            }
+
+            const authClosedReason = checkClosedBeforeSession(deployment.url);
+            if (authClosedReason) {
+              closeFailClosed(authClosedReason);
+              return;
+            }
+
+            if (event === 'SIGNED_OUT' || !nextSession) {
+              failClosedSignedOut();
               return;
             }
 
@@ -406,25 +527,19 @@ export function createSessionGate(
               state.status === 'authenticated' &&
               sameLoginIdentity(fenceTracker.loginIdentity, nextIdentity)
             ) {
-              // Token refresh of the same login: keep loginGeneration and cache intact.
+              // Token refresh of the same verified login: keep gateGeneration, loginGeneration, and cache intact.
               return;
             }
 
             // Sign-in, account switch, or same-user re-sign-in (new session_id):
-            // synchronously bump loginGeneration and purge prior private state before any await.
-            const reconciled = fenceTracker.reconcileSession(nextSession);
-            if (reconciled.changed) {
-              runPurgeSynchronously(reconciled.loginGeneration);
-            }
-            if (state.status !== 'authenticated') {
-              state = { status: 'authenticated' };
-            }
-            emit();
+            // an SDK notification is a signal to retire and revalidate, never a session to adopt directly.
+            retireAndRevalidate();
           },
         );
         authSubscription = subResult.data.subscription;
 
         eventTarget?.addEventListener('storage', handleStorageEvent);
+        eventTarget?.addEventListener('pagehide', onPagehideEvent);
         eventTarget?.addEventListener('pageshow', onPageshowEvent);
 
         void reverify();
@@ -435,21 +550,65 @@ export function createSessionGate(
   cachedSnapshot = rebuildSnapshot();
 
   const acquireAccessToken = async (): Promise<AcquiredAccessToken | null> => {
-    if (disposed || !browserSession || !deployment || state.status !== 'authenticated') {
+    if (
+      disposed ||
+      !browserSession ||
+      !deployment ||
+      state.status !== 'authenticated'
+    ) {
+      return null;
+    }
+
+    const preClosed = checkClosedBeforeSession(deployment.url);
+    if (preClosed) {
+      closeFailClosed(preClosed);
+      return null;
+    }
+
+    const capturedGateGen = gateGeneration;
+    const capturedIdentity = fenceTracker.loginIdentity;
+    const capturedSession = browserSession;
+    const capturedDeployment = deployment;
+    if (!capturedIdentity) {
       return null;
     }
 
     let session: Session | null;
     try {
-      const { data, error } = await browserSession.client.auth.getSession();
+      const { data, error } = await capturedSession.client.auth.getSession();
+      if (disposed || gateGeneration !== capturedGateGen) {
+        return null;
+      }
       if (error || !data.session) {
-        failClosedSignedOut();
+        const postClosed = checkClosedBeforeSession(capturedDeployment.url);
+        if (postClosed) {
+          closeFailClosed(postClosed);
+        } else {
+          failClosedSignedOut();
+        }
         return null;
       }
       session = data.session;
     } catch {
-      // Inconclusive acquisition: fail closed, never fall back to a previously held bearer.
-      failClosedSignedOut();
+      if (disposed || gateGeneration !== capturedGateGen) {
+        return null;
+      }
+      const postClosed = checkClosedBeforeSession(capturedDeployment.url);
+      if (postClosed) {
+        closeFailClosed(postClosed);
+      } else {
+        failClosedSignedOut();
+      }
+      return null;
+    }
+
+    if (disposed || gateGeneration !== capturedGateGen) {
+      return null;
+    }
+
+    const postClosed = checkClosedBeforeSession(capturedDeployment.url);
+    if (postClosed) {
+      closeFailClosed(postClosed);
       return null;
     }
 
@@ -460,44 +619,46 @@ export function createSessionGate(
     }
 
     // If the acquired token belongs to a different login (including same user with new session_id),
-    // synchronously retire the old login and fail this acquisition closed.
-    if (!sameLoginIdentity(fenceTracker.loginIdentity, identity)) {
-      const reconciled = fenceTracker.reconcileSession(session);
-      if (reconciled.changed) {
-        runPurgeSynchronously(reconciled.loginGeneration);
-      }
-      state = { status: 'authenticated' };
-      emit();
+    // never publish it directly: synchronously retire the old login and revalidate through the shared module.
+    if (!sameLoginIdentity(capturedIdentity, identity)) {
+      retireAndRevalidate();
+      return null;
+    }
+
+    if (
+      !session.access_token ||
+      !session.access_token.trim() ||
+      session.access_token === capturedDeployment.anonKey
+    ) {
+      failClosedSignedOut();
       return null;
     }
 
     return {
       accessToken: session.access_token,
       identity,
-      client: browserSession.client,
-      url: deployment.url,
-      anonKey: deployment.anonKey,
+      url: capturedDeployment.url,
+      anonKey: capturedDeployment.anonKey,
     };
   };
 
   const handleUnauthorized = (): void => {
-    if (disposed || !browserSession) return;
+    if (disposed || !browserSession || state.status === 'closed') return;
+    const session = browserSession;
     // Synchronously retire in-memory state and let the shared session run locked verification
     // without touching stored credentials outside the shared module's guarded path.
     failClosedSignedOut();
-    void browserSession.verifiedSession().catch(() => undefined);
+    void session.verifiedSession().catch(() => undefined);
   };
 
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
-    verifySequence += 1;
-    authSubscription?.unsubscribe();
-    authSubscription = null;
-    eventTarget?.removeEventListener('storage', handleStorageEvent);
-    eventTarget?.removeEventListener('pageshow', onPageshowEvent);
+    gateGeneration += 1;
+    detachAndQuiesceClient();
     listeners.clear();
     purgeListeners.clear();
+    viewRetireListeners.clear();
   };
 
   return {
@@ -533,8 +694,15 @@ export function createSessionGate(
         purgeListeners.delete(listener);
       };
     },
+    onSynchronousViewRetire(listener) {
+      viewRetireListeners.add(listener);
+      return () => {
+        viewRetireListeners.delete(listener);
+      };
+    },
     acquireAccessToken,
     handleUnauthorized,
+    handlePagehide,
     handlePageshow,
     reverify,
     dispose,

@@ -86,14 +86,28 @@ export interface FakeBackendHandlers {
   onFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> | Response;
 }
 
+export interface RecordedWireFetchCall {
+  url: string;
+  method: string;
+  body: unknown;
+  authHeader: string | null;
+  apiKeyHeader: string | null;
+  profileHeader: string | null;
+}
+
 export interface FakeSessionHarness {
   browserSession: BrowserSession;
   fetchImpl: typeof fetch;
   postgrestCalls: RecordedPostgrestCall[];
-  fetchCalls: Array<{ url: string; body: unknown; authHeader: string | null }>;
+  fetchCalls: RecordedWireFetchCall[];
+  wireCalls: RecordedWireFetchCall[];
+  quiesceCalls: number;
   setSession(next: Session | null): void;
   setGetSessionHandler(
     handler: (() => Promise<{ data: { session: Session | null }; error: Error | null }>) | null,
+  ): void;
+  setCurrentSessionHandler(
+    handler: (() => Promise<Session | null>) | null,
   ): void;
   emitAuthChange(event: AuthChangeEvent, session: Session | null): void;
 }
@@ -106,15 +120,14 @@ export function createFakeSessionHarness(
   let customGetSession:
     | (() => Promise<{ data: { session: Session | null }; error: Error | null }>)
     | null = null;
+  let customCurrentSession: (() => Promise<Session | null>) | null = null;
+  let quiesceCalls = 0;
   const authListeners = new Set<
     (event: AuthChangeEvent, session: Session | null) => void
   >();
   const postgrestCalls: RecordedPostgrestCall[] = [];
-  const fetchCalls: Array<{
-    url: string;
-    body: unknown;
-    authHeader: string | null;
-  }> = [];
+  const fetchCalls: RecordedWireFetchCall[] = [];
+  const wireCalls: RecordedWireFetchCall[] = [];
 
   function createQueryBuilder(
     kind: 'from' | 'rpc',
@@ -225,6 +238,12 @@ export function createFakeSessionHarness(
         current = null;
         return { error: null };
       },
+      async stopAutoRefresh() {
+        return;
+      },
+      async dispose() {
+        authListeners.clear();
+      },
     },
   } as unknown as SupabaseClient;
 
@@ -233,9 +252,11 @@ export function createFakeSessionHarness(
     client: fakeClient,
     storageKey: 'sb-api-auth-token',
     async currentSession() {
+      if (customCurrentSession) return customCurrentSession();
       return current;
     },
     async verifiedSession() {
+      if (customCurrentSession) return customCurrentSession();
       return current;
     },
     async boundedAuth<T>(op: Promise<T>): Promise<T> {
@@ -244,7 +265,74 @@ export function createFakeSessionHarness(
     async signOut() {
       current = null;
     },
+    async quiesce() {
+      quiesceCalls += 1;
+      authListeners.clear();
+    },
   };
+
+  function postgrestResultToResponse(res: PostgrestResponse): Response {
+    if (res.error) {
+      return new Response(JSON.stringify(res.error), {
+        status: res.status ?? 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(res.data), {
+      status: res.status ?? 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  function parsePostgrestUrl(urlStr: string): {
+    kind: 'from' | 'rpc';
+    target: string;
+    filters: Record<string, unknown>;
+    select?: string;
+  } | null {
+    const parsed = new URL(urlStr);
+    const rpcPrefix = '/rest/v1/rpc/';
+    const restPrefix = '/rest/v1/';
+    if (parsed.pathname.startsWith(rpcPrefix)) {
+      return {
+        kind: 'rpc',
+        target: parsed.pathname.slice(rpcPrefix.length),
+        filters: {},
+      };
+    }
+    if (parsed.pathname.startsWith(restPrefix)) {
+      const target = parsed.pathname.slice(restPrefix.length);
+      const filters: Record<string, unknown> = {};
+      let selectCols: string | undefined;
+      let offsetVal: number | null = null;
+      let limitVal: number | null = null;
+
+      for (const [key, value] of parsed.searchParams.entries()) {
+        if (key === 'select') {
+          selectCols = value;
+        } else if (key === 'offset') {
+          offsetVal = Number(value);
+        } else if (key === 'limit') {
+          limitVal = Number(value);
+          filters.limit = limitVal;
+        } else if (key === 'order') {
+          filters.order = value;
+        } else if (value.startsWith('eq.')) {
+          filters[key] = value.slice(3);
+        } else if (value.startsWith('is.')) {
+          const raw = value.slice(3);
+          filters[`is:${key}`] = raw === 'null' ? null : raw;
+        } else {
+          filters[key] = value;
+        }
+      }
+      if (offsetVal !== null && limitVal !== null) {
+        filters.range = [offsetVal, offsetVal + limitVal - 1];
+      }
+      return { kind: 'from', target, filters, select: selectCols };
+    }
+    return null;
+  }
 
   const fetchImpl: typeof fetch = async (input, init) => {
     const url =
@@ -253,6 +341,7 @@ export function createFakeSessionHarness(
         : input instanceof URL
           ? input.href
           : input.url;
+    const method = (init?.method ?? 'GET').toUpperCase();
     let body: unknown = undefined;
     if (typeof init?.body === 'string') {
       try {
@@ -262,14 +351,48 @@ export function createFakeSessionHarness(
       }
     }
     const headers = new Headers(init?.headers);
-    fetchCalls.push({
+    const recorded: RecordedWireFetchCall = {
       url,
+      method,
       body,
       authHeader: headers.get('authorization'),
-    });
+      apiKeyHeader: headers.get('apikey'),
+      profileHeader:
+        headers.get('accept-profile') ?? headers.get('content-profile'),
+    };
+    wireCalls.push(recorded);
+
     if (init?.signal?.aborted) {
       throw new DOMException('The operation was aborted.', 'AbortError');
     }
+
+    const pg = parsePostgrestUrl(url);
+    if (pg) {
+      const call: RecordedPostgrestCall = {
+        kind: pg.kind,
+        target: pg.target,
+        params:
+          pg.kind === 'rpc' && body && typeof body === 'object'
+            ? (body as Record<string, unknown>)
+            : undefined,
+        filters: pg.filters,
+        select: pg.select,
+        signal: init?.signal ?? undefined,
+      };
+      postgrestCalls.push(call);
+      if (pg.kind === 'from') {
+        const res = handlers.onFrom
+          ? await handlers.onFrom(call)
+          : { data: [], error: null, status: 200 };
+        return postgrestResultToResponse(res);
+      }
+      const res = handlers.onRpc
+        ? await handlers.onRpc(call)
+        : { data: null, error: null, status: 200 };
+      return postgrestResultToResponse(res);
+    }
+
+    fetchCalls.push(recorded);
     if (handlers.onFetch) {
       return handlers.onFetch(input, init);
     }
@@ -284,11 +407,18 @@ export function createFakeSessionHarness(
     fetchImpl,
     postgrestCalls,
     fetchCalls,
+    wireCalls,
+    get quiesceCalls() {
+      return quiesceCalls;
+    },
     setSession(next) {
       current = next;
     },
     setGetSessionHandler(handler) {
       customGetSession = handler;
+    },
+    setCurrentSessionHandler(handler) {
+      customCurrentSession = handler;
     },
     emitAuthChange(event, session) {
       current = session;

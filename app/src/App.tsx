@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router';
 import {
   ClosedScreen,
@@ -7,6 +8,7 @@ import {
 } from './components/SessionGateScreens';
 import {
   AppDataProvider,
+  useDataController,
   useSessionSnapshot,
   type DataController,
 } from './data/queries';
@@ -17,10 +19,13 @@ import { WaitingScreen } from './screens/WaitingScreen';
 import { appActions } from './store/appStore';
 
 function GatedRoutes() {
+  const { sessionGate } = useDataController();
   const snapshot = useSessionSnapshot();
   const location = useLocation();
   const routeKey = `${location.pathname}${location.search}${location.hash}`;
   const prevRouteKeyRef = useRef(routeKey);
+  const privateViewRef = useRef<HTMLDivElement | null>(null);
+  const [, setRetireTick] = useState(0);
 
   useEffect(() => {
     if (prevRouteKeyRef.current !== routeKey) {
@@ -28,6 +33,25 @@ function GatedRoutes() {
       appActions.closeAddAgentDialog();
     }
   }, [routeKey]);
+
+  useEffect(() => {
+    return sessionGate.onSynchronousViewRetire(() => {
+      // Immediately conceal the mounted private subtree in case React cannot flush re-entrantly,
+      // then synchronously commit the retirement so private DOM is unmounted before pagehide returns.
+      const el = privateViewRef.current;
+      if (el) {
+        el.hidden = true;
+        el.setAttribute('aria-hidden', 'true');
+      }
+      try {
+        flushSync(() => {
+          setRetireTick((tick) => tick + 1);
+        });
+      } catch {
+        // Fallback when already inside a React render: the subtree is already concealed above.
+      }
+    });
+  }, [sessionGate]);
 
   if (snapshot.state.status === 'closed') {
     return <ClosedScreen reason={snapshot.state.reason} />;
@@ -39,7 +63,7 @@ function GatedRoutes() {
     return <SessionCheckingScreen />;
   }
 
-  return (
+  const routes = (
     <Routes>
       <Route path="/" element={<Navigate to="/agents/atlas" replace />} />
       <Route path="/home" element={<PhoneHomeScreen />} />
@@ -49,6 +73,20 @@ function GatedRoutes() {
       <Route path="*" element={<Navigate to="/agents/atlas" replace />} />
     </Routes>
   );
+
+  if (snapshot.state.status === 'authenticated') {
+    return (
+      <div
+        ref={privateViewRef}
+        data-testid="private-view-root"
+        className="h-full w-full"
+      >
+        {routes}
+      </div>
+    );
+  }
+
+  return routes;
 }
 
 export interface AppRoutesProps {

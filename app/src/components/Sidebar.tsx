@@ -122,6 +122,7 @@ interface SidebarShellProps {
   agents: readonly Agent[];
   people: readonly Person[];
   useSampleComputers: boolean;
+  onSelectConversation?: (conversationId: string) => void;
 }
 
 function SidebarShell({
@@ -138,6 +139,7 @@ function SidebarShell({
   agents,
   people,
   useSampleComputers,
+  onSelectConversation,
 }: SidebarShellProps) {
   const knownComputerIds = useSampleComputers
     ? new Set(COMPUTERS.map((computer) => computer.id))
@@ -294,38 +296,46 @@ function SidebarShell({
               CHANNELS
             </div>
             <div className="flex flex-col gap-0.5 px-2">
-              {channels.map((channel) => (
-                <NavLink
-                  key={channel.id ?? channel.name}
-                  to={`/channels/${encodeURIComponent(channel.name)}`}
-                  data-private={channel.isPrivate ? 'true' : undefined}
-                  className={({ isActive }) =>
-                    `flex min-h-touch items-center justify-between gap-2 rounded-control px-2.5 no-underline transition-quiet desktop:h-row-md desktop:min-h-0 ${
-                      isActive
-                        ? 'bg-active font-semibold text-ink'
-                        : channel.unread
-                          ? 'font-semibold text-ink hover:bg-elevated'
-                          : 'text-ink-secondary hover:bg-elevated hover:text-ink'
-                    }`
-                  }
-                >
-                  <span className="flex min-w-0 items-center truncate">
-                    {channel.isPrivate ? (
-                      <PrivateLockIcon />
-                    ) : (
-                      <span className="inline-block w-hash-col shrink-0 text-ink-muted">
-                        #
-                      </span>
+              {channels.map((channel) => {
+                const targetId = channel.id ?? channel.name;
+                return (
+                  <NavLink
+                    key={targetId}
+                    to={`/channels/${encodeURIComponent(targetId)}`}
+                    onClick={
+                      channel.id && onSelectConversation
+                        ? () => onSelectConversation(channel.id!)
+                        : undefined
+                    }
+                    data-private={channel.isPrivate ? 'true' : undefined}
+                    className={({ isActive }) =>
+                      `flex min-h-touch items-center justify-between gap-2 rounded-control px-2.5 no-underline transition-quiet desktop:h-row-md desktop:min-h-0 ${
+                        isActive
+                          ? 'bg-active font-semibold text-ink'
+                          : channel.unread
+                            ? 'font-semibold text-ink hover:bg-elevated'
+                            : 'text-ink-secondary hover:bg-elevated hover:text-ink'
+                      }`
+                    }
+                  >
+                    <span className="flex min-w-0 items-center truncate">
+                      {channel.isPrivate ? (
+                        <PrivateLockIcon />
+                      ) : (
+                        <span className="inline-block w-hash-col shrink-0 text-ink-muted">
+                          #
+                        </span>
+                      )}
+                      <span className="truncate">{channel.name}</span>
+                    </span>
+                    {renderUnreadIndicator(
+                      channel.unread,
+                      channel.mentionCount,
+                      channel.unreadCount,
                     )}
-                    <span className="truncate">{channel.name}</span>
-                  </span>
-                  {renderUnreadIndicator(
-                    channel.unread,
-                    channel.mentionCount,
-                    channel.unreadCount,
-                  )}
-                </NavLink>
-              ))}
+                  </NavLink>
+                );
+              })}
             </div>
 
             {directMessages.length > 0 ? (
@@ -338,6 +348,11 @@ function SidebarShell({
                     <NavLink
                       key={dm.id}
                       to={`/channels/${encodeURIComponent(dm.id)}`}
+                      onClick={
+                        onSelectConversation
+                          ? () => onSelectConversation(dm.id)
+                          : undefined
+                      }
                       className={({ isActive }) =>
                         `flex min-h-touch items-center justify-between gap-2 rounded-control px-2.5 no-underline transition-quiet desktop:h-row-md desktop:min-h-0 ${
                           isActive
@@ -465,6 +480,7 @@ function RealSidebar({ fullWidth }: { fullWidth: boolean }) {
       agents={data.agents}
       people={data.people}
       useSampleComputers={false}
+      onSelectConversation={data.selectConversation}
     />
   );
 }

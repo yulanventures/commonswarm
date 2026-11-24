@@ -130,10 +130,173 @@ function assertStillCurrent(
   signal?: AbortSignal,
 ): void {
   checkAborted(signal);
+  if (sessionGate.state.status !== 'authenticated') {
+    throw new StaleFenceError('Session is not authenticated.');
+  }
   if (
     !sessionGate.fenceTracker.isCurrent(fence, { loginIdentity: auth.identity })
   ) {
     throw new StaleFenceError();
+  }
+}
+
+function assertValidUserBearer(auth: AcquiredAccessToken): void {
+  if (
+    !auth.accessToken ||
+    !auth.accessToken.trim() ||
+    auth.accessToken === auth.anonKey
+  ) {
+    throw new StaleFenceError('Missing user bearer token.');
+  }
+}
+
+/**
+ * Single final network transport boundary for all authenticated reads (PostgREST and Edge).
+ * Binds THIS request's acquired bearer directly, refuses any API-key bearer fallback, and
+ * checks the captured lifetime fence synchronously immediately before invoking `fetchImpl`.
+ */
+async function fencedFetch(
+  sessionGate: SessionGate,
+  fence: Fence,
+  auth: AcquiredAccessToken,
+  endpoint: string,
+  init: {
+    readonly method: 'GET' | 'POST';
+    readonly headers: Record<string, string>;
+    readonly body?: string;
+  },
+  signal?: AbortSignal,
+): Promise<Response> {
+  assertValidUserBearer(auth);
+  assertStillCurrent(sessionGate, fence, auth, signal);
+
+  const response = await sessionGate.fetchImpl(endpoint, {
+    method: init.method,
+    headers: {
+      ...init.headers,
+      authorization: `Bearer ${auth.accessToken}`,
+      apikey: auth.anonKey,
+    },
+    ...(init.body !== undefined ? { body: init.body } : {}),
+    signal,
+  });
+
+  assertStillCurrent(sessionGate, fence, auth, signal);
+  return response;
+}
+
+interface PostgrestWireResult {
+  readonly data: unknown;
+  readonly error: { message?: string; code?: string } | null;
+  readonly status: number;
+}
+
+function parsePostgrestErrorBody(
+  text: string,
+  status: number,
+): { message?: string; code?: string } {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (isRecord(parsed)) {
+      return {
+        message:
+          typeof parsed.message === 'string'
+            ? parsed.message
+            : `HTTP ${status}`,
+        code: typeof parsed.code === 'string' ? parsed.code : undefined,
+      };
+    }
+  } catch {
+    // Fall back to plain-text message below.
+  }
+  return { message: text || `HTTP ${status}` };
+}
+
+/**
+ * Execute one PostgREST GET (table/view) or POST (RPC) directly over `fencedFetch`,
+ * bypassing the Supabase client's `fetchWithAuth` transport (which awaits a second
+ * `auth.getSession()` and can fall back to the API key as Bearer).
+ */
+async function postgrestRead(
+  sessionGate: SessionGate,
+  fence: Fence,
+  signal: AbortSignal | undefined,
+  request:
+    | {
+        readonly kind: 'from';
+        readonly schema: string;
+        readonly relation: string;
+        readonly params: ReadonlyArray<readonly [string, string]>;
+      }
+    | {
+        readonly kind: 'rpc';
+        readonly schema: string;
+        readonly fn: string;
+        readonly args?: Record<string, unknown>;
+      },
+): Promise<PostgrestWireResult> {
+  const auth = await acquireForDispatch(sessionGate, fence, signal);
+  const baseUrl = auth.url.replace(/\/+$/, '');
+
+  let endpoint: string;
+  let method: 'GET' | 'POST';
+  let headers: Record<string, string>;
+  let body: string | undefined;
+
+  if (request.kind === 'from') {
+    const url = new URL(`${baseUrl}/rest/v1/${request.relation}`);
+    for (const [key, value] of request.params) {
+      url.searchParams.set(key, value);
+    }
+    endpoint = url.toString();
+    method = 'GET';
+    headers = {
+      accept: 'application/json',
+      'accept-profile': request.schema,
+    };
+  } else {
+    endpoint = `${baseUrl}/rest/v1/rpc/${request.fn}`;
+    method = 'POST';
+    headers = {
+      accept: 'application/json',
+      'content-profile': request.schema,
+      'content-type': 'application/json',
+    };
+    body = JSON.stringify(request.args ?? {});
+  }
+
+  const response = await fencedFetch(
+    sessionGate,
+    fence,
+    auth,
+    endpoint,
+    { method, headers, body },
+    signal,
+  );
+
+  const text = await response.text();
+  assertStillCurrent(sessionGate, fence, auth, signal);
+
+  if (!response.ok) {
+    return {
+      data: null,
+      error: parsePostgrestErrorBody(text, response.status),
+      status: response.status,
+    };
+  }
+
+  if (text === '') {
+    return { data: null, error: null, status: response.status };
+  }
+
+  try {
+    return { data: JSON.parse(text), error: null, status: response.status };
+  } catch {
+    return {
+      data: null,
+      error: { message: text },
+      status: response.status,
+    };
   }
 }
 
@@ -168,19 +331,23 @@ export async function readWorkspaces(
   const pageSize = 50;
 
   for (let offset = 0; ; offset += pageSize) {
-    const auth = await acquireForDispatch(sessionGate, fence, signal);
-    let query = auth.client
-      .schema('swarm_read')
-      .from('workspaces')
-      .select('*')
-      .is('archived_at', null)
-      .order('name', { ascending: true })
-      .order('workspace_id', { ascending: true })
-      .range(offset, offset + pageSize - 1);
-    if (signal) query = query.abortSignal(signal);
-
-    const { data, error, status } = await query;
-    assertStillCurrent(sessionGate, fence, auth, signal);
+    const { data, error, status } = await postgrestRead(
+      sessionGate,
+      fence,
+      signal,
+      {
+        kind: 'from',
+        schema: 'swarm_read',
+        relation: 'workspaces',
+        params: [
+          ['select', '*'],
+          ['archived_at', 'is.null'],
+          ['order', 'name.asc,workspace_id.asc'],
+          ['offset', String(offset)],
+          ['limit', String(pageSize)],
+        ],
+      },
+    );
     checkPostgrestError(error, status, sessionGate);
 
     if (!Array.isArray(data)) {
@@ -233,12 +400,16 @@ export async function readHomeOverview(
   options: ReadOptions,
 ): Promise<HomeOverview | null> {
   const { fence, signal } = options;
-  const auth = await acquireForDispatch(sessionGate, fence, signal);
-  let query = auth.client.schema('swarm_read').rpc('home_overview');
-  if (signal) query = query.abortSignal(signal);
-
-  const { data, error, status } = await query;
-  assertStillCurrent(sessionGate, fence, auth, signal);
+  const { data, error, status } = await postgrestRead(
+    sessionGate,
+    fence,
+    signal,
+    {
+      kind: 'rpc',
+      schema: 'swarm_read',
+      fn: 'home_overview',
+    },
+  );
 
   if (error) {
     if (homeOverviewUnavailable(status, error.code)) {
@@ -254,7 +425,11 @@ export async function readHomeOverview(
     throw new ApiDecodeError('home_overview_malformed');
   }
 
-  if (parsed.viewer_user_id.toLowerCase() !== auth.identity.userId.toLowerCase()) {
+  const expectedUserId = fence.userId;
+  if (
+    !expectedUserId ||
+    parsed.viewer_user_id.toLowerCase() !== expectedUserId.toLowerCase()
+  ) {
     throw new StaleFenceError('Overview viewer identity mismatch.');
   }
 
@@ -274,18 +449,20 @@ export async function readConversations(
   const payload = buildListConversationsRequest(workspaceId, includeArchived);
   const endpoint = `${auth.url.replace(/\/+$/, '')}/functions/v1/read`;
 
-  const response = await sessionGate.fetchImpl(endpoint, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${auth.accessToken}`,
-      apikey: auth.anonKey,
-      'content-type': 'application/json',
+  const response = await fencedFetch(
+    sessionGate,
+    fence,
+    auth,
+    endpoint,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
     signal,
-  });
-
-  assertStillCurrent(sessionGate, fence, auth, signal);
+  );
 
   if (response.status === 401) {
     sessionGate.handleUnauthorized();
@@ -326,22 +503,27 @@ export async function readAgentPrincipals(
   const out: AgentPrincipalRow[] = [];
 
   for (let offset = 0; ; offset += pageSize) {
-    const auth = await acquireForDispatch(sessionGate, fence, signal);
-    let query = auth.client
-      .schema('swarm_read')
-      .from('agent_principals')
-      .select(
-        'principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at',
-      )
-      .eq('workspace_id', normalizedWorkspace)
-      .is('revoked_at', null)
-      .order('name', { ascending: true })
-      .order('principal_id', { ascending: true })
-      .range(offset, offset + pageSize - 1);
-    if (signal) query = query.abortSignal(signal);
-
-    const { data, error, status } = await query;
-    assertStillCurrent(sessionGate, fence, auth, signal);
+    const { data, error, status } = await postgrestRead(
+      sessionGate,
+      fence,
+      signal,
+      {
+        kind: 'from',
+        schema: 'swarm_read',
+        relation: 'agent_principals',
+        params: [
+          [
+            'select',
+            'principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at',
+          ],
+          ['workspace_id', `eq.${normalizedWorkspace}`],
+          ['revoked_at', 'is.null'],
+          ['order', 'name.asc,principal_id.asc'],
+          ['offset', String(offset)],
+          ['limit', String(pageSize)],
+        ],
+      },
+    );
     checkPostgrestError(error, status, sessionGate);
 
     if (!Array.isArray(data)) {
@@ -412,20 +594,26 @@ export async function readAgentPresence(
   const rows: unknown[] = [];
 
   for (let offset = 0; ; offset += pageSize) {
-    const auth = await acquireForDispatch(sessionGate, fence, signal);
-    let query = auth.client
-      .schema('swarm_read')
-      .from('agent_presence')
-      .select(
-        'principal_id,last_command_at,client_build,watcher_at,channel_at,listener_at,turn_at,last_ack_via,last_ack_at,current_client_build',
-      )
-      .eq('workspace_id', normalizedWorkspace)
-      .order('principal_id', { ascending: true })
-      .range(offset, offset + pageSize - 1);
-    if (signal) query = query.abortSignal(signal);
-
-    const { data, error, status } = await query;
-    assertStillCurrent(sessionGate, fence, auth, signal);
+    const { data, error, status } = await postgrestRead(
+      sessionGate,
+      fence,
+      signal,
+      {
+        kind: 'from',
+        schema: 'swarm_read',
+        relation: 'agent_presence',
+        params: [
+          [
+            'select',
+            'principal_id,last_command_at,client_build,watcher_at,channel_at,listener_at,turn_at,last_ack_via,last_ack_at,current_client_build',
+          ],
+          ['workspace_id', `eq.${normalizedWorkspace}`],
+          ['order', 'principal_id.asc'],
+          ['offset', String(offset)],
+          ['limit', String(pageSize)],
+        ],
+      },
+    );
     checkPostgrestError(error, status, sessionGate);
 
     if (!Array.isArray(data)) {
@@ -453,21 +641,22 @@ export async function readAgentWakePath(
   const { fence, signal } = options;
   const normalizedWorkspace = workspaceId.toLowerCase();
 
-  const runSelect = async (columns: string) => {
-    const auth = await acquireForDispatch(sessionGate, fence, signal);
-    let query = auth.client
-      .schema('swarm_read')
-      .from('agent_wake_path')
-      .select(columns)
-      .eq('workspace_id', normalizedWorkspace);
-    if (signal) query = query.abortSignal(signal);
-    const result = await query;
-    assertStillCurrent(sessionGate, fence, auth, signal);
-    return result;
-  };
+  const runSelect = (columns: string) =>
+    postgrestRead(sessionGate, fence, signal, {
+      kind: 'from',
+      schema: 'swarm_read',
+      relation: 'agent_wake_path',
+      params: [
+        ['select', columns],
+        ['workspace_id', `eq.${normalizedWorkspace}`],
+      ],
+    });
 
   let res = await runSelect('principal_id,oldest_unobserved_at,unseen_count');
-  if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204')) {
+  if (
+    res.error &&
+    (res.error.code === '42703' || res.error.code === 'PGRST204')
+  ) {
     res = await runSelect('principal_id,oldest_unobserved_at');
   }
   checkPostgrestError(res.error, res.status, sessionGate);
@@ -513,17 +702,21 @@ export async function readMemberProfiles(
 ): Promise<MemberProfileRow[]> {
   const { fence, signal } = options;
   const normalizedWorkspace = workspaceId.toLowerCase();
-  const auth = await acquireForDispatch(sessionGate, fence, signal);
-  let query = auth.client
-    .schema('swarm_read')
-    .from('member_profiles')
-    .select('user_id,display_name,role')
-    .eq('workspace_id', normalizedWorkspace)
-    .limit(1_000);
-  if (signal) query = query.abortSignal(signal);
-
-  const { data, error, status } = await query;
-  assertStillCurrent(sessionGate, fence, auth, signal);
+  const { data, error, status } = await postgrestRead(
+    sessionGate,
+    fence,
+    signal,
+    {
+      kind: 'from',
+      schema: 'swarm_read',
+      relation: 'member_profiles',
+      params: [
+        ['select', 'user_id,display_name,role'],
+        ['workspace_id', `eq.${normalizedWorkspace}`],
+        ['limit', '1000'],
+      ],
+    },
+  );
   checkPostgrestError(error, status, sessionGate);
 
   if (!Array.isArray(data)) {
@@ -563,14 +756,17 @@ export async function readDecisionQueue(
 ): Promise<DecisionQueue | null> {
   const { fence, signal } = options;
   const normalizedWorkspace = workspaceId.toLowerCase();
-  const auth = await acquireForDispatch(sessionGate, fence, signal);
-  let query = auth.client
-    .schema('swarm_read')
-    .rpc('decision_queue', { p_workspace_id: normalizedWorkspace });
-  if (signal) query = query.abortSignal(signal);
-
-  const { data, error, status } = await query;
-  assertStillCurrent(sessionGate, fence, auth, signal);
+  const { data, error, status } = await postgrestRead(
+    sessionGate,
+    fence,
+    signal,
+    {
+      kind: 'rpc',
+      schema: 'swarm_read',
+      fn: 'decision_queue',
+      args: { p_workspace_id: normalizedWorkspace },
+    },
+  );
   checkPostgrestError(error, status, sessionGate);
 
   try {
@@ -591,15 +787,20 @@ export async function readWaitingTodos(
 ): Promise<WaitingTodosQueue | null> {
   const { fence, signal } = options;
   const normalizedWorkspace = workspaceId.toLowerCase();
-  const auth = await acquireForDispatch(sessionGate, fence, signal);
-  let query = auth.client.schema('swarm_read').rpc('waiting_todos_page', {
-    p_workspace_id: normalizedWorkspace,
-    p_limit: 50,
-  });
-  if (signal) query = query.abortSignal(signal);
-
-  const { data, error, status } = await query;
-  assertStillCurrent(sessionGate, fence, auth, signal);
+  const { data, error, status } = await postgrestRead(
+    sessionGate,
+    fence,
+    signal,
+    {
+      kind: 'rpc',
+      schema: 'swarm_read',
+      fn: 'waiting_todos_page',
+      args: {
+        p_workspace_id: normalizedWorkspace,
+        p_limit: 50,
+      },
+    },
+  );
   checkPostgrestError(error, status, sessionGate);
 
   try {
