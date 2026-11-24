@@ -22,9 +22,11 @@ checks=[]
 class Handler(http.server.SimpleHTTPRequestHandler):
     fail_app=False
     omit_next_csp=False
+    send_next_headers=False
+    seen_paths=[]
     def log_message(self,*args): pass
     def end_headers(self):
-        if self.path == '/next' or self.path.startswith('/next/'):
+        if self.send_next_headers and (self.path == '/next' or self.path.startswith('/next/')):
             if not self.omit_next_csp:
                 self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
             self.send_header('X-Content-Type-Options', 'nosniff')
@@ -33,6 +35,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Cache-Control', 'no-cache')
         super().end_headers()
     def do_GET(self):
+        self.seen_paths.append(self.path)
         if self.fail_app and self.path=='/app' and (Path(self.directory).resolve().name=='candidate'):
             self.send_error(503); return
         if self.path == '/app': self.path = '/app/'
@@ -45,7 +48,7 @@ def get(url,date=None):
             return r.status,r.headers.get('Last-Modified')
     except urllib.error.HTTPError as e: return e.code,e.headers.get('Last-Modified')
 
-def scenario(baseline=False, automatic=False, failure=None, rollback_failure=None, missing_next_csp=False):
+def scenario(baseline=False, automatic=False, failure=None, rollback_failure=None, include_next=False, missing_next_csp=False):
     with tempfile.TemporaryDirectory(prefix='site-shell-http-') as tmp:
         root=Path(tmp).resolve(); site=root/'site'; old=site/'releases/old'; reserve=root/'reserve'; reserve.mkdir()
         (old/'_astro').mkdir(parents=True); (old/'app').mkdir()
@@ -55,7 +58,10 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
         (old/'_astro/old.js').write_text('old module')
         (site/'current').symlink_to(old)
         now=int(time.time())
-        contents={'index.html':b'new HTML','app/index.html':b'new app HTML','_astro/new.js':b'import "./chunks/dynamic.js"','_astro/chunks/dynamic.js':b'new dynamic','_astro/new.css':b'new css','next/index.html':b'<!doctype html><title>next</title>','next/assets/next-app.js':b'console.log("next");'}
+        contents={'index.html':b'new HTML','app/index.html':b'new app HTML','_astro/new.js':b'import "./chunks/dynamic.js"','_astro/chunks/dynamic.js':b'new dynamic','_astro/new.css':b'new css'}
+        if include_next:
+            contents['next/index.html']=b'<!doctype html><title>next</title>'
+            contents['next/assets/next-app.js']=b'console.log("next");'
         if failure=='collision': contents['_astro/old.js']=b'collision'
         with tarfile.open(reserve/'site.tar','w',format=tarfile.USTAR_FORMAT) as tar:
             for name,data in contents.items():
@@ -67,11 +73,13 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
         if failure=='future': os.utime(old/'index.html',(now+60,now+60))
         Handler.fail_app=automatic
         Handler.omit_next_csp=missing_next_csp
+        Handler.send_next_headers=include_next
+        Handler.seen_paths=[]
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(site/'current')))
         thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
         url=f'http://127.0.0.1:{server.server_port}'
         source=BASE/'deploy/site/finalize-release.sh'
-        values=dict(RESERVE=str(reserve),RELEASE='candidate',BUILD_SHA=hashbytes((reserve/'BUILD.json').read_bytes()),ARTIFACT_SHA=hashbytes((reserve/'site.tar').read_bytes()),ROOT_SHA=hashbytes(contents['index.html']),APP_SHA=hashbytes(contents['app/index.html']),INCLUDE_NEXT='1',NEXT_SHA=hashbytes(contents['next/index.html']),NEXT_ASSETS='/next/assets/next-app.js',REVISION='fixture',H0='1',REFRESH_SHA=hashbytes((reserve/'refresh-site.py').read_bytes()))
+        values=dict(RESERVE=str(reserve),RELEASE='candidate',BUILD_SHA=hashbytes((reserve/'BUILD.json').read_bytes()),ARTIFACT_SHA=hashbytes((reserve/'site.tar').read_bytes()),ROOT_SHA=hashbytes(contents['index.html']),APP_SHA=hashbytes(contents['app/index.html']),INCLUDE_NEXT='1' if include_next else '0',NEXT_SHA=hashbytes(contents['next/index.html']) if include_next else '',NEXT_ASSETS='/next/assets/next-app.js' if include_next else '',REVISION='fixture',H0='1',REFRESH_SHA=hashbytes((reserve/'refresh-site.py').read_bytes()))
         text=subprocess.check_output(['git','show','2df93aca44f6157ebd3dcfaf1e6b94116ae69887:deploy/site/finalize-release.sh'],cwd=BASE,text=True) if baseline else source.read_text()
         for k,v in values.items(): text=text.replace('@@'+k+'@@',v)
         text=text.replace('S=/srv/commonswarm/site;',f'S={site};').replace('test "$EUID" = 0',f'test "$EUID" = {os.geteuid()}').replace('= yulan-vps-1','= '+socket.gethostname().split('.')[0]).replace('/etc/commonswarm-release/STAGING-ONLY',str(root/'STAGING-ONLY')).replace('https://commonswarm.com',url)
@@ -83,6 +91,7 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
         def run(mode): return subprocess.run(['bash',str(script),mode],env=env,capture_output=True,text=True)
         try:
             prior=get(url+'/app/')[1]
+            Handler.seen_paths.clear()
             r=run('deploy')
             if failure:
                 assert r.returncode!=0 and (site/'current').resolve()==old,(failure,r.returncode)
@@ -96,14 +105,28 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
                     checks.append('full shell automatic rollback on missing /next CSP frame-ancestors header: rollback PASS'); return
                 assert get(url+'/app/',prior)[0]==200
                 assert get(url+'/_astro/new.js')[0]==200
-                assert get(url+'/next/assets/next-app.js')[0]==200
-                checks.append('full shell automatic rollback on postflip HTTP 503: rollback PASS, conditional 200, new + next assets 200'); return
+                if include_next:
+                    assert get(url+'/next/assets/next-app.js')[0]==200
+                    checks.append('full shell automatic rollback (next=1) on postflip HTTP 503: rollback PASS, conditional 200, new + next assets 200')
+                else:
+                    assert not any(p == '/next' or p.startswith('/next/') for p in Handler.seen_paths)
+                    checks.append('full shell automatic rollback (default next=0) on postflip HTTP 503: rollback PASS, conditional 200, no /next probe')
+                return
             assert r.returncode==0,(reserve/'hostrun.log').read_text()
+            if not baseline:
+                log=(reserve/'hostrun.log').read_text()
+                if include_next:
+                    assert '/next' in Handler.seen_paths and '/next/assets/next-app.js' in Handler.seen_paths
+                    assert 'PASS deploy revision=fixture H0=1 NEXT=1' in log
+                else:
+                    assert not any(p == '/next' or p.startswith('/next/') for p in Handler.seen_paths), Handler.seen_paths
+                    assert 'PASS deploy revision=fixture H0=1 NEXT=0' in log
             deployed=get(url+'/app/')[1]
             if not baseline:
                 assert get(url+'/app/',prior)[0]==200
                 for name in ['old.js','new.js','chunks/dynamic.js','new.css']: assert get(url+'/_astro/'+name)[0]==200
-                assert get(url+'/next/assets/next-app.js')[0]==200
+                if include_next:
+                    assert get(url+'/next/assets/next-app.js')[0]==200
             if rollback_failure:
                 if rollback_failure=='collision': (old/'_astro/new.js').write_text('different bytes')
                 if rollback_failure=='symlink': (old/'_astro/bad').symlink_to(old/'_astro/old.js')
@@ -116,8 +139,9 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
             r=run('rollback'); assert r.returncode==0,(reserve/'hostrun.log').read_text()
             if not baseline:
                 assert (old/'_astro/chunks').stat().st_mode & 0o777 == 0o755
-                assert get(url+'/next/assets/next-app.js')[0]==200
-                assert not (old/'next/index.html').exists()
+                if include_next:
+                    assert get(url+'/next/assets/next-app.js')[0]==200
+                    assert not (old/'next/index.html').exists()
             expected=(304,404) if baseline else (200,200)
             actual=(get(url+'/app/',deployed)[0],get(url+'/_astro/new.js')[0]); assert actual==expected,actual
             if baseline: checks.append('full OLD script: rollback reproduces HTTP 304 + missing new module 404')
@@ -125,13 +149,18 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
                 r=run('rollback'); assert r.returncode==0
                 assert 'PASS rollback unchanged' in (reserve/'hostrun.log').read_text()
                 for name in ['old.js','new.js','chunks/dynamic.js','new.css']: assert get(url+'/_astro/'+name)[0]==200
-                checks.append('full NEW deploy/explicit rollback/repeated rollback: conditional 200, both graphs + next assets 200, unchanged PASS')
+                if include_next:
+                    checks.append('full NEW deploy/explicit rollback/repeated rollback (next=1): /next probed, conditional 200, both graphs + next assets 200, unchanged PASS')
+                else:
+                    checks.append('full NEW deploy/explicit rollback/repeated rollback (default next=0): no /next probe, conditional 200, both graphs 200, unchanged PASS')
         finally:
             server.shutdown(); server.server_close(); thread.join()
 scenario(baseline=True)
-scenario()
-scenario(automatic=True)
-scenario(missing_next_csp=True)
+scenario(include_next=False)
+scenario(include_next=True)
+scenario(automatic=True, include_next=False)
+scenario(automatic=True, include_next=True)
+scenario(include_next=True, missing_next_csp=True)
 for failure in ['collision','symlink','future']: scenario(failure=failure)
 for failure in ['collision','symlink','future']: scenario(rollback_failure=failure)
 print(json.dumps({'passed':True,'checks':checks,'ceiling':'macOS HTTP fixture with real rendered templates/helper; only paths/host/root guard/HTTP origin and GNU mv adaptation changed; no Caddy/Cloudflare or production execution'},indent=2))

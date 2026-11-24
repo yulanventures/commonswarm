@@ -2,7 +2,7 @@
 # Linux build host only. No production execution; output is a reviewable packet input.
 set +x; set -euo pipefail; umask 077
 [[ $# == 4 ]] || { echo 'Usage: build-artifact.sh <full-reviewed-sha> <public.json> <H0:0|1> <new-output-dir>' >&2; exit 2; }
-REV=$1; CONFIG=$(realpath "$2"); H0=$3; OUT=$4; INCLUDE_NEXT=${COMMONSWARM_INCLUDE_NEXT:-1}
+REV=$1; CONFIG=$(realpath "$2"); H0=$3; OUT=$4; INCLUDE_NEXT=${COMMONSWARM_INCLUDE_NEXT-0}
 IMAGE=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
 [[ $EUID == 0 && $(uname -s) == Linux && $(hostname -s) != yulan-vps-1 && ! -d /srv/commonswarm/site && $REV =~ ^[0-9a-f]{40}$ && $H0 =~ ^[01]$ && $INCLUDE_NEXT =~ ^[01]$ ]]
 SCRIPT=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$SCRIPT/../.." && pwd)

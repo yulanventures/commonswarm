@@ -203,7 +203,7 @@ function inspectSite(dir, publicConfig, includeNext) {
   return { hashes, nextAssets };
 }
 const sourceFile = (dir, path) => execFileSync('tar', ['-xOf', join(dir, 'source.tar'), path], { maxBuffer: 8 * 1024 * 1024 });
-function provenance(dir, revision, pinnedImage, includeNext = '1') {
+function provenance(dir, revision, pinnedImage, includeNext = '0') {
   check(/^[0-9a-f]{40}$/.test(revision) && pinnedImage === image, 'revision/image pin');
   check(includeNext === '0' || includeNext === '1', 'COMMONSWARM_INCLUDE_NEXT must be 0 or 1');
   const sourceFd = openSync(join(dir, 'source.tar'), 'r');
@@ -213,16 +213,24 @@ function provenance(dir, revision, pinnedImage, includeNext = '1') {
   } finally { closeSync(sourceFd); }
   const pub = JSON.parse(read(join(dir, 'public.json'))); config(pub, pub.PUBLIC_H0_LINK_JOIN);
   const site = inspectSite(dir, pub, includeNext);
-  return { revision, image, source: fileHash(join(dir, 'source.tar')), config: fileHash(join(dir, 'public.json')), h0: pub.PUBLIC_H0_LINK_JOIN, next: includeNext,
-    lock: hash(sourceFile(dir, 'site/package-lock.json')), appLock: hash(sourceFile(dir, 'app/package-lock.json')), builder: hash(sourceFile(dir, 'deploy/site/build-artifact.sh')),
+  const receipt = {
+    revision, image, source: fileHash(join(dir, 'source.tar')), config: fileHash(join(dir, 'public.json')), h0: pub.PUBLIC_H0_LINK_JOIN,
+    lock: hash(sourceFile(dir, 'site/package-lock.json')), builder: hash(sourceFile(dir, 'deploy/site/build-artifact.sh')),
     validator: hash(sourceFile(dir, 'deploy/site/validate-site-env.mjs')), refresh: hash(sourceFile(dir, 'deploy/site/refresh-site.py')), template: hash(sourceFile(dir, 'deploy/site/finalize-release.sh')),
-    artifact: fileHash(join(dir, 'site.tar')), html: site.hashes, nextAssets: site.nextAssets };
+    artifact: fileHash(join(dir, 'site.tar')), html: site.hashes,
+  };
+  if (includeNext === '1') {
+    receipt.next = '1';
+    receipt.appLock = hash(sourceFile(dir, 'app/package-lock.json'));
+    receipt.nextAssets = site.nextAssets;
+  }
+  return receipt;
 }
 try {
   const [mode, dir, arg, extra] = process.argv.slice(2);
   if (mode === 'config') write(extra, JSON.stringify(config(JSON.parse(read(dir)), arg), null, 2) + '\n', { mode: 0o600, flag: 'wx' });
   else if (mode === 'receipt') {
-    const includeNext = process.env.COMMONSWARM_INCLUDE_NEXT ?? '1';
+    const includeNext = process.env.COMMONSWARM_INCLUDE_NEXT ?? '0';
     const receipt = provenance(dir, arg, extra, includeNext);
     check(fileHash(join(dir, 'finalize-release.sh')) === receipt.template, 'template provenance');
     write(join(dir, 'BUILD.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
@@ -230,11 +238,12 @@ try {
     check(/^[0-9a-f]{64}$/.test(arg) && fileHash(join(dir, 'BUILD.json')) === arg, 'reviewed BUILD hash mismatch');
     const receipt = JSON.parse(read(join(dir, 'BUILD.json')));
     check(fileHash(fileURLToPath(import.meta.url)) === receipt.validator, 'preparation validator provenance mismatch');
-    check(JSON.stringify(receipt) === JSON.stringify(provenance(dir, receipt.revision, receipt.image, receipt.next)), 'build provenance mismatch');
+    const includeNext = receipt.next === undefined ? '0' : receipt.next;
+    check(JSON.stringify(receipt) === JSON.stringify(provenance(dir, receipt.revision, receipt.image, includeNext)), 'build provenance mismatch');
     const template = read(join(dir, 'finalize-release.sh'), 'utf8'); check(hash(template) === receipt.template, 'template provenance mismatch');
     check(/^\/root\/cswarm-site-[A-Za-z0-9-]+$/.test(extra), 'reserve path');
     const release = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${receipt.revision.slice(0, 12)}-${randomBytes(8).toString('hex')}`;
-    const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], INCLUDE_NEXT: receipt.next, NEXT_SHA: receipt.next === '1' ? receipt.html['next/index.html'] : '', NEXT_ASSETS: (receipt.nextAssets ?? []).join(' '), REVISION: receipt.revision, H0: receipt.h0, REFRESH_SHA: receipt.refresh };
+    const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], INCLUDE_NEXT: includeNext, NEXT_SHA: includeNext === '1' ? receipt.html['next/index.html'] : '', NEXT_ASSETS: includeNext === '1' ? receipt.nextAssets.join(' ') : '', REVISION: receipt.revision, H0: receipt.h0, REFRESH_SHA: receipt.refresh };
     const script = template.replace(/@@([A-Z_0-9]+)@@/g, (_, k) => { check(k in values, 'template placeholder'); return values[k]; });
     const packet = resolve(dir, 'packet'); mkdirSync(packet);
     for (const name of ['site.tar', 'BUILD.json']) copyFileSync(join(dir, name), join(packet, name));

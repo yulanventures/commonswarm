@@ -33,41 +33,60 @@ with tempfile.TemporaryDirectory(prefix='site-repair-prepare-') as tmp:
     root=Path(tmp)
     source={ 'deploy/site/'+name:(TOOLS/name).read_bytes() for name in ['finalize-release.sh','validate-site-env.mjs','refresh-site.py'] }
     source.update({'deploy/site/build-artifact.sh':b'fixture builder','site/package-lock.json':b'{}','app/package-lock.json':b'{"app":true}'})
-    archive(root/'source.tar',source,{'comment':revision})
-    site_entries={name:html for name in ['index.html','app/index.html','start/index.html']}
-    site_entries.update({'next/index.html':next_html,'next/assets/index-fixture.js':b'console.log(1);'})
-    archive(root/'site.tar',site_entries)
-    (root/'public.json').write_text(json.dumps(pub))
-    (root/'finalize-release.sh').write_bytes((TOOLS/'finalize-release.sh').read_bytes())
     def run(*args,ok=True,env_extra=None):
-        env=dict(os.environ,**(env_extra or {}))
+        env=dict(os.environ)
+        env.pop('COMMONSWARM_INCLUDE_NEXT',None)
+        if env_extra: env.update(env_extra)
         r=subprocess.run(['node',str(TOOLS/'validate-site-env.mjs'),*args],capture_output=True,text=True,env=env)
         assert (r.returncode==0)==ok,r.stderr
-    run('receipt',str(root),revision,image)
-    receipt=json.loads((root/'BUILD.json').read_text())
-    assert receipt['refresh']==h((TOOLS/'refresh-site.py').read_bytes())
-    assert receipt['appLock']==h(b'{"app":true}')
-    assert receipt['next']=='1' and receipt['nextAssets']==['/next/assets/index-fixture.js']
-    run('prepare',str(root),h((root/'BUILD.json').read_bytes()),'/root/cswarm-site-fixture')
-    packet=root/'packet'
+        return r
+    def stage_dir(sub,site_entries):
+        d=root/sub; d.mkdir()
+        archive(d/'source.tar',source,{'comment':revision})
+        archive(d/'site.tar',site_entries)
+        (d/'public.json').write_text(json.dumps(pub))
+        (d/'finalize-release.sh').write_bytes((TOOLS/'finalize-release.sh').read_bytes())
+        return d
+    base_entries={name:html for name in ['index.html','app/index.html','start/index.html']}
+    next_entries={**base_entries,'next/index.html':next_html,'next/assets/index-fixture.js':b'console.log(1);'}
+    # Default (COMMONSWARM_INCLUDE_NEXT unset): preview is OFF; receipt matches pre-PR schema cleanly.
+    off_default=stage_dir('off-default',base_entries)
+    run('receipt',str(off_default),revision,image)
+    off_receipt_bytes=(off_default/'BUILD.json').read_bytes()
+    off_receipt=json.loads(off_receipt_bytes)
+    assert off_receipt['refresh']==h((TOOLS/'refresh-site.py').read_bytes())
+    assert sorted(off_receipt.keys())==['artifact','builder','config','h0','html','image','lock','refresh','revision','source','template','validator']
+    assert 'next/index.html' not in off_receipt['html']
+    run('prepare',str(off_default),h(off_receipt_bytes),'/root/cswarm-site-fixture')
+    packet=off_default/'packet'
     assert (packet/'refresh-site.py').read_bytes()==(TOOLS/'refresh-site.py').read_bytes()
     for line in (packet/'PACKET.sha256').read_text().splitlines():
         pin,name=line.split();assert h((packet/name).read_bytes())==pin
     assert 'refresh-site.py' in (packet/'PACKET.sha256').read_text()
-    assert '@@' not in (packet/'SITE-DIRECT.sh').read_text()
-    # Kill switch: COMMONSWARM_INCLUDE_NEXT=0 omits next/ and refuses stray next/ members.
-    no_next_root=root/'no-next'; no_next_root.mkdir()
-    archive(no_next_root/'source.tar',source,{'comment':revision})
-    archive(no_next_root/'site.tar',{name:html for name in ['index.html','app/index.html','start/index.html']})
-    (no_next_root/'public.json').write_text(json.dumps(pub))
-    (no_next_root/'finalize-release.sh').write_bytes((TOOLS/'finalize-release.sh').read_bytes())
-    run('receipt',str(no_next_root),revision,image,env_extra={'COMMONSWARM_INCLUDE_NEXT':'0'})
-    no_next_receipt=json.loads((no_next_root/'BUILD.json').read_text())
-    assert no_next_receipt['next']=='0' and 'next/index.html' not in no_next_receipt['html'] and no_next_receipt['nextAssets']==[]
-    run('prepare',str(no_next_root),h((no_next_root/'BUILD.json').read_bytes()),'/root/cswarm-site-no-next')
-    assert '@@' not in (no_next_root/'packet/SITE-DIRECT.sh').read_text()
+    rendered_off=(packet/'SITE-DIRECT.sh').read_text()
+    assert '@@' not in rendered_off and "if [[ '0' == 1 ]]" in rendered_off
+    # Explicit COMMONSWARM_INCLUDE_NEXT=0 produces a receipt byte-identical to unset.
+    off_zero=stage_dir('off-zero',base_entries)
+    run('receipt',str(off_zero),revision,image,env_extra={'COMMONSWARM_INCLUDE_NEXT':'0'})
+    assert (off_zero/'BUILD.json').read_bytes()==off_receipt_bytes
+    # Stray next/ member is refused when unset or 0; invalid values fail closed.
+    stray=stage_dir('stray-next',next_entries)
+    run('receipt',str(stray),revision,image,ok=False)
+    run('receipt',str(stray),revision,image,ok=False,env_extra={'COMMONSWARM_INCLUDE_NEXT':'0'})
+    for bad in ['','2','yes','true']:
+        run('receipt',str(stray),revision,image,ok=False,env_extra={'COMMONSWARM_INCLUDE_NEXT':bad})
+    # Explicit opt-in: COMMONSWARM_INCLUDE_NEXT=1 pins next/index.html, appLock, and nextAssets.
+    on_next=stage_dir('on-next',next_entries)
+    run('receipt',str(on_next),revision,image,env_extra={'COMMONSWARM_INCLUDE_NEXT':'1'})
+    on_receipt=json.loads((on_next/'BUILD.json').read_text())
+    assert on_receipt['appLock']==h(b'{"app":true}')
+    assert on_receipt['next']=='1' and on_receipt['nextAssets']==['/next/assets/index-fixture.js']
+    assert 'next/index.html' in on_receipt['html']
+    run('prepare',str(on_next),h((on_next/'BUILD.json').read_bytes()),'/root/cswarm-site-next')
+    rendered_on=(on_next/'packet/SITE-DIRECT.sh').read_text()
+    assert '@@' not in rendered_on and "if [[ '1' == 1 ]]" in rendered_on
     # Change archived helper without changing BUILD: provenance must reject before packet creation.
     source['deploy/site/refresh-site.py']+=b'\n# changed\n'
-    archive(root/'source.tar',source,{'comment':revision})
-    run('prepare',str(root),h((root/'BUILD.json').read_bytes()),'/root/cswarm-site-fixture2',ok=False)
-print(json.dumps({'passed':True,'checks':['actual receipt and prepare package helper from bound source archive','manifest includes helper and all hashes match','app/package-lock.json and next/index.html pinned','COMMONSWARM_INCLUDE_NEXT=0 kill switch omits next/ cleanly','changed source helper rejected by build provenance']},indent=2))
+    archive(off_default/'source.tar',source,{'comment':revision})
+    run('prepare',str(off_default),h((off_default/'BUILD.json').read_bytes()),'/root/cswarm-site-fixture2',ok=False)
+print(json.dumps({'passed':True,'checks':['actual receipt and prepare package helper from bound source archive','manifest includes helper and all hashes match','default unset and COMMONSWARM_INCLUDE_NEXT=0 omit next/ and produce byte-identical pre-PR receipts','invalid COMMONSWARM_INCLUDE_NEXT values fail closed','COMMONSWARM_INCLUDE_NEXT=1 opt-in pins app/package-lock.json, next/index.html, and nextAssets','changed source helper rejected by build provenance']},indent=2))

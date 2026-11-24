@@ -742,15 +742,23 @@ test("Cloudflare TTL option allows only the exact static-extension rewrite", asy
   }
 });
 
-test("parity --check-next walks /next, requires security headers and no-cache HTML, and rejects third-party origins", async () => {
+test("parity omits /next by default, and --check-next walks /next, requires security headers and no-cache HTML, and rejects third-party origins", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "commonswarm-site-next-parity-"));
   let omitCsp = false;
   let injectThirdParty = false;
+  let missingNext = false;
+  const requestedPaths: string[] = [];
   const server = createServer((request, response) => {
     const url = request.url ?? "/";
+    requestedPaths.push(url);
     if (url === "/page") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate" });
       response.end("<!doctype html><p>ok</p>");
+      return;
+    }
+    if (missingNext && (url === "/next" || url.startsWith("/next/"))) {
+      response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      response.end("not found");
       return;
     }
     const nextSec = {
@@ -791,9 +799,22 @@ test("parity --check-next walks /next, requires security headers and no-cache HT
       recordedHeaders: ["cache-control"],
       routes: [{ path: "/page", status: 200, contentType: "text/html; charset=utf-8", headers: { "cache-control": "public, max-age=0, must-revalidate" } }],
     }));
-    const args = [join(deployRoot, "parity-check.mjs"), `http://127.0.0.1:${address.port}`, "--reference", referencePath, "--check-next"];
+    const baseArgs = [join(deployRoot, "parity-check.mjs"), `http://127.0.0.1:${address.port}`, "--reference", referencePath];
+
+    // Default (without --check-next): never probes /next and does not require its headers or presence.
+    missingNext = true;
+    requestedPaths.length = 0;
+    const defaultPassed = await execFileAsync(process.execPath, baseArgs, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
+    assert.match(defaultPassed.stdout, /Parity passed for 1 routes/);
+    assert.equal(requestedPaths.some((p) => p === "/next" || p.startsWith("/next/")), false);
+
+    // Explicit --check-next: probes /next and every referenced asset and enforces headers.
+    missingNext = false;
+    requestedPaths.length = 0;
+    const args = [...baseArgs, "--check-next"];
     const passed = await execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
     assert.match(passed.stdout, /Parity passed for 5 routes/);
+    assert.equal(requestedPaths.includes("/next"), true);
 
     omitCsp = true;
     await assert.rejects(

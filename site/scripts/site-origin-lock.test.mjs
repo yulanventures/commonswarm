@@ -51,7 +51,8 @@ test("the web server applies preview security headers and no-cache HTML strictly
     'check /next/assets/index-Ab12Cd34.js   200 "application/javascript"  file  immutable  next',
     'check /next/assets/missing.Zz99Yy88.js  404 "text/plain"             plain revalidate next',
     'check /                                200 "text/html"               file  revalidate none',
-    'check /next-other                      404 "text/plain"              plain revalidate none',
+    'check /next-other                      404 "text/html"               page  revalidate none',
+    'check /next                            404 "text/html"               page  revalidate next',
   ]) {
     assert.ok(check.includes(expectedCase), `check-site-caddy.sh missing case: ${expectedCase}`);
   }

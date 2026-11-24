@@ -187,6 +187,13 @@ check /404                             404 "text/html"               page  reval
 check /next-other                      404 "text/html"               page  revalidate none
 check /next/deep/missing               404 "text/html"               page  revalidate next
 
+rm -rf "$site/next"
+echo "--- the release has no /next: /next returns the site's normal 404"
+check /next                            404 "text/html"               page  revalidate next
+check /next/                           404 "text/html"               page  revalidate next
+check /next/index.html                 404 "text/html"               page  revalidate next
+check /next/assets/index-Ab12Cd34.js   404 "text/plain"              plain revalidate next
+
 
 # --- The TLS block, on its own listener with throwaway certificates -------------------------------------------
 # The real file's TLS block is kept; only its three file paths point at certificates made here. It must refuse a
