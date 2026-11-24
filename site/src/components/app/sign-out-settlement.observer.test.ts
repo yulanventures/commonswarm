@@ -701,7 +701,42 @@ test(
             assert.equal(logoutEvents[0]!.search, "?scope=local");
             assert.equal(logoutEvents[0]!.status, 500);
 
+            const apiLogIndexBeforeVisibility = ctx.apiLog.length;
             const userChecksBeforeVisibility = ctx.counters.userChecks;
+            const logoutsBeforeVisibility = ctx.counters.logouts;
+
+            await page.evaluate(() => {
+              const w = window as unknown as {
+                __csStateHistory?: string[];
+                __csStateObserver?: MutationObserver;
+                __csPanelFlicker?: boolean;
+                __csPanelObserver?: MutationObserver;
+              };
+              const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+              const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+              const errPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+              w.__csStateHistory = [dash?.dataset.state ?? ""];
+              w.__csPanelFlicker = false;
+              if (dash) {
+                w.__csStateObserver = new MutationObserver(() => {
+                  w.__csStateHistory?.push(dash.dataset.state ?? "");
+                });
+                w.__csStateObserver.observe(dash, { attributes: true, attributeFilter: ["data-state"] });
+              }
+              w.__csPanelObserver = new MutationObserver(() => {
+                if (
+                  (channel && !channel.hidden) ||
+                  (signedOut && !signedOut.hidden) ||
+                  Boolean(errPanel?.hidden)
+                ) {
+                  w.__csPanelFlicker = true;
+                }
+              });
+              for (const el of [channel, signedOut, errPanel]) {
+                if (el) w.__csPanelObserver.observe(el, { attributes: true, attributeFilter: ["hidden"] });
+              }
+            });
 
             // Trigger a real same-login SIGNED_IN notification from the pinned GoTrueClient's
             // visibilitychange recovery path (`GoTrueClient.ts:4936`).
@@ -737,6 +772,8 @@ test(
               const retryBtn = document.querySelector<HTMLElement>("[data-retry-workspaces]");
               const w = window as unknown as {
                 __csObservedAuthBroadcasts?: Array<{ event: string; userId: string | null; refreshToken: string | null }>;
+                __csStateHistory?: string[];
+                __csPanelFlicker?: boolean;
               };
               return {
                 state: dash?.dataset.state ?? "",
@@ -746,6 +783,9 @@ test(
                 retryVisible: Boolean(retryBtn && !retryBtn.hidden),
                 credentialStillStored: Boolean(localStorage.getItem(key)),
                 hadSignedOutBroadcast: Boolean(w.__csObservedAuthBroadcasts?.some((b) => b.event === "SIGNED_OUT")),
+                stateHistory: [...(w.__csStateHistory ?? [])],
+                panelFlicker: Boolean(w.__csPanelFlicker),
+                bodyText: document.body?.innerText ?? "",
               };
             }, STORAGE_KEY);
 
@@ -756,7 +796,25 @@ test(
             assert.equal(afterSameLogin.retryVisible, true, "Try again button must remain visible");
             assert.equal(afterSameLogin.credentialStillStored, true, "Credential still stored during refusal");
             assert.equal(afterSameLogin.hadSignedOutBroadcast, false, "Zero SIGNED_OUT broadcasts during refusal");
-            assert.equal(ctx.counters.userChecks, userChecksBeforeVisibility, "Same-login SIGNED_IN must not queue a boot");
+            assert.equal(afterSameLogin.panelFlicker, false, "Retry panel must remain unbroken without transient repaint");
+            assert.ok(
+              afterSameLogin.stateHistory.every((s) => s === "workspace-error"),
+              `Same-login SIGNED_IN must never leave workspace-error (history=${JSON.stringify(afterSameLogin.stateHistory)}):\n${await ctx.dumpDiagnostics(page)}`,
+            );
+            assert.equal(afterSameLogin.bodyText.includes("Alpha Vault"), false, "Nothing of retired login painted");
+            assert.equal(ctx.counters.logouts, logoutsBeforeVisibility, "Same-login SIGNED_IN must not trigger extra logouts");
+            const afterVisApi = ctx.apiLog.slice(apiLogIndexBeforeVisibility);
+            const afterVisUserChecks = afterVisApi.filter((e) => e.path === "/auth/v1/user" && e.method === "GET");
+            const afterVisDelta = ctx.counters.userChecks - userChecksBeforeVisibility;
+            assert.ok(
+              afterVisDelta >= 0 && afterVisDelta <= 2 && afterVisUserChecks.length === afterVisDelta,
+              `Same-login SIGNED_IN must not trigger unbounded auth checks (delta=${afterVisDelta}, recorded=${afterVisUserChecks.length}):\n${await ctx.dumpDiagnostics(page)}`,
+            );
+            assert.equal(
+              afterVisApi.some((e) => e.path === "/rest/v1/workspaces" || e.path === "/rest/v1/rpc/home_overview"),
+              false,
+              `Same-login SIGNED_IN must not reload workspaces for retired login:\n${await ctx.dumpDiagnostics(page)}`,
+            );
 
             // Restore removeItem and click Try again -> completes local sign-out cleanly with unconfirmed-server notice.
             ctx.setStep("allow-removal-and-click-try-again");
@@ -1357,26 +1415,59 @@ test(
               page,
             );
 
-            // Start recording state transitions and release the late sign-out settlement.
+            // Start recording state transitions, panel visibility, and storage removals, then release the late settlement.
             ctx.setStep("release-late-signout-settlement");
+            const apiLogIndexBeforeLate = ctx.apiLog.length;
             const userChecksBeforeLate = ctx.counters.userChecks;
             const logoutsBeforeLate = ctx.counters.logouts;
-            await page.evaluate(() => {
+            await page.evaluate((key: string) => {
               const w = window as unknown as {
                 __csStateHistory?: string[];
                 __csStateObserver?: MutationObserver;
+                __csPanelFlicker?: boolean;
+                __csPanelObserver?: MutationObserver;
+                __csLateStorageRemovalAttempts?: number;
                 __csReleaseLateSignOut?: () => void;
               };
+              w.__csLateStorageRemovalAttempts = 0;
+              const prevRemoveItem = Storage.prototype.removeItem;
+              Storage.prototype.removeItem = function (k: string) {
+                if (k === key) w.__csLateStorageRemovalAttempts = (w.__csLateStorageRemovalAttempts ?? 0) + 1;
+                return prevRemoveItem.call(this, k);
+              };
+              const prevClear = Storage.prototype.clear;
+              Storage.prototype.clear = function () {
+                w.__csLateStorageRemovalAttempts = (w.__csLateStorageRemovalAttempts ?? 0) + 1;
+                return prevClear.call(this);
+              };
               const dash = document.querySelector<HTMLElement>("live-dashboard");
+              const channel = document.querySelector<HTMLElement>('[data-panel="channel"]');
+              const errPanel = document.querySelector<HTMLElement>('[data-panel="workspace-error"]');
+              const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
+              const authErr = document.querySelector<HTMLElement>("[data-auth-error]");
               w.__csStateHistory = [dash?.dataset.state ?? ""];
+              w.__csPanelFlicker = false;
               if (dash) {
                 w.__csStateObserver = new MutationObserver(() => {
                   w.__csStateHistory?.push(dash.dataset.state ?? "");
                 });
                 w.__csStateObserver.observe(dash, { attributes: true, attributeFilter: ["data-state"] });
               }
+              w.__csPanelObserver = new MutationObserver(() => {
+                if (
+                  Boolean(channel?.hidden) ||
+                  (errPanel && !errPanel.hidden) ||
+                  (signedOut && !signedOut.hidden) ||
+                  (authErr && !authErr.hidden)
+                ) {
+                  w.__csPanelFlicker = true;
+                }
+              });
+              for (const el of [channel, errPanel, signedOut, authErr]) {
+                if (el) w.__csPanelObserver.observe(el, { attributes: true, attributeFilter: ["hidden"] });
+              }
               w.__csReleaseLateSignOut?.();
-            });
+            }, STORAGE_KEY);
 
             await page.evaluate(() => new Promise<void>((r) => setTimeout(r, 150)));
 
@@ -1387,8 +1478,29 @@ test(
               const signedOut = document.querySelector<HTMLElement>('[data-panel="signed-out"]');
               const authErr = document.querySelector<HTMLElement>("[data-auth-error]");
               const storedRaw = localStorage.getItem(key);
-              const storedRt = storedRaw ? (JSON.parse(storedRaw) as { refresh_token?: string }).refresh_token ?? null : null;
-              const w = window as unknown as { __csStateHistory?: string[] };
+              const storedParsed = storedRaw
+                ? (JSON.parse(storedRaw) as { refresh_token?: string; access_token?: string })
+                : null;
+              const storedRt = storedParsed?.refresh_token ?? null;
+              let storedSid: string | null = null;
+              if (typeof storedParsed?.access_token === "string") {
+                const parts = storedParsed.access_token.split(".");
+                if (parts.length === 3 && parts[1]) {
+                  try {
+                    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+                    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+                    const claims = JSON.parse(atob(padded)) as { session_id?: unknown };
+                    if (typeof claims.session_id === "string") storedSid = claims.session_id;
+                  } catch {
+                    storedSid = null;
+                  }
+                }
+              }
+              const w = window as unknown as {
+                __csStateHistory?: string[];
+                __csPanelFlicker?: boolean;
+                __csLateStorageRemovalAttempts?: number;
+              };
               return {
                 state: dash?.dataset.state ?? "",
                 channelHidden: Boolean(channel?.hidden),
@@ -1396,7 +1508,10 @@ test(
                 signedOutHidden: Boolean(signedOut?.hidden),
                 authErrHidden: Boolean(authErr?.hidden),
                 storedRt,
+                storedSid,
+                storageRemovalAttempts: w.__csLateStorageRemovalAttempts ?? 0,
                 stateHistory: [...(w.__csStateHistory ?? [])],
+                panelFlicker: Boolean(w.__csPanelFlicker),
                 bodyText: document.body?.innerText ?? "",
               };
             }, STORAGE_KEY);
@@ -1407,12 +1522,31 @@ test(
             assert.equal(afterLate.signedOutHidden, true, "Signed-out panel must not appear over successor");
             assert.equal(afterLate.authErrHidden, true, "No sign-out notice may appear over successor");
             assert.equal(afterLate.storedRt, "rt-c2b-late-new", "Successor stored credential must remain intact");
+            assert.equal(afterLate.storedSid, sidNew, "Successor stored session_id must remain intact");
+            assert.equal(afterLate.storageRemovalAttempts, 0, "Late settlement must not attempt any storage removal");
             assert.equal(afterLate.bodyText.includes("Fresh Login Vault"), true, "Successor workspace must remain rendered");
+            assert.equal(afterLate.bodyText.includes("Alpha Vault"), false, "Nothing of retired login may be painted");
+            assert.equal(afterLate.panelFlicker, false, "Late settlement must not transiently flicker panels or notices");
             assert.ok(
               afterLate.stateHistory.every((s) => s === "channel"),
               `Late sign-out settlement must not flicker or change dashboard state (history=${JSON.stringify(afterLate.stateHistory)})`,
             );
-            assert.equal(ctx.counters.userChecks, userChecksBeforeLate, "Late settlement must not trigger extra auth checks");
+            const lateApiEvents = ctx.apiLog.slice(apiLogIndexBeforeLate);
+            const lateUserChecks = lateApiEvents.filter((e) => e.path === "/auth/v1/user" && e.method === "GET");
+            const lateUserCheckDelta = ctx.counters.userChecks - userChecksBeforeLate;
+            assert.ok(
+              lateUserCheckDelta >= 0 && lateUserCheckDelta <= 2 && lateUserChecks.length === lateUserCheckDelta,
+              `Late settlement may overlap with at most 2 bounded background successor auth checks (delta=${lateUserCheckDelta}, recorded=${lateUserChecks.length}):\n${await ctx.dumpDiagnostics(page)}`,
+            );
+            assert.ok(
+              lateUserChecks.every((e) => e.sid === sidNew),
+              `Every GET /auth/v1/user after late settlement must verify the successor (${sidNew}), got sids=${JSON.stringify(lateUserChecks.map((e) => e.sid))}:\n${await ctx.dumpDiagnostics(page)}`,
+            );
+            assert.equal(
+              lateApiEvents.some((e) => e.sid === sidOld),
+              false,
+              `No request after late settlement may use the retired login (${sidOld}):\n${await ctx.dumpDiagnostics(page)}`,
+            );
             assert.equal(ctx.counters.logouts, logoutsBeforeLate, "Late settlement must not trigger extra logouts");
             assert.equal(
               ctx.consoleErrors.filter((line) => line.includes("pageerror")).length,
