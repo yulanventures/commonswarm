@@ -27,17 +27,36 @@ def prepare(live, target):
         if not (root / '_astro').is_dir():
             raise ValueError('assets directory required')
     pending = []
-    for source in (live / '_astro').rglob('*'):
-        dest = target / '_astro' / source.relative_to(live / '_astro')
-        if source.is_dir():
-            if dest.exists() and not dest.is_dir():
+
+    def collect_assets(rel_path):
+        live_assets = live / rel_path
+        target_assets = target / rel_path
+        if not live_assets.exists():
+            return
+        if not live_assets.is_dir():
+            raise ValueError('asset directory collision')
+        parent = target
+        for part in Path(rel_path).parts:
+            parent = parent / part
+            if parent.exists() and not parent.is_dir():
                 raise ValueError('asset directory collision')
-        else:
-            if dest.exists():
-                if not dest.is_file() or source.read_bytes() != dest.read_bytes():
-                    raise ValueError('asset byte collision')
+        for source in live_assets.rglob('*'):
+            dest = target_assets / source.relative_to(live_assets)
+            if source.is_dir():
+                if dest.exists() and not dest.is_dir():
+                    raise ValueError('asset directory collision')
             else:
-                pending.append((source, dest))
+                if dest.exists():
+                    if not dest.is_file() or source.read_bytes() != dest.read_bytes():
+                        raise ValueError('asset byte collision')
+                else:
+                    pending.append((source, dest))
+
+    collect_assets('_astro')
+    if (live / 'next').exists():
+        if not (live / 'next').is_dir():
+            raise ValueError('asset directory collision')
+        collect_assets(Path('next') / 'assets')
     html = list(target.rglob('*.html'))
     served = list(live.rglob('*.html'))
     if not html or not served:

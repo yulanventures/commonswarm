@@ -113,11 +113,13 @@ test("the stable reference and Caddy source retain their route invariants", asyn
   assert.match(caddyfile, /header @javascript Content-Type "application\/javascript; charset=utf-8"/);
   assert.match(caddyfile, /header @manifest Content-Type "application\/manifest\+json; charset=utf-8"/);
   assert.match(caddyfile, /header @xml Content-Type "application\/xml"/);
-  // Long-lived caching exists only for Astro's content-hashed assets (#529): exactly this rule, and
+  // Long-lived caching exists only for Astro's and /next's content-hashed assets: exactly this rule, and
   // nowhere else in the file.
-  const hashedRule = /^\t\t@hashed path \/_astro\/\*\n\t\theader @hashed Cache-Control "public, max-age=31536000, immutable"\n/m;
+  const hashedRule = /^\t\t@hashed path \/_astro\/\* \/next\/assets\/\*\n\t\theader @hashed Cache-Control "public, max-age=31536000, immutable"\n/m;
   assert.match(caddyfile, hashedRule);
   assert.doesNotMatch(caddyfile.replace(hashedRule, ""), /max-age=31536000|Cache-Control "[^"]*immutable/i);
+  assert.match(caddyfile, /^\t\t@next path \/next \/next\/\*\n\t\theader @next \{\n\t\t\tContent-Security-Policy "frame-ancestors 'none'"\n\t\t\tX-Content-Type-Options "nosniff"\n\t\t\tReferrer-Policy "no-referrer"\n\t\t\}\n/m);
+  assert.match(caddyfile, /^\t\t@nextHtml path \/next \/next\/ \/next\/index\.html \/next\/index\.html\/\n\t\theader @nextHtml Cache-Control "no-cache"\n/m);
   assert.equal(inventory.artifacts.some((file) => file.startsWith("_astro/")), false);
   assert.equal(inventory.routes.some((route) => /^\/_astro\/.+\.[A-Za-z0-9]+$/.test(route.path)), false);
   assert.deepEqual(
@@ -729,6 +731,84 @@ test("Cloudflare TTL option allows only the exact static-extension rewrite", asy
         const result = error as { code?: number; stderr?: string };
         assert.equal(result.code, 1);
         assert.match(result.stderr ?? "", /\/note\.txt: cache-control expected/);
+        return true;
+      },
+    );
+  } finally {
+    await new Promise<void>((resolveClose, rejectClose) => {
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+    });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("parity --check-next walks /next, requires security headers and no-cache HTML, and rejects third-party origins", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "commonswarm-site-next-parity-"));
+  let omitCsp = false;
+  let injectThirdParty = false;
+  const server = createServer((request, response) => {
+    const url = request.url ?? "/";
+    if (url === "/page") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate" });
+      response.end("<!doctype html><p>ok</p>");
+      return;
+    }
+    const nextSec = {
+      ...(omitCsp ? {} : { "content-security-policy": "frame-ancestors 'none'" }),
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    };
+    if (url === "/next") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", ...nextSec });
+      const extra = injectThirdParty ? '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' : "";
+      response.end(`<!doctype html><head>${extra}<script type="module" src="/next/assets/index-abc.js"></script><link rel="stylesheet" href="/next/assets/index-abc.css"></head>`);
+      return;
+    }
+    if (url === "/next/assets/index-abc.js") {
+      response.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=31536000, immutable", ...nextSec });
+      response.end('console.log("ok");');
+      return;
+    }
+    if (url === "/next/assets/index-abc.css") {
+      response.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=31536000, immutable", ...nextSec });
+      response.end('@font-face{src:url(/next/fonts/inter-latin.woff2)}');
+      return;
+    }
+    if (url === "/next/fonts/inter-latin.woff2") {
+      response.writeHead(200, { "content-type": "font/woff2", "cache-control": "public, max-age=0, must-revalidate", ...nextSec });
+      response.end("woff2");
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const referencePath = join(fixture, "reference.json");
+    await writeFile(referencePath, JSON.stringify({
+      recordedHeaders: ["cache-control"],
+      routes: [{ path: "/page", status: 200, contentType: "text/html; charset=utf-8", headers: { "cache-control": "public, max-age=0, must-revalidate" } }],
+    }));
+    const args = [join(deployRoot, "parity-check.mjs"), `http://127.0.0.1:${address.port}`, "--reference", referencePath, "--check-next"];
+    const passed = await execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
+    assert.match(passed.stdout, /Parity passed for 5 routes/);
+
+    omitCsp = true;
+    await assert.rejects(
+      execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 }),
+      (error: unknown) => {
+        assert.match((error as { stderr?: string }).stderr ?? "", /\/next: content-security-policy expected/);
+        return true;
+      },
+    );
+    omitCsp = false;
+    injectThirdParty = true;
+    await assert.rejects(
+      execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 }),
+      (error: unknown) => {
+        assert.match((error as { stderr?: string }).stderr ?? "", /references third-party origin/);
         return true;
       },
     );

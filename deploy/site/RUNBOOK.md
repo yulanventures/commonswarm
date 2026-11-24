@@ -35,10 +35,16 @@ verify those UI flows separately under HezLead's direction.
 ```sh
 # On the reserved Linux build host; REVIEWED_SHA is the exact landed revision.
 bash deploy/site/build-artifact.sh "$REVIEWED_SHA" /absolute/public.json "$APPROVED_H0" /absolute/new-artifact
+# Kill switch: build a normal site release WITHOUT the /next preview app (omits next/ entirely):
+COMMONSWARM_INCLUDE_NEXT=0 bash deploy/site/build-artifact.sh "$REVIEWED_SHA" /absolute/public.json "$APPROVED_H0" /absolute/new-artifact
 # Record the printed BUILD.sha256 and review BUILD.json and build.log.
 # Fetch that complete output directory to the operator Mac, then prepare there:
 bash deploy/site/deploy.sh prepare /absolute/artifact "$REVIEWED_BUILD_SHA256" /root/cswarm-site-UNIQUE-ID
 ```
+
+By default (`COMMONSWARM_INCLUDE_NEXT=1`), `build-artifact.sh` also builds `app/` inside the same pinned read-only container with the same validated `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY`, places `app/dist` at `next/` inside `site.tar`, pins `app/package-lock.json` in `BUILD.json`, and validates `next/index.html` (matching meta tags, anon-role JWT, Content-Security-Policy meta tag first after charset with `frame-src 'none'`, zero third-party origins, and all referenced `/next/` assets present). Setting `COMMONSWARM_INCLUDE_NEXT=0` omits `next/` completely and refuses any stray `next/` member in `site.tar`.
+
+Before deploying the first site release with `/next` enabled, update `/etc/caddy/sites/20-commonswarm-site.caddy` from `deploy/site/commonswarm-site.caddy` (after running `deploy/site/check-site-caddy.sh /path/to/caddy`) so every `/next` response sends `Content-Security-Policy: frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-cache` on preview HTML, and immutable caching on `/next/assets/*`. `SITE-DIRECT.sh` probes `/next` and every referenced `/next/` asset after the flip when `COMMONSWARM_INCLUDE_NEXT=1`, and automatically rolls back if any status, hash, or required response header is missing. Rollback retains both `/_astro/*` and `/next/assets/*` while tolerating releases that have no `next/` directory at all.
 
 The builder retains its private workspace and build log for diagnosis; it never
 removes another job's files. `source.tar`, `site.tar`, public JSON and `BUILD.json`

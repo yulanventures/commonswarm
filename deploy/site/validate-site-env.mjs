@@ -10,15 +10,17 @@ const fileHash = p => hash(read(p));
 const check = (condition, label) => { if (!condition) throw Error(label); };
 const image = 'node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d';
 const keys = ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_ANON_KEY', 'PUBLIC_H0_LINK_JOIN'];
+function assertAnonJwt(key) {
+  check(typeof key === 'string' && /^[-\w]+\.[-\w]+\.[-\w]+$/.test(key), 'anon JWT required');
+  check(JSON.parse(Buffer.from(key.split('.')[1], 'base64url')).role === 'anon', 'anon role required; service_role role refused');
+}
 function config(value, h0) {
   check(value && typeof value === 'object' && !Array.isArray(value), 'public JSON object required');
   check(Object.keys(value).every(k => keys.includes(k)), 'unknown public configuration key');
   check(h0 === '0' || h0 === '1', 'explicit H0=0 or 1 required');
   check(value.PUBLIC_H0_LINK_JOIN === undefined || value.PUBLIC_H0_LINK_JOIN === h0, 'H0 input conflict');
   check(value.PUBLIC_SUPABASE_URL === 'https://api.commonswarm.com', 'production API URL required');
-  const key = value.PUBLIC_SUPABASE_ANON_KEY;
-  check(typeof key === 'string' && /^[-\w]+\.[-\w]+\.[-\w]+$/.test(key), 'anon JWT required');
-  check(JSON.parse(Buffer.from(key.split('.')[1], 'base64url')).role === 'anon', 'anon role required; service_role role refused');
+  assertAnonJwt(value.PUBLIC_SUPABASE_ANON_KEY);
   return Object.fromEntries(keys.map(k => [k, k === keys[2] ? h0 : value[k]]));
 }
 // Builder emits plain ustar. Reject links, special files, traversal, duplicates,
@@ -44,7 +46,127 @@ function members(bytes) {
   }
   throw Error('tar terminator missing');
 }
-function htmlHashes(dir, publicConfig) {
+function parseAttrs(raw) {
+  const attrs = new Map();
+  for (const a of raw.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    attrs.set(a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? '');
+  }
+  return attrs;
+}
+function validateNextHtml(html, entries, publicConfig) {
+  check(!html.includes('InNlcnZpY2Vfcm9sZSI') && !/"role"\s*:\s*"service_role"/.test(html), 'next/index.html contains service_role marker');
+  const noComments = html.replace(/<!--[\s\S]*?-->/g, '');
+  const heads = [...noComments.matchAll(/<head\b[^>]*>([\s\S]*?)<\/head\s*>/gi)];
+  check(heads.length === 1, 'next/index.html requires a single <head>');
+  const headInner = heads[0][1].replace(/<(script|style|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, m => m.slice(0, m.indexOf('>') + 1));
+  const headTags = [...headInner.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)].map(m => ({
+    tag: m[1].toLowerCase(),
+    attrs: parseAttrs(m[2]),
+  }));
+  check(headTags.length >= 2, 'next/index.html <head> missing charset or Content-Security-Policy');
+  check(headTags[0].tag === 'meta' && headTags[0].attrs.has('charset') && headTags[0].attrs.get('charset').trim().length > 0,
+    'next/index.html <head> must start with <meta charset>');
+  check(headTags[1].tag === 'meta' && headTags[1].attrs.get('http-equiv')?.toLowerCase() === 'content-security-policy',
+    'next/index.html Content-Security-Policy meta must be the first element in <head> after charset');
+  const csp = (headTags[1].attrs.get('content') ?? '').trim();
+  const directives = new Map(csp.split(';').map(s => s.trim()).filter(Boolean).map(d => {
+    const [name, ...rest] = d.split(/\s+/);
+    return [name.toLowerCase(), rest.join(' ')];
+  }));
+  check(directives.get('default-src') === "'self'", 'next/index.html CSP must lock default-src to self');
+  check(directives.get('frame-src') === "'none'", 'next/index.html CSP must include frame-src none');
+  check(!/unsafe-inline|unsafe-eval/i.test(csp), 'next/index.html CSP must not allow unsafe-inline or unsafe-eval');
+
+  const docMarkup = noComments.replace(/<(script|style)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (m, _t, body) => {
+    check(body.trim() === '', 'next/index.html must not contain inline script or style');
+    return m.slice(0, m.indexOf('>') + 1);
+  });
+  const urls = [];
+  const anonKeys = [];
+  let cspCount = 0;
+  const assets = new Set();
+  const externalScheme = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+  const checkAssetPath = (rawPath, basePath = '/next/index.html') => {
+    const trimmed = rawPath.trim();
+    check(trimmed.length > 0 && !externalScheme.test(trimmed), `next/index.html references third-party or non-relative origin: ${trimmed}`);
+    const resolved = new URL(trimmed, `https://commonswarm.invalid${basePath}`);
+    check(resolved.origin === 'https://commonswarm.invalid' && resolved.pathname.startsWith('/next/'),
+      `next/index.html asset outside /next/: ${trimmed}`);
+    check(/^\/next\/[A-Za-z0-9_./@-]+$/.test(resolved.pathname) && !resolved.pathname.split('/').includes('..'),
+      `next/index.html unsafe asset path: ${resolved.pathname}`);
+    const memberName = resolved.pathname.slice(1);
+    check(entries.get(memberName)?.length > 0, `next/index.html referenced asset missing from archive: ${resolved.pathname}`);
+    return resolved.pathname;
+  };
+  for (const m of docMarkup.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)) {
+    const tag = m[1].toLowerCase();
+    const attrs = parseAttrs(m[2]);
+    if (tag === 'meta') {
+      const httpEquiv = attrs.get('http-equiv')?.toLowerCase();
+      if (httpEquiv === 'content-security-policy') cspCount += 1;
+      const name = attrs.get('name');
+      if (name === 'commonswarm:url') urls.push(attrs.get('content') ?? '');
+      if (name === 'commonswarm:anon-key') anonKeys.push(attrs.get('content') ?? '');
+    }
+    for (const attr of ['src', 'href', 'action', 'poster', 'data']) {
+      if (!attrs.has(attr)) continue;
+      const value = attrs.get(attr).trim();
+      if (tag === 'a' && value.startsWith('#')) continue;
+      check(!externalScheme.test(value), `next/index.html references third-party origin in ${attr}: ${value}`);
+      if (['script', 'link', 'img', 'source', 'audio', 'video'].includes(tag) && (attr === 'src' || attr === 'href')) {
+        assets.add(checkAssetPath(value));
+      }
+    }
+    if (attrs.has('srcset')) {
+      for (const candidate of attrs.get('srcset').split(',')) {
+        const ref = candidate.trim().split(/\s+/)[0] ?? '';
+        if (ref) assets.add(checkAssetPath(ref));
+      }
+    }
+  }
+  check(cspCount === 1, 'next/index.html must contain exactly one Content-Security-Policy meta');
+  check(urls.length === 1 && urls[0] === publicConfig.PUBLIC_SUPABASE_URL, 'next/index.html built public configuration mismatch');
+  check(anonKeys.length === 1, 'next/index.html built public configuration mismatch');
+  assertAnonJwt(anonKeys[0]);
+  check(anonKeys[0] === publicConfig.PUBLIC_SUPABASE_ANON_KEY, 'next/index.html built public configuration mismatch');
+
+  const apiOrigin = new URL(publicConfig.PUBLIC_SUPABASE_URL);
+  const allowedOrigins = new Set([apiOrigin.origin, `wss://${apiOrigin.host}`]);
+  for (const originMatch of noComments.matchAll(/(?:https?|wss?):\/\/[^\s"'<>);,]+|(?:^|[\s"'=(])(\/\/[a-z0-9][^\s"'<>);,]*)/gi)) {
+    const candidate = (originMatch[1] ?? originMatch[0]).trim();
+    if (candidate.startsWith('//')) {
+      throw Error(`next/index.html references third-party protocol-relative origin: ${candidate}`);
+    }
+    let parsed;
+    try { parsed = new URL(candidate); } catch { throw Error(`next/index.html malformed origin reference: ${candidate}`); }
+    check(allowedOrigins.has(`${parsed.protocol}//${parsed.host}`), `next/index.html references third-party origin: ${candidate}`);
+  }
+
+  // Walk CSS url(...) and Vite JS relative imports so finalize-release.sh verifies the full served /next asset graph.
+  const queue = [...assets];
+  while (queue.length > 0) {
+    const assetPath = queue.shift();
+    const bytes = entries.get(assetPath.slice(1));
+    if (!bytes) continue;
+    if (assetPath.endsWith('.css')) {
+      const css = bytes.toString('utf8');
+      for (const u of css.matchAll(/url\(\s*["']?([^"')\s]+)["']?\s*\)/gi)) {
+        const ref = u[1].trim();
+        if (/^(?:data:|blob:|#)/i.test(ref)) continue;
+        const resolved = checkAssetPath(ref, assetPath);
+        if (!assets.has(resolved)) { assets.add(resolved); queue.push(resolved); }
+      }
+    } else if (assetPath.endsWith('.js')) {
+      const js = bytes.toString('utf8');
+      for (const imp of js.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)["'](\.[^"']+\.(?:js|css|woff2))["']/g)) {
+        const resolved = checkAssetPath(imp[1], assetPath);
+        if (!assets.has(resolved)) { assets.add(resolved); queue.push(resolved); }
+      }
+    }
+  }
+  return [...assets].sort();
+}
+function inspectSite(dir, publicConfig, includeNext) {
   const entries = members(read(join(dir, 'site.tar')));
   for (const name of entries.keys()) for (let p = name; p.includes('/');) { p = p.slice(0, p.lastIndexOf('/')); check(!entries.has(p) || entries.get(p) === null, 'tar file parent'); }
   const hashes = {};
@@ -59,7 +181,7 @@ function htmlHashes(dir, publicConfig) {
       const markup = html.replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
       const controls = new Set();
       for (const tag of markup.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)) {
-        const attrs = new Map([...tag[2].matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)].map(a => [a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? '']));
+        const attrs = parseAttrs(tag[2]);
         if (attrs.has('data-h0-link-join')) controls.add('data-h0-link-join');
         if (tag[1].toLowerCase() === 'button') controls.add(attrs.get('data-action'));
       }
@@ -68,38 +190,51 @@ function htmlHashes(dir, publicConfig) {
     }
     hashes[name] = hash(bytes);
   }
-  return hashes;
+  let nextAssets = [];
+  if (includeNext === '1') {
+    const bytes = entries.get('next/index.html'); check(bytes?.length, 'missing next/index.html');
+    nextAssets = validateNextHtml(bytes.toString('utf8'), entries, publicConfig);
+    hashes['next/index.html'] = hash(bytes);
+  } else {
+    for (const name of entries.keys()) {
+      check(name !== 'next' && !name.startsWith('next/'), 'unexpected next/ member when COMMONSWARM_INCLUDE_NEXT=0');
+    }
+  }
+  return { hashes, nextAssets };
 }
 const sourceFile = (dir, path) => execFileSync('tar', ['-xOf', join(dir, 'source.tar'), path], { maxBuffer: 8 * 1024 * 1024 });
-function provenance(dir, revision, pinnedImage) {
+function provenance(dir, revision, pinnedImage, includeNext = '1') {
   check(/^[0-9a-f]{40}$/.test(revision) && pinnedImage === image, 'revision/image pin');
+  check(includeNext === '0' || includeNext === '1', 'COMMONSWARM_INCLUDE_NEXT must be 0 or 1');
   const sourceFd = openSync(join(dir, 'source.tar'), 'r');
   try {
     // Git exits after the archive headers; a pipe can fail with EPIPE on larger archives.
     check(execFileSync('git', ['get-tar-commit-id'], { stdio: [sourceFd, 'pipe', 'pipe'], encoding: 'utf8' }).trim() === revision, 'source revision');
   } finally { closeSync(sourceFd); }
   const pub = JSON.parse(read(join(dir, 'public.json'))); config(pub, pub.PUBLIC_H0_LINK_JOIN);
-  return { revision, image, source: fileHash(join(dir, 'source.tar')), config: fileHash(join(dir, 'public.json')), h0: pub.PUBLIC_H0_LINK_JOIN,
-    lock: hash(sourceFile(dir, 'site/package-lock.json')), builder: hash(sourceFile(dir, 'deploy/site/build-artifact.sh')),
+  const site = inspectSite(dir, pub, includeNext);
+  return { revision, image, source: fileHash(join(dir, 'source.tar')), config: fileHash(join(dir, 'public.json')), h0: pub.PUBLIC_H0_LINK_JOIN, next: includeNext,
+    lock: hash(sourceFile(dir, 'site/package-lock.json')), appLock: hash(sourceFile(dir, 'app/package-lock.json')), builder: hash(sourceFile(dir, 'deploy/site/build-artifact.sh')),
     validator: hash(sourceFile(dir, 'deploy/site/validate-site-env.mjs')), refresh: hash(sourceFile(dir, 'deploy/site/refresh-site.py')), template: hash(sourceFile(dir, 'deploy/site/finalize-release.sh')),
-    artifact: fileHash(join(dir, 'site.tar')), html: htmlHashes(dir, pub) };
+    artifact: fileHash(join(dir, 'site.tar')), html: site.hashes, nextAssets: site.nextAssets };
 }
 try {
   const [mode, dir, arg, extra] = process.argv.slice(2);
   if (mode === 'config') write(extra, JSON.stringify(config(JSON.parse(read(dir)), arg), null, 2) + '\n', { mode: 0o600, flag: 'wx' });
   else if (mode === 'receipt') {
-    const receipt = provenance(dir, arg, extra);
+    const includeNext = process.env.COMMONSWARM_INCLUDE_NEXT ?? '1';
+    const receipt = provenance(dir, arg, extra, includeNext);
     check(fileHash(join(dir, 'finalize-release.sh')) === receipt.template, 'template provenance');
     write(join(dir, 'BUILD.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
   } else if (mode === 'prepare') {
     check(/^[0-9a-f]{64}$/.test(arg) && fileHash(join(dir, 'BUILD.json')) === arg, 'reviewed BUILD hash mismatch');
     const receipt = JSON.parse(read(join(dir, 'BUILD.json')));
     check(fileHash(fileURLToPath(import.meta.url)) === receipt.validator, 'preparation validator provenance mismatch');
-    check(JSON.stringify(receipt) === JSON.stringify(provenance(dir, receipt.revision, receipt.image)), 'build provenance mismatch');
+    check(JSON.stringify(receipt) === JSON.stringify(provenance(dir, receipt.revision, receipt.image, receipt.next)), 'build provenance mismatch');
     const template = read(join(dir, 'finalize-release.sh'), 'utf8'); check(hash(template) === receipt.template, 'template provenance mismatch');
     check(/^\/root\/cswarm-site-[A-Za-z0-9-]+$/.test(extra), 'reserve path');
     const release = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${receipt.revision.slice(0, 12)}-${randomBytes(8).toString('hex')}`;
-    const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], REVISION: receipt.revision, H0: receipt.h0, REFRESH_SHA: receipt.refresh };
+    const values = { RESERVE: extra, RELEASE: release, BUILD_SHA: arg, ARTIFACT_SHA: receipt.artifact, ROOT_SHA: receipt.html['index.html'], APP_SHA: receipt.html['app/index.html'], INCLUDE_NEXT: receipt.next, NEXT_SHA: receipt.next === '1' ? receipt.html['next/index.html'] : '', NEXT_ASSETS: (receipt.nextAssets ?? []).join(' '), REVISION: receipt.revision, H0: receipt.h0, REFRESH_SHA: receipt.refresh };
     const script = template.replace(/@@([A-Z_0-9]+)@@/g, (_, k) => { check(k in values, 'template placeholder'); return values[k]; });
     const packet = resolve(dir, 'packet'); mkdirSync(packet);
     for (const name of ['site.tar', 'BUILD.json']) copyFileSync(join(dir, name), join(packet, name));

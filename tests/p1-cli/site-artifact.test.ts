@@ -50,14 +50,39 @@ function tarMember(name: string, data = Buffer.alloc(0), type = '0', link = '') 
   return Buffer.concat([header, data, Buffer.alloc((512 - data.length % 512) % 512)]);
 }
 const tarEnd = Buffer.alloc(1024);
-const sourcePaths = ['site/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh', 'deploy/site/refresh-site.py'];
-function syntheticSite() {
+const sourcePaths = ['site/package-lock.json', 'app/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh', 'deploy/site/refresh-site.py'];
+const nextCsp = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://api.commonswarm.com wss://api.commonswarm.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'";
+function syntheticNextHtml(overrides?: { url?: string; anonKey?: string; csp?: string | null; cspAfterTitle?: boolean; extraHead?: string }) {
+  const url = overrides?.url ?? config.PUBLIC_SUPABASE_URL;
+  const anonKey = overrides?.anonKey ?? config.PUBLIC_SUPABASE_ANON_KEY;
+  const cspMeta = overrides?.csp === null ? '' : `<meta http-equiv="Content-Security-Policy" content="${overrides?.csp ?? nextCsp}" />`;
+  const head = overrides?.cspAfterTitle
+    ? `<meta charset="UTF-8" /><title>CommonSwarm</title>${cspMeta}`
+    : `<meta charset="UTF-8" />${cspMeta}<title>CommonSwarm</title>`;
+  return `<!doctype html><html lang="en"><head>${head}<meta name="commonswarm:url" content="${url}" /><meta name="commonswarm:anon-key" content="${anonKey}" />${overrides?.extraHead ?? ''}<script type="module" src="/next/assets/index-fixture.js"></script><link rel="stylesheet" href="/next/assets/index-fixture.css"></head><body><div id="root"></div></body></html>`;
+}
+function syntheticSite(options?: { includeNext?: boolean; nextHtml?: string; omitNextAsset?: boolean }) {
+  const includeNext = options?.includeNext ?? true;
   const meta = `<meta name="commonswarm:url" content="${config.PUBLIC_SUPABASE_URL}"><meta name="commonswarm:anon-key" content="${config.PUBLIC_SUPABASE_ANON_KEY}">`;
   const controls = '<section data-h0-link-join><button data-action="mint-join">Join</button><button data-action="revoke-join">Revoke</button></section>';
-  return Buffer.concat([
+  const parts = [
     tarMember('index.html', Buffer.from(meta)), tarMember('app/index.html', Buffer.from(meta + controls)),
-    tarMember('start/index.html', Buffer.from(meta)), tarMember('_astro/new.js', Buffer.from('fixture asset')), tarEnd,
-  ]);
+    tarMember('start/index.html', Buffer.from(meta)), tarMember('_astro/new.js', Buffer.from('fixture asset')),
+  ];
+  if (includeNext) {
+    parts.push(
+      tarMember('next/index.html', Buffer.from(options?.nextHtml ?? syntheticNextHtml())),
+      tarMember('next/assets/index-fixture.js', Buffer.from('console.log("next");')),
+    );
+    if (!options?.omitNextAsset) {
+      parts.push(
+        tarMember('next/assets/index-fixture.css', Buffer.from('@font-face{src:url(/next/fonts/inter-latin.woff2)}')),
+        tarMember('next/fonts/inter-latin.woff2', Buffer.from('fixture-font')),
+      );
+    }
+  }
+  parts.push(tarEnd);
+  return Buffer.concat(parts);
 }
 let fixture: Promise<string> | undefined;
 async function artifactDir() {
@@ -92,7 +117,7 @@ async function prepare(name: string, mutate?: (dir: string) => Promise<void>) {
 
 test(`${lane}: provenance and unsafe tar members are rejected before packet creation`, async () => {
   await prepare('provenance-control');
-  for (const field of ['source', 'config', 'lock', 'builder', 'validator', 'template', 'refresh', 'image', 'revision', 'h0', 'artifact']) {
+  for (const field of ['source', 'config', 'lock', 'appLock', 'builder', 'validator', 'template', 'refresh', 'image', 'revision', 'h0', 'next', 'artifact']) {
     await assert.rejects(prepare(`bad-${field}`, async dir => {
       const p = join(dir, 'BUILD.json'), value = JSON.parse(await readFile(p, 'utf8')); value[field] = 'bad'; await writeFile(p, JSON.stringify(value));
     }));
@@ -158,9 +183,60 @@ test(`${lane}: H0=1 requires emitted controls; explicit H0=0 omits them`, async 
   }
 });
 
+test(`${lane}: next/index.html validation enforces meta parity, anon role, CSP position/frame-src, zero third-party origins, assets, and kill switch`, async () => {
+  const base = await artifactDir();
+  const baseReceipt = JSON.parse(await readFile(join(base, 'BUILD.json'), 'utf8'));
+  assert.equal(baseReceipt.next, '1');
+  assert.equal(baseReceipt.appLock, hash(await readFile(join(repo, 'app/package-lock.json'))));
+  assert.ok(Array.isArray(baseReceipt.nextAssets) && baseReceipt.nextAssets.length > 0);
+  const image = baseReceipt.image;
+  const revision = baseReceipt.revision;
+
+  const receiptCases: Array<{ name: string; siteTar: Buffer; env?: Record<string, string>; expectError?: RegExp }> = [
+    { name: 'next-missing', siteTar: syntheticSite({ includeNext: false }), expectError: /missing next\/index\.html/ },
+    { name: 'next-url-mismatch', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ url: 'https://other.invalid' }) }), expectError: /built public configuration mismatch|third-party origin/ },
+    { name: 'next-key-mismatch', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ anonKey: token('anon') + 'x' }) }), expectError: /built public configuration mismatch/ },
+    { name: 'next-service-role', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ anonKey: token('service_role') }) }), expectError: /service_role/ },
+    { name: 'next-csp-missing', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ csp: null }) }), expectError: /Content-Security-Policy meta must be the first element/ },
+    { name: 'next-csp-not-first', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ cspAfterTitle: true }) }), expectError: /Content-Security-Policy meta must be the first element/ },
+    { name: 'next-csp-no-frame-src', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ csp: nextCsp.replace("; frame-src 'none'", '') }) }), expectError: /frame-src none/ },
+    { name: 'next-third-party-link', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ extraHead: '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' }) }), expectError: /third-party origin/ },
+    { name: 'next-protocol-relative', siteTar: syntheticSite({ nextHtml: syntheticNextHtml({ extraHead: '<script src="//cdn.example.invalid/a.js"></script>' }) }), expectError: /third-party origin/ },
+    { name: 'next-missing-asset', siteTar: syntheticSite({ omitNextAsset: true }), expectError: /referenced asset missing from archive/ },
+    { name: 'kill-switch-rejects-stray-next', siteTar: syntheticSite({ includeNext: true }), env: { COMMONSWARM_INCLUDE_NEXT: '0' }, expectError: /unexpected next\/ member/ },
+    { name: 'kill-switch-omits-next', siteTar: syntheticSite({ includeNext: false }), env: { COMMONSWARM_INCLUDE_NEXT: '0' } },
+  ];
+
+  for (const row of receiptCases) {
+    const dir = join(root, `next-check-${row.name}`);
+    await cp(base, dir, { recursive: true });
+    await rm(join(dir, 'BUILD.json'), { force: true });
+    await rm(join(dir, 'packet'), { recursive: true, force: true });
+    await chmod(join(dir, 'site.tar'), 0o600);
+    await writeFile(join(dir, 'site.tar'), row.siteTar);
+    const run = exec(process.execPath, [validator, 'receipt', dir, revision, image], { env: { ...process.env, ...row.env } });
+    if (row.expectError) {
+      await assert.rejects(run, (error: unknown) => {
+        assert.match((error as { stderr: string }).stderr, row.expectError!);
+        return true;
+      });
+    } else {
+      await run;
+      const receipt = JSON.parse(await readFile(join(dir, 'BUILD.json'), 'utf8'));
+      assert.equal(receipt.next, '0');
+      assert.equal(receipt.html['next/index.html'], undefined);
+      assert.deepEqual(receipt.nextAssets, []);
+      await exec(process.execPath, [validator, 'prepare', dir, hash(await readFile(join(dir, 'BUILD.json'))), `/root/cswarm-site-${row.name}`]);
+      const rendered = await readFile(join(dir, 'packet/SITE-DIRECT.sh'), 'utf8');
+      assert.doesNotMatch(rendered, /@@/);
+      assert.match(rendered, /if \[\[ '0' == 1 \]\]/);
+    }
+  }
+});
+
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
-  for (const variant of ['success', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
+  for (const variant of ['success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-body', 'next-header', 'next-asset-status', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
     const packet = await prepare(`run-${variant}`), site = join(root, `site-${variant}`), old = join(site, 'releases/old');
     await mkdir(join(old, 'app'), { recursive: true }); await writeFile(join(old, 'index.html'), 'old root'); await writeFile(join(old, 'app/index.html'), 'old app');
     await mkdir(join(old, '_astro'), { recursive: true }); await writeFile(join(old, '_astro/retained.js'), 'old asset');
@@ -173,14 +249,32 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
     const server = createServer(async (req, res) => {
       if (variant === 'closed-pipe-failure' && (await readlink(join(site, 'current'))) !== 'releases/old') { res.writeHead(503); res.end(); return; }
       if (variant === 'rollback-status') { res.writeHead(503); res.end(); return; }
-      const route = req.url === '/app' ? 'app/index.html' : 'index.html';
+      const urlPath = req.url ?? '/';
       const isNew = (await readlink(join(site, 'current'))) !== 'releases/old';
       if (isNew && variant === 'hup') { notifyHeld(); await probeReleased; }
-      if (!isNew) oldProbes.add(req.url!);
-      if (!isNew && unhealthyOldApp && req.url === '/app') { res.writeHead(503); res.end(); return; }
-      if (isNew && variant === `${req.url === '/app' ? 'app' : 'root'}-status`) { res.writeHead(503); res.end('unavailable'); return; }
-      if (isNew && variant === `${req.url === '/app' ? 'app' : 'root'}-body`) { res.end('wrong HTML'); return; }
-      try { res.end(await readFile(join(site, 'current', route))); } catch { res.writeHead(404); res.end(); }
+      if (!isNew) oldProbes.add(urlPath);
+      if (!isNew && unhealthyOldApp && urlPath === '/app') { res.writeHead(503); res.end(); return; }
+      if (isNew && variant === 'root-status' && urlPath === '/') { res.writeHead(503); res.end('unavailable'); return; }
+      if (isNew && variant === 'app-status' && urlPath === '/app') { res.writeHead(503); res.end('unavailable'); return; }
+      if (isNew && variant === 'next-status' && urlPath === '/next') { res.writeHead(503); res.end('unavailable'); return; }
+      if (isNew && variant === 'next-asset-status' && urlPath.startsWith('/next/')) { res.writeHead(404); res.end('missing'); return; }
+      if (isNew && variant === 'root-body' && urlPath === '/') { res.end('wrong HTML'); return; }
+      if (isNew && variant === 'app-body' && urlPath === '/app') { res.end('wrong HTML'); return; }
+      if (isNew && variant === 'next-body' && urlPath === '/next') { res.end('wrong HTML'); return; }
+      const route = urlPath === '/app' ? 'app/index.html' : urlPath === '/next' ? 'next/index.html' : urlPath === '/' ? 'index.html' : urlPath.replace(/^\//, '');
+      const nextHeaders: Record<string, string> = urlPath === '/next' || urlPath.startsWith('/next/')
+        ? {
+            ...(variant === 'next-header' ? {} : { 'content-security-policy': "frame-ancestors 'none'" }),
+            'x-content-type-options': 'nosniff',
+            'referrer-policy': 'no-referrer',
+            ...(urlPath === '/next' ? { 'cache-control': 'no-cache' } : {}),
+          }
+        : {};
+      try {
+        const body = await readFile(join(site, 'current', route));
+        res.writeHead(200, nextHeaders);
+        res.end(body);
+      } catch { res.writeHead(404); res.end(); }
     });
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); const address = server.address(); assert.ok(address && typeof address === 'object');
     const bin = join(root, `bin-${variant}`); await mkdir(bin);
@@ -250,9 +344,10 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
           } finally { clearTimeout(timer!); releaseHeld(); await exited; }
         } else await assert.rejects(run());
         const output = await readFile(join(packet, 'hostrun.log'), 'utf8');
-        if (['root-status', 'app-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
-        if (['root-body', 'app-body'].includes(variant)) assert.match(output, /assertion=httphash/);
-        if (['root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
+        if (['root-status', 'app-status', 'next-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
+        if (['root-body', 'app-body', 'next-body'].includes(variant)) assert.match(output, /assertion=httphash/);
+        if (variant === 'next-header') assert.match(output, /assertion=next-csp/);
+        if (['root-status', 'app-status', 'next-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-header', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
         if (variant === 'asset-drift') assert.match(output, /Refusing site refresh: asset byte collision/);
         if (variant === 'current-drift') assert.match(output, /assertion=exact-old-link/);
         if (variant === 'artifact-pin') assert.match(output, /assertion=artifactSHA/);
@@ -262,7 +357,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         if (variant === 'find-failure') assert.match(output, /FAIL step=assets-and-freshness/);
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
-      if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
+      if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'next-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-header', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
       assert.equal((await stat(join(packet, 'hostrun.log'))).mode & 0o777, 0o600);
       assert.ok((await readdir(join(site, 'releases'))).includes('reserve'));
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');
