@@ -14,6 +14,10 @@
 --        withdrawal row by this actor (with expected replacement id when expected) for post-fence
 --        release rechecks (requiring s.until > clock_timestamp() on fresh paths) and receipt
 --        replay reauthorization (deliberately omitting the deadline check on replays).
+--      - swarm.ask_withdrawal_effective_channel_ids: given a workspace and an array of signal ids,
+--        returns the distinct effective channel ids, coalesce(canonical conversation's channel,
+--        scalar channel), with no actor or access check so withdrawal/replacement audit tags stay
+--        intact on fresh, replay, and conflict paths even after access loss.
 --   4. swarm.withdraw_ask (swarm_command only) enforces exact sender identity (same agent principal
 --      or same person; never another agent of the same owner, never the agent's owner, never an
 --      admin), requires current placement access and an open/incomplete target (uniform not_found
@@ -511,6 +515,42 @@ REVOKE ALL ON FUNCTION swarm.ask_withdrawal_release_allowed(uuid, text, uuid, uu
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.ask_withdrawal_release_allowed(uuid, text, uuid, uuid, uuid, boolean) TO swarm_command;
 
+-- C4 narrow internal effective-channel resolver for withdrawal-related audit tagging
+-- (swarm_admin-owned, swarm_command EXECUTE only; never granted to client roles).
+-- Returns distinct effective channel ids, coalesce(canonical conversation's channel, scalar
+-- channel), for signals in that workspace. Takes no actor and applies no access test so audit
+-- tags are preserved even after access loss. Returns channel ids only, never content.
+CREATE FUNCTION swarm.ask_withdrawal_effective_channel_ids(
+  p_workspace_id uuid,
+  p_signal_ids uuid[]
+)
+RETURNS TABLE (channel_id uuid)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT DISTINCT coalesce(c.channel_id, s.channel_id) AS channel_id
+  FROM swarm.signals AS s
+  LEFT JOIN swarm.conversation_signals AS cs
+    ON cs.workspace_id = s.workspace_id
+   AND cs.signal_id = s.id
+  LEFT JOIN swarm.conversations AS c
+    ON c.workspace_id = s.workspace_id
+   AND c.conversation_id = cs.conversation_id
+  WHERE p_workspace_id IS NOT NULL
+    AND p_signal_ids IS NOT NULL
+    AND s.workspace_id = p_workspace_id
+    AND s.id = ANY(p_signal_ids)
+    AND coalesce(c.channel_id, s.channel_id) IS NOT NULL
+  ORDER BY 1;
+$$;
+
+ALTER FUNCTION swarm.ask_withdrawal_effective_channel_ids(uuid, uuid[]) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.ask_withdrawal_effective_channel_ids(uuid, uuid[])
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.ask_withdrawal_effective_channel_ids(uuid, uuid[]) TO swarm_command;
+
 -- Sender withdrawal/replacement of an open ask (command-role only).
 -- Enforces exact sender identity (from_kind + from_principal): never another agent of the
 -- same owner, never the agent's owner, never a workspace admin. Uses the shared placement (C1)
@@ -535,7 +575,6 @@ DECLARE
   v_ask record;
   v_existing record;
   v_withdrawn_at timestamptz;
-  v_replaced_by uuid;
   v_created boolean := false;
 BEGIN
   IF p_workspace_id IS NULL OR p_actor_id IS NULL OR p_signal_id IS NULL
@@ -605,7 +644,7 @@ BEGIN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
-  SELECT aw.withdrawn_at, aw.replaced_by_signal_id
+  SELECT aw.withdrawn_at
   INTO v_existing
   FROM swarm.ask_withdrawals AS aw
   WHERE aw.workspace_id = p_workspace_id
@@ -618,13 +657,13 @@ BEGIN
       RETURN jsonb_build_object('status', 'not_found');
     END IF;
     -- Plain withdraw called twice is idempotent: one row, original timestamp preserved.
+    -- Standalone withdrawal never projects replaced_by_signal_id (HezSec C3).
     RETURN jsonb_build_object(
       'status', 'ok',
       'signal_id', p_signal_id,
       'withdrawn', true,
       'created', false,
       'withdrawn_at', v_existing.withdrawn_at,
-      'replaced_by_signal_id', v_existing.replaced_by_signal_id,
       'channel_id', v_ask.channel_id
     );
   END IF;
@@ -651,7 +690,7 @@ BEGIN
     ) VALUES (
       p_workspace_id, p_signal_id, p_actor_kind, p_actor_id, p_replaced_by_signal_id, v_now
     )
-    RETURNING withdrawn_at, replaced_by_signal_id INTO v_withdrawn_at, v_replaced_by;
+    RETURNING withdrawn_at INTO v_withdrawn_at;
     v_created := true;
 
     -- Re-verify authority, placement (C1), completion (C2), and deadline in a fresh READ COMMITTED
@@ -711,7 +750,6 @@ BEGIN
     'withdrawn', true,
     'created', v_created,
     'withdrawn_at', v_withdrawn_at,
-    'replaced_by_signal_id', v_replaced_by,
     'channel_id', v_ask.channel_id
   );
 END;

@@ -249,7 +249,6 @@ export function mapWithdraw(result: PostSignalResult): object {
     signal_id: res.signal_id ?? null,
     withdrawn: res.withdrawn === true,
     ...(typeof res.withdrawn_at === "string" ? { withdrawn_at: res.withdrawn_at } : {}),
-    ...(typeof res.replaced_by_signal_id === "string" ? { replaced_by_signal_id: res.replaced_by_signal_id } : {}),
   };
 }
 

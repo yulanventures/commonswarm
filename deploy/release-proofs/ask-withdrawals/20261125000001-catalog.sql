@@ -72,6 +72,18 @@ SELECT
   AND NOT has_function_privilege('swarm_read', 'swarm.ask_withdrawal_release_allowed(uuid,text,uuid,uuid,uuid,boolean)', 'EXECUTE')
   AND EXISTS (
     SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+      AND position('conversation_signals' IN p.prosrc) > 0
+      AND position('coalesce' IN lower(p.prosrc)) > 0
+  )
+  AND has_function_privilege('swarm_command', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE')
+  AND NOT has_function_privilege('public', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_read', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE')
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
     WHERE p.oid = to_regprocedure('swarm.withdraw_ask(uuid,text,uuid,uuid,uuid)')
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
       AND position('ask_sender_can_access_placement' IN p.prosrc) > 0

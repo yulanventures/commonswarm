@@ -39,6 +39,13 @@ BEGIN
      OR swarm.ask_withdrawal_release_allowed(NULL, 'user', NULL, NULL, NULL, NULL) IS DISTINCT FROM false THEN
     RAISE EXCEPTION 'ask_withdrawal_release_allowed failed null fail-closed check' USING ERRCODE = '55000';
   END IF;
+  IF EXISTS (
+    SELECT 1 FROM swarm.ask_withdrawal_effective_channel_ids(NULL, NULL)
+  ) OR EXISTS (
+    SELECT 1 FROM swarm.ask_withdrawal_effective_channel_ids(NULL, ARRAY[]::uuid[])
+  ) THEN
+    RAISE EXCEPTION 'ask_withdrawal_effective_channel_ids failed null/empty fail-closed check' USING ERRCODE = '55000';
+  END IF;
   IF (swarm.withdraw_ask(NULL, 'user', NULL, NULL, NULL)->>'status') IS DISTINCT FROM 'invalid_request' THEN
     RAISE EXCEPTION 'withdraw_ask failed invalid_request check' USING ERRCODE = '55000';
   END IF;

@@ -6,6 +6,7 @@ SELECT
   AND to_regprocedure('swarm.ask_sender_can_access_placement(uuid,uuid,text,uuid)') IS NULL
   AND to_regprocedure('swarm.ask_complete_for_withdrawal(uuid,uuid)') IS NULL
   AND to_regprocedure('swarm.ask_withdrawal_release_allowed(uuid,text,uuid,uuid,uuid,boolean)') IS NULL
+  AND to_regprocedure('swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])') IS NULL
   AND to_regprocedure('swarm.withdraw_ask(uuid,text,uuid,uuid,uuid)') IS NULL
   AND to_regprocedure('swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)') IS NULL
   AND to_regprocedure('swarm.restore_waiting_item(uuid,uuid,text,uuid,uuid)') IS NULL

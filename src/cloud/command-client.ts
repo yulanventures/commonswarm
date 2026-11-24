@@ -78,7 +78,6 @@ export interface CommandHttpResponse extends StoredResponse {
   withdrawn?: boolean;
   created?: boolean;
   withdrawn_at?: string;
-  replaced_by_signal_id?: string;
   superseded_signal_id?: string;
 }
 

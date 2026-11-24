@@ -26,7 +26,6 @@ export type AskWithdrawalOutcome =
   | {
     ok: true;
     response: Record<string, unknown>;
-    channel_id: string | null;
   }
   | {
     ok: false;
@@ -106,21 +105,13 @@ export async function applyWithdrawAsk(
   const status = typeof result.status === "string" ? result.status : "invalid_request";
 
   if (status === "ok") {
-    const channelId = typeof result.channel_id === "string" && UUID_RE.test(result.channel_id)
-      ? result.channel_id.toLowerCase()
-      : null;
-    const replacedBy = typeof result.replaced_by_signal_id === "string" && UUID_RE.test(result.replaced_by_signal_id)
-      ? result.replaced_by_signal_id.toLowerCase()
-      : null;
     return {
       ok: true,
-      channel_id: channelId,
       response: {
         signal_id: signalId.toLowerCase(),
         withdrawn: Boolean(result.withdrawn),
         ...(typeof result.created === "boolean" ? { created: result.created } : {}),
         ...(typeof result.withdrawn_at === "string" ? { withdrawn_at: result.withdrawn_at } : {}),
-        ...(replacedBy !== null ? { replaced_by_signal_id: replacedBy } : {}),
       },
     };
   }
@@ -307,7 +298,45 @@ export function storedAskWithdrawalReplayTarget(
   return null;
 }
 
-/** Preserve withdraw_ask and post_signal supersedes fields on idempotency replay. */
+/**
+ * Resolve distinct effective channel ids (canonical conversation's channel, falling back to
+ * scalar channel_id) for withdrawal-related signal references via the narrow SECURITY DEFINER
+ * resolver (swarm_command EXECUTE only; zero direct conversation-table grants). Takes no actor
+ * and applies no access check so audit tags remain intact even after access loss.
+ */
+export async function resolveAskWithdrawalEffectiveChannelIds(
+  tx: Sql,
+  workspaceId: string,
+  signalIds: readonly string[],
+): Promise<string[] | undefined> {
+  if (!UUID_RE.test(workspaceId)) return undefined;
+  const validIds = [
+    ...new Set(
+      signalIds
+        .filter((id): id is string => typeof id === "string" && UUID_RE.test(id))
+        .map((id) => id.toLowerCase()),
+    ),
+  ];
+  if (validIds.length === 0) return undefined;
+  const rows = await tx<{ channel_id: string }[]>`
+    SELECT channel_id
+    FROM swarm.ask_withdrawal_effective_channel_ids(
+      ${workspaceId}::uuid,
+      ${validIds}::uuid[]
+    )
+  `;
+  const ids = rows
+    .map((row) => row.channel_id)
+    .filter((id): id is string => typeof id === "string" && UUID_RE.test(id))
+    .map((id) => id.toLowerCase());
+  return ids.length > 0 ? ids : undefined;
+}
+
+/**
+ * Preserve withdraw_ask and post_signal/ask_choice supersedes fields on idempotency replay.
+ * Standalone withdraw_ask replay deliberately strips replaced_by_signal_id (including from
+ * receipts stored before HezSec C3) so a standalone receipt never exposes a replacement ask id.
+ */
 export function askWithdrawalReplayFields(response: Record<string, unknown>): Record<string, unknown> {
   const fields: Record<string, unknown> = {};
   if (typeof response.superseded_signal_id === "string" && UUID_RE.test(response.superseded_signal_id)) {
@@ -318,9 +347,6 @@ export function askWithdrawalReplayFields(response: Record<string, unknown>): Re
     fields.withdrawn = response.withdrawn;
     if (typeof response.created === "boolean") fields.created = response.created;
     if (typeof response.withdrawn_at === "string") fields.withdrawn_at = response.withdrawn_at;
-    if (typeof response.replaced_by_signal_id === "string" && UUID_RE.test(response.replaced_by_signal_id)) {
-      fields.replaced_by_signal_id = response.replaced_by_signal_id.toLowerCase();
-    }
   }
   return fields;
 }

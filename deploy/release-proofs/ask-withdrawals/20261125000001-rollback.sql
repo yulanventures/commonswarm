@@ -4,7 +4,10 @@
 -- swarm_read.waiting_todos_page(uuid,integer,timestamptz,uuid) exactly from
 -- 20261124000001_waiting_dismissals.sql, drops the 5-arg restore_waiting_item overload, drops
 -- dismissal_id from swarm.waiting_dismissals, and drops swarm_read.my_open_asks,
--- swarm.withdraw_ask, swarm.ask_is_withdrawn, swarm.ask_withdrawals, and its validator trigger.
+-- swarm.withdraw_ask, swarm.ask_withdrawal_effective_channel_ids,
+-- swarm.ask_withdrawal_release_allowed, swarm.ask_complete_for_withdrawal,
+-- swarm.ask_sender_can_access_placement, swarm.ask_is_withdrawn, swarm.ask_withdrawals,
+-- and its validator trigger.
 SET search_path = swarm, pg_catalog, public;
 
 -- Restore swarm.waiting_ask_autoclear_status from 20261124000002_waiting_autoclear.sql
@@ -479,6 +482,7 @@ ALTER TABLE swarm.waiting_dismissals DROP COLUMN IF EXISTS dismissal_id;
 
 DROP FUNCTION IF EXISTS swarm_read.my_open_asks(uuid, integer, timestamptz, uuid, bytea);
 DROP FUNCTION IF EXISTS swarm.withdraw_ask(uuid, text, uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.ask_withdrawal_effective_channel_ids(uuid, uuid[]);
 DROP FUNCTION IF EXISTS swarm.ask_withdrawal_release_allowed(uuid, text, uuid, uuid, uuid, boolean);
 DROP FUNCTION IF EXISTS swarm.ask_complete_for_withdrawal(uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.ask_sender_can_access_placement(uuid, uuid, text, uuid);

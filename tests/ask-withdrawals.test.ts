@@ -12,12 +12,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import {
+  applyWithdrawAsk,
   ASK_WITHDRAWAL_NOT_FOUND_BODY,
   askWithdrawalReplayFields,
   isAskWithdrawalCommandKind,
   loadAskReplacementPlacement,
   parseAskWithdrawalCommand,
   reauthorizeAskWithdrawalRelease,
+  resolveAskWithdrawalEffectiveChannelIds,
   storedAskWithdrawalReplayTarget,
 } from "../supabase/functions/command/ask-withdrawals.js";
 import {
@@ -30,7 +32,7 @@ import {
   HostedToolFailure,
   hostedToolError,
 } from "../supabase/functions/mcp/tool-errors.js";
-import { MCP_TOOLS, STDIO_MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
+import { mapWithdraw, MCP_TOOLS, STDIO_MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
 import { commandHelpLines, formatOpenAsksTable } from "../src/cli.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../src/cloud/agent-credential-input.js";
 import { parseAgentConnection, saveAgentProfile } from "../src/cloud/agent-profile.js";
@@ -72,25 +74,24 @@ test("parseAskWithdrawalCommand validates kind, signal_id UUID, and rejects extr
   }
 });
 
-test("askWithdrawalReplayFields preserves only valid withdraw_ask and supersedes receipt fields", () => {
-  assert.deepEqual(
-    askWithdrawalReplayFields({
-      signal_id: ASK_ID.toUpperCase(),
-      withdrawn: true,
-      created: true,
-      withdrawn_at: "2026-11-23T12:00:00Z",
-      replaced_by_signal_id: NEW_ASK_ID.toUpperCase(),
-      channel_id: "should-not-surface",
-      extra: 123,
-    }),
-    {
-      signal_id: ASK_ID,
-      withdrawn: true,
-      created: true,
-      withdrawn_at: "2026-11-23T12:00:00Z",
-      replaced_by_signal_id: NEW_ASK_ID,
-    },
-  );
+test("askWithdrawalReplayFields preserves only documented withdraw_ask and supersedes fields and strips replaced_by_signal_id", () => {
+  const replayed = askWithdrawalReplayFields({
+    signal_id: ASK_ID.toUpperCase(),
+    withdrawn: true,
+    created: false,
+    withdrawn_at: "2026-11-23T12:00:00Z",
+    // Legacy receipt stored before C3 fix must have replaced_by_signal_id stripped on replay.
+    replaced_by_signal_id: NEW_ASK_ID.toUpperCase(),
+    channel_id: "should-not-surface",
+    extra: 123,
+  });
+  assert.deepEqual(replayed, {
+    signal_id: ASK_ID,
+    withdrawn: true,
+    created: false,
+    withdrawn_at: "2026-11-23T12:00:00Z",
+  });
+  assert.equal(Object.hasOwn(replayed, "replaced_by_signal_id"), false);
   assert.deepEqual(
     askWithdrawalReplayFields({ superseded_signal_id: ASK_ID.toUpperCase(), ok: true }),
     { superseded_signal_id: ASK_ID },
@@ -100,6 +101,53 @@ test("askWithdrawalReplayFields preserves only valid withdraw_ask and supersedes
     error: "not_found",
     message: "No open ask of yours has that id.",
   });
+});
+
+test("applyWithdrawAsk and mapWithdraw never project replaced_by_signal_id", async () => {
+  const fakeTx = ((_strings: TemplateStringsArray, ..._values: unknown[]) =>
+    Promise.resolve([
+      {
+        result: {
+          status: "ok",
+          signal_id: ASK_ID,
+          withdrawn: true,
+          created: false,
+          withdrawn_at: "2026-11-23T12:00:00Z",
+          replaced_by_signal_id: NEW_ASK_ID,
+          channel_id: WS_ID,
+        },
+      },
+    ])) as unknown as Parameters<typeof applyWithdrawAsk>[0];
+
+  const outcome = await applyWithdrawAsk(fakeTx, WS_ID, "agent", AGENT_ID, ASK_ID);
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) {
+    assert.deepEqual(outcome.response, {
+      signal_id: ASK_ID,
+      withdrawn: true,
+      created: false,
+      withdrawn_at: "2026-11-23T12:00:00Z",
+    });
+    assert.equal(Object.hasOwn(outcome.response, "replaced_by_signal_id"), false);
+  }
+
+  const mapped = mapWithdraw({
+    httpStatus: 200,
+    response: {
+      ok: true,
+      signal_id: ASK_ID,
+      withdrawn: true,
+      created: false,
+      withdrawn_at: "2026-11-23T12:00:00Z",
+      replaced_by_signal_id: NEW_ASK_ID,
+    },
+  } as unknown as Parameters<typeof mapWithdraw>[0]);
+  assert.deepEqual(mapped, {
+    signal_id: ASK_ID,
+    withdrawn: true,
+    withdrawn_at: "2026-11-23T12:00:00Z",
+  });
+  assert.equal(Object.hasOwn(mapped, "replaced_by_signal_id"), false);
 });
 
 test("storedAskWithdrawalReplayTarget extracts bound old and new signal ids for replay reauthorization", () => {
@@ -230,6 +278,40 @@ test("loadAskReplacementPlacement respects swarm_command table boundary and fail
   const beforeInvalid = calls.length;
   assert.equal(await loadAskReplacementPlacement(fakeTx, WS_ID, "agent", AGENT_ID, "not-a-uuid"), undefined);
   assert.equal(calls.length, beforeInvalid);
+});
+
+test("resolveAskWithdrawalEffectiveChannelIds uses the narrow resolver, respects swarm_command boundary, and fails closed", async () => {
+  const CH_PRIV = "66666666-6666-4666-8666-666666666666";
+  const CH_PUB = "77777777-7777-4777-8777-777777777777";
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const fakeTx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join("?");
+    if (COMMAND_ROLE_RESTRICTED_TABLE_RE.test(sql)) {
+      const err = new Error("permission denied for table conversation_signals") as Error & { code?: string };
+      err.code = "42501";
+      return Promise.reject(err);
+    }
+    calls.push({ sql, values });
+    return Promise.resolve([{ channel_id: CH_PRIV.toUpperCase() }, { channel_id: CH_PUB }]);
+  }) as unknown as Parameters<typeof resolveAskWithdrawalEffectiveChannelIds>[0];
+
+  const resolved = await resolveAskWithdrawalEffectiveChannelIds(fakeTx, WS_ID, [
+    ASK_ID.toUpperCase(),
+    NEW_ASK_ID,
+    ASK_ID,
+    "not-a-uuid",
+  ]);
+  assert.deepEqual(resolved, [CH_PRIV, CH_PUB]);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /swarm\.ask_withdrawal_effective_channel_ids/);
+  assert.doesNotMatch(calls[0]!.sql, COMMAND_ROLE_RESTRICTED_TABLE_RE);
+  assert.deepEqual(calls[0]!.values, [WS_ID, [ASK_ID, NEW_ASK_ID]]);
+
+  const beforeEmpty = calls.length;
+  assert.equal(await resolveAskWithdrawalEffectiveChannelIds(fakeTx, "bad-ws", [ASK_ID]), undefined);
+  assert.equal(await resolveAskWithdrawalEffectiveChannelIds(fakeTx, WS_ID, ["not-a-uuid"]), undefined);
+  assert.equal(await resolveAskWithdrawalEffectiveChannelIds(fakeTx, WS_ID, []), undefined);
+  assert.equal(calls.length, beforeEmpty);
 });
 
 test("command edge never directly queries swarm_command-restricted conversation or withdrawal tables", () => {
@@ -434,6 +516,8 @@ test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against m
             withdrawn: true,
             created: true,
             withdrawn_at: "2026-11-23T12:00:00Z",
+            // Legacy server field must never be printed by CLI ask withdraw --json.
+            replaced_by_signal_id: NEW_ASK_ID,
             event_ids: [],
           });
         }
@@ -530,10 +614,20 @@ test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against m
         env: { ...process.env, HOME: root },
       });
 
-    // 1. cswarm ask withdraw <ask-id>
+    // 1. cswarm ask withdraw <ask-id> (plain and --json)
     const wdOut = await runCli(["ask", "withdraw", ASK_ID, "--profile", profilePath]);
     assert.match(wdOut.stdout, /Withdrawn ask 44444444-4444-4444-8444-444444444444\./);
     assert.deepEqual(commands.at(-1)?.command, { kind: "withdraw_ask", signal_id: ASK_ID });
+
+    const wdJson = await runCli(["ask", "withdraw", ASK_ID, "--json", "--profile", profilePath]);
+    const wdParsed = JSON.parse(wdJson.stdout) as Record<string, unknown>;
+    assert.deepEqual(wdParsed, {
+      signal_id: ASK_ID,
+      withdrawn: true,
+      created: true,
+      withdrawn_at: "2026-11-23T12:00:00Z",
+    });
+    assert.equal(Object.hasOwn(wdParsed, "replaced_by_signal_id"), false);
 
     // 2. cswarm ask --to Alice --supersedes <ask-id> "Updated question?"
     const supOut = await runCli([

@@ -263,6 +263,7 @@ import {
   loadAskReplacementPlacement,
   parseAskWithdrawalCommand,
   reauthorizeAskWithdrawalRelease,
+  resolveAskWithdrawalEffectiveChannelIds,
   storedAskWithdrawalReplayTarget,
   type WithdrawAskCommand,
 } from "./ask-withdrawals.ts";
@@ -962,7 +963,6 @@ interface StoredResponse {
   /** Sender ask withdrawals & replace (supersedes). */
   withdrawn?: boolean;
   withdrawn_at?: string;
-  replaced_by_signal_id?: string;
   superseded_signal_id?: string;
 }
 
@@ -13810,14 +13810,14 @@ async function replayAuditChannelIds(
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [choiceAnswer.signal_id]));
   }
   if (typeof stored?.withdrawn === "boolean" && typeof stored?.signal_id === "string" && UUID_RE.test(stored.signal_id)) {
-    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.signal_id]));
+    addAll(await resolveAskWithdrawalEffectiveChannelIds(tx, workspaceId, [stored.signal_id]));
   }
   if (typeof stored?.superseded_signal_id === "string" && UUID_RE.test(stored.superseded_signal_id)) {
     const replacementRefs = [stored.superseded_signal_id];
     if (typeof signal?.id === "string" && UUID_RE.test(signal.id)) {
       replacementRefs.push(signal.id);
     }
-    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, replacementRefs));
+    addAll(await resolveAskWithdrawalEffectiveChannelIds(tx, workspaceId, replacementRefs));
   }
   /* A stored reaction names the message it was on, and its success proves the reactor could read
    * that message then. Tag every later use of the command id with that message's channel, whatever
@@ -14911,9 +14911,12 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
         },
       );
     }
-    if (supersedeOutcome.channel_id !== null) {
-      auditChannelIds = unionChannelIds(auditChannelIds, [supersedeOutcome.channel_id]);
-    }
+    const effectiveWithdrawalChannelIds = await resolveAskWithdrawalEffectiveChannelIds(
+      tx,
+      route.workspaceId,
+      [command.supersedes, posted.signal.id],
+    );
+    auditChannelIds = unionChannelIds(auditChannelIds, effectiveWithdrawalChannelIds);
   }
   const response: StoredResponse = {
     ok: true, event_ids: [], signal: posted.signal, choice_options: command.options,
@@ -18489,10 +18492,15 @@ async function handleTransaction(
       if (inserted.length === 0) {
         throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
       }
+      const withdrawAuditChannelIds = await resolveAskWithdrawalEffectiveChannelIds(
+        tx,
+        route.workspaceId,
+        [withdrawCmd.signal_id],
+      );
       await insertAudit(tx, {
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "accepted", detail: ignoredIdentity, hash,
-        channelIds: outcome.channel_id !== null ? [outcome.channel_id] : undefined,
+        channelIds: withdrawAuditChannelIds,
       });
       // C3: Schedule post-fence release recheck after final credential/session fences so any
       // access loss during receipt/audit/fence waits rolls back the withdrawal, receipt, and audit.
@@ -19365,9 +19373,15 @@ async function handleTransaction(
             },
           );
         }
-        if (supersedeOutcome.channel_id !== null) {
-          finalPostAuditChannelIds = unionChannelIds(postAuditChannelIds, [supersedeOutcome.channel_id]);
-        }
+        const effectiveWithdrawalChannelIds = await resolveAskWithdrawalEffectiveChannelIds(
+          tx,
+          route.workspaceId,
+          [command.supersedes, signal.id],
+        );
+        finalPostAuditChannelIds = unionChannelIds(
+          postAuditChannelIds,
+          effectiveWithdrawalChannelIds,
+        );
       }
       /* An agent that answers a message has seen it: observe its own unclaimed delivery of the
        * message it replied to, in this transaction. Best effort and outside the stored response,
