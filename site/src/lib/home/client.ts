@@ -282,12 +282,16 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     || !isoTime(value.state_at)
     || typeof value.placement !== 'string' || !WAITING_TODO_PLACEMENTS.has(value.placement as WaitingTodoPlacement)
     || (value.channel_id !== null && typeof value.channel_id !== 'string')
-    || (value.conversation_id !== undefined && value.conversation_id !== null && typeof value.conversation_id !== 'string')) {
+    || (value.conversation_id !== undefined && value.conversation_id !== null && typeof value.conversation_id !== 'string')
+    || (value.offer_id !== undefined && value.offer_id !== null && typeof value.offer_id !== 'string')) {
     throw new Error('home_waiting_todos_malformed');
   }
   const placement = value.placement as WaitingTodoPlacement;
   const rawConvId = typeof value.conversation_id === 'string' && value.conversation_id.trim()
     ? value.conversation_id.trim().toLowerCase()
+    : null;
+  const rawOfferId = typeof value.offer_id === 'string' && value.offer_id.trim()
+    ? value.offer_id.trim()
     : null;
   if (placement === 'channel' && (!value.channel_id || rawConvId !== null)) throw new Error('home_waiting_todos_malformed');
   if ((placement === 'dm' || placement === 'group_dm') && (!rawConvId || value.channel_id !== null)) {
@@ -304,6 +308,7 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     placement,
     channel_id: placement === 'channel' ? value.channel_id : null,
     conversation_id: (placement === 'dm' || placement === 'group_dm') ? rawConvId : null,
+    ...(rawOfferId !== null ? { offer_id: rawOfferId } : {}),
   };
 }
 

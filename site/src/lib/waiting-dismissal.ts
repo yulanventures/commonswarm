@@ -19,7 +19,7 @@ export type WaitingDismissPlacementKind = "channel" | "general" | "dm" | "group_
 export interface WaitingDismissBatchTarget {
   readonly slotKind: WaitingDismissSlotKind;
   readonly itemKind: WaitingDismissalItemKind;
-  /** Signal id, todo id, or offer id; "" only while resolving an offer id for review items. */
+  /** Signal id, todo id, or pinned review offer id. Never blank for batch items. */
   readonly itemId: string;
   /** Card id rendered in the Waiting list (signal id for asks, todo id for todos/reviews). */
   readonly cardId: string;
@@ -80,18 +80,6 @@ export interface WaitingDismissRow {
   inFlightDismiss?: Promise<boolean>;
 }
 
-/** Minimal metadata kept for a batch-dismissed item so batch Undo can restore it. Holds NO item text. */
-interface BatchRestorableItem {
-  readonly slotKind: WaitingDismissSlotKind;
-  readonly itemKind: WaitingDismissalItemKind;
-  readonly itemId: string;
-  readonly cardId: string;
-  readonly workspaceId: string;
-  readonly channelId: string | null;
-  readonly conversationId: string | null;
-  readonly placementKind: WaitingDismissPlacementKind;
-}
-
 interface BatchNotFoundCandidate {
   readonly workspaceId: string;
   readonly slotKind: WaitingDismissSlotKind;
@@ -107,15 +95,12 @@ interface WaitingDismissBatchInternal {
   readonly accountAlive: () => boolean;
   readonly capturedGlobalGen: number;
   readonly capturedWsGens: ReadonlyMap<string, number>;
-  phase: "loading" | "confirm" | "running" | "done" | "undoing";
+  readonly capturedPanelLifetime: number | null;
+  phase: "loading" | "confirm" | "running" | "done";
   targets: readonly WaitingDismissBatchTarget[];
-  restorable: BatchRestorableItem[];
   total: number;
   processed: number;
   doneCount: number;
-  undoTotal: number;
-  undone: number;
-  undoAttemptId: number | null;
   stopping: boolean;
   retired: boolean;
 }
@@ -152,6 +137,14 @@ export interface WaitingDismissalPorts {
   resolveReviewOfferId?: (workspaceId: string, todoId: string, isAlive?: () => boolean) => Promise<string | null>;
   /** Optional snapshot of the caller's account/auth lifetime captured at the moment the person acts. */
   captureAccountGuard?: () => () => boolean;
+  /** Optional monotonic panel lifetime counter that changes on every panel close and open. */
+  getPanelLifetime?: () => number;
+  /** Optional check that the panel is still showing the scope/place/workspace the batch started in. */
+  isBatchScopeCurrent?: (batchScope: {
+    scope: WaitingScope;
+    placeKey: string;
+    workspaceIds: ReadonlySet<string>;
+  }) => boolean;
   isAlive: () => boolean;
   removeCardFromClient: (target: WaitingDismissTarget) => void;
   onRetireAccessLoss?: (event: WaitingAccessLossEvent) => void;
@@ -170,7 +163,6 @@ export interface WaitingDismissalPorts {
   onBatchCancelled?: () => void;
   onBatchStarted?: () => void;
   onBatchFinished?: () => void;
-  onBatchUndoFinished?: () => void;
 }
 
 export interface WaitingDismissalController {
@@ -187,7 +179,6 @@ export interface WaitingDismissalController {
   cancelBatchConfirm(): void;
   confirmBatch(): Promise<void>;
   stopBatch(): void;
-  undoBatch(): Promise<void>;
   retireBatch(renderIfChanged?: boolean): boolean;
   dismiss(target: WaitingDismissTarget): Promise<void>;
   undo(key: string): Promise<void>;
@@ -200,17 +191,23 @@ export interface WaitingDismissalController {
 
 const BATCH_CONCURRENCY = 3;
 
-function sanitizeBatchTarget(target: WaitingDismissBatchTarget): WaitingDismissBatchTarget {
-  return {
-    slotKind: target.slotKind,
-    itemKind: target.itemKind,
-    itemId: target.itemId,
-    cardId: target.cardId,
-    workspaceId: target.workspaceId,
-    channelId: target.channelId,
-    conversationId: target.conversationId,
-    placementKind: target.placementKind,
-  };
+function normalizeBatchTargets(targets: readonly WaitingDismissBatchTarget[] | null | undefined): WaitingDismissBatchTarget[] {
+  const out: WaitingDismissBatchTarget[] = [];
+  for (const target of targets ?? []) {
+    const itemId = typeof target.itemId === "string" ? target.itemId.trim() : "";
+    if (!itemId) continue;
+    out.push({
+      slotKind: target.slotKind,
+      itemKind: target.itemKind,
+      itemId,
+      cardId: target.cardId,
+      workspaceId: target.workspaceId,
+      channelId: target.channelId,
+      conversationId: target.conversationId,
+      placementKind: target.placementKind,
+    });
+  }
+  return out;
 }
 
 function normId(id: string): string {
@@ -274,6 +271,23 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     if (batch.retired || !ownsBatch(batch)) return false;
     if (!ports.isAlive() || !batch.accountAlive()) return false;
     if (globalGen !== batch.capturedGlobalGen) return false;
+    if (
+      batch.capturedPanelLifetime !== null &&
+      ports.getPanelLifetime &&
+      ports.getPanelLifetime() !== batch.capturedPanelLifetime
+    ) {
+      return false;
+    }
+    if (
+      ports.isBatchScopeCurrent &&
+      !ports.isBatchScopeCurrent({
+        scope: batch.scope,
+        placeKey: batch.placeKey,
+        workspaceIds: batch.workspaceIds,
+      })
+    ) {
+      return false;
+    }
     for (const [normWs, capturedGen] of batch.capturedWsGens) {
       if ((workspaceAnyLossGens.get(normWs) ?? 0) !== capturedGen) return false;
     }
@@ -400,7 +414,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
   };
 
   type BatchItemOutcome =
-    | { kind: "dismissed"; restorable: BatchRestorableItem }
+    | { kind: "dismissed" }
     | { kind: "not_found"; candidate: BatchNotFoundCandidate }
     | { kind: "failed" }
     | { kind: "retired" };
@@ -411,6 +425,12 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     touchedWorkspaces: Set<string>,
   ): Promise<BatchItemOutcome> => {
     if (!isBatchAlive(batch)) return { kind: "retired" };
+    const pinnedItemId = target.itemId.trim();
+    if (!pinnedItemId) {
+      batch.processed += 1;
+      ports.render();
+      return { kind: "failed" };
+    }
     const key = `${target.slotKind}:${target.cardId}`;
     const existingRow = rows.get(key);
     if (existingRow && !existingRow.retired && existingRow.batchAttemptId === null && !existingRow.dismissResolved) {
@@ -423,7 +443,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       key,
       slotKind: target.slotKind,
       itemKind: target.itemKind,
-      itemId: target.itemId,
+      itemId: pinnedItemId,
       cardId: target.cardId,
       workspaceId: target.workspaceId,
       channelId: target.channelId,
@@ -457,43 +477,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       return { kind: "retired" };
     };
 
-    let resolvedItemId = row.itemId;
-    if (target.itemKind === "review" && !resolvedItemId) {
-      if (!ports.resolveReviewOfferId) {
-        if (!ownsRow() || !alive()) return retireRow();
-        deleteOwnedRow(key, row);
-        batch.processed += 1;
-        ports.render();
-        return { kind: "failed" };
-      }
-      try {
-        const offerId = await ports.resolveReviewOfferId(target.workspaceId, target.cardId, alive);
-        if (!ownsRow() || !alive()) return retireRow();
-        if (!offerId) {
-          deleteOwnedRow(key, row);
-          ports.removeCardFromClient({ ...target, position: 0, placeKey: batch.placeKey, scope: batch.scope });
-          batch.processed += 1;
-          ports.render();
-          return {
-            kind: "not_found",
-            candidate: { workspaceId: target.workspaceId, slotKind: target.slotKind, cardId: target.cardId },
-          };
-        }
-        resolvedItemId = offerId;
-      } catch {
-        if (!ownsRow() || !alive()) return retireRow();
-        deleteOwnedRow(key, row);
-        batch.processed += 1;
-        ports.render();
-        return { kind: "failed" };
-      }
-      row.itemId = resolvedItemId;
-    }
-
     if (!ownsRow() || !alive()) return retireRow();
     let result: WaitingDismissalResult;
     try {
-      result = await ports.sendDismiss(target.workspaceId, target.itemKind, resolvedItemId, alive);
+      result = await ports.sendDismiss(target.workspaceId, target.itemKind, pinnedItemId, alive);
     } catch {
       result = { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
     }
@@ -503,27 +490,15 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
     if (result.ok) {
       row.dismissResolved = true;
-      ports.removeCardFromClient({ ...target, itemId: resolvedItemId, position: 0, placeKey: batch.placeKey, scope: batch.scope });
+      ports.removeCardFromClient({ ...target, itemId: pinnedItemId, position: 0, placeKey: batch.placeKey, scope: batch.scope });
       batch.processed += 1;
       ports.render();
-      return {
-        kind: "dismissed",
-        restorable: {
-          slotKind: target.slotKind,
-          itemKind: target.itemKind,
-          itemId: resolvedItemId,
-          cardId: target.cardId,
-          workspaceId: target.workspaceId,
-          channelId: target.channelId,
-          conversationId: target.conversationId,
-          placementKind: target.placementKind,
-        },
-      };
+      return { kind: "dismissed" };
     }
 
     deleteOwnedRow(key, row);
     if (isNotFoundResult(result)) {
-      ports.removeCardFromClient({ ...target, itemId: resolvedItemId, position: 0, placeKey: batch.placeKey, scope: batch.scope });
+      ports.removeCardFromClient({ ...target, itemId: pinnedItemId, position: 0, placeKey: batch.placeKey, scope: batch.scope });
       batch.processed += 1;
       ports.render();
       return {
@@ -597,18 +572,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           stopping: batch.stopping,
         };
       }
-      if (batch.phase === "done") {
-        return {
-          phase: "done",
-          doneCount: batch.doneCount,
-          total: batch.total,
-          canUndo: batch.restorable.length > 0,
-        };
-      }
       return {
-        phase: "undoing",
-        undone: batch.undone,
-        undoTotal: batch.undoTotal,
+        phase: "done",
+        doneCount: batch.doneCount,
+        total: batch.total,
       };
     },
 
@@ -620,12 +587,13 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
     async beginBatchConfirm(input: WaitingDismissBatchBeginInput): Promise<void> {
       if (!ports.isAlive()) return;
-      if (activeBatch && (activeBatch.phase === "running" || activeBatch.phase === "undoing")) return;
+      if (activeBatch && activeBatch.phase === "running") return;
       const hadPrev = retireBatchInternal(false);
 
       const attemptId = newAttemptId();
       const currentBatchGen = (batchGen += 1);
       const accountAlive = ports.captureAccountGuard ? ports.captureAccountGuard() : ports.isAlive;
+      const capturedPanelLifetime = ports.getPanelLifetime ? ports.getPanelLifetime() : null;
       const wsSet = new Set<string>(input.workspaceIds.map(normId).filter(Boolean));
       const wsGens = new Map<string, number>();
       for (const normWs of wsSet) {
@@ -642,15 +610,12 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           accountAlive,
           capturedGlobalGen: globalGen,
           capturedWsGens: wsGens,
+          capturedPanelLifetime,
           phase: "loading",
           targets: [],
-          restorable: [],
           total: 0,
           processed: 0,
           doneCount: 0,
-          undoTotal: 0,
-          undone: 0,
-          undoAttemptId: null,
           stopping: false,
           retired: false,
         };
@@ -665,10 +630,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         }
         if (!ownsBatch(batch)) return;
         if (!isBatchAlive(batch)) {
-          retireBatchInternal(true);
+          retireBatchInternal(false);
           return;
         }
-        const sanitized = (loaded ?? []).map(sanitizeBatchTarget);
+        const sanitized = normalizeBatchTargets(loaded);
         if (sanitized.length < 2) {
           retireBatchInternal(true);
           return;
@@ -684,11 +649,12 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         batch.total = sanitized.length;
         batch.phase = "confirm";
         ports.render();
+        if (!ownsBatch(batch) || !isBatchAlive(batch)) return;
         ports.onBatchConfirmOpened?.();
         return;
       }
 
-      const sanitized = (input.targets ?? []).map(sanitizeBatchTarget);
+      const sanitized = normalizeBatchTargets(input.targets);
       if (sanitized.length < 2) {
         if (hadPrev && ports.isAlive()) ports.render();
         return;
@@ -700,7 +666,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           wsGens.set(normWs, workspaceAnyLossGens.get(normWs) ?? 0);
         }
       }
-      activeBatch = {
+      const batch: WaitingDismissBatchInternal = {
         attemptId,
         batchGen: currentBatchGen,
         scope: input.scope,
@@ -709,19 +675,18 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         accountAlive,
         capturedGlobalGen: globalGen,
         capturedWsGens: wsGens,
+        capturedPanelLifetime,
         phase: "confirm",
         targets: sanitized,
-        restorable: [],
         total: sanitized.length,
         processed: 0,
         doneCount: 0,
-        undoTotal: 0,
-        undone: 0,
-        undoAttemptId: null,
         stopping: false,
         retired: false,
       };
+      activeBatch = batch;
       ports.render();
+      if (!ownsBatch(batch) || !isBatchAlive(batch)) return;
       ports.onBatchConfirmOpened?.();
     },
 
@@ -736,7 +701,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       const batch = activeBatch;
       if (!batch || batch.phase !== "confirm" || !isBatchAlive(batch)) return;
 
-      // Drop any resolved per-item "Dismissed · Undo" placeholders so one batch row owns Undo.
+      // Drop any resolved per-item "Dismissed · Undo" placeholders so the batch result row replaces them.
       for (const [key, row] of rows.entries()) {
         if (row.batchAttemptId === null && row.dismissResolved && !row.pendingUndo) {
           row.retired = true;
@@ -747,12 +712,13 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       batch.phase = "running";
       batch.processed = 0;
       batch.stopping = false;
-      batch.restorable = [];
       ports.render();
+      if (!ownsBatch(batch) || !isBatchAlive(batch)) return;
       ports.onBatchStarted?.();
 
       const notFoundCandidates: BatchNotFoundCandidate[] = [];
       const touchedWorkspaces = new Set<string>();
+      let dismissedCount = 0;
       let retired = false;
 
       for (let start = 0; start < batch.targets.length; start += BATCH_CONCURRENCY) {
@@ -772,7 +738,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         }
         for (const outcome of outcomes) {
           if (outcome.kind === "dismissed") {
-            batch.restorable.push(outcome.restorable);
+            dismissedCount += 1;
           } else if (outcome.kind === "not_found") {
             notFoundCandidates.push(outcome.candidate);
           }
@@ -781,7 +747,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
       if (!ownsBatch(batch)) return;
       if (retired || !isBatchAlive(batch)) {
-        retireBatchInternal(true);
+        retireBatchInternal(false);
         return;
       }
 
@@ -795,7 +761,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
       if (!ownsBatch(batch)) return;
       if (!isBatchAlive(batch)) {
-        retireBatchInternal(true);
+        retireBatchInternal(false);
         return;
       }
 
@@ -805,9 +771,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           gone404Count += 1;
         }
       }
-      batch.doneCount = batch.restorable.length + gone404Count;
+      batch.doneCount = dismissedCount + gone404Count;
       batch.phase = "done";
       ports.render();
+      if (!ownsBatch(batch) || !isBatchAlive(batch)) return;
       ports.onBatchFinished?.();
     },
 
@@ -818,79 +785,6 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       ports.render();
     },
 
-    async undoBatch(): Promise<void> {
-      const batch = activeBatch;
-      if (!batch || batch.phase !== "done" || batch.restorable.length === 0 || !isBatchAlive(batch)) return;
-
-      const undoAttemptId = newAttemptId();
-      batch.undoAttemptId = undoAttemptId;
-      batch.phase = "undoing";
-      batch.undoTotal = batch.restorable.length;
-      batch.undone = 0;
-      ports.render();
-
-      const ownsUndo = (): boolean => ownsBatch(batch) && batch.undoAttemptId === undoAttemptId;
-      const isUndoAlive = (): boolean => isBatchAlive(batch) && ownsUndo();
-      const items = [...batch.restorable];
-      const touchedWorkspaces = new Set<string>();
-      let retired = false;
-
-      for (let start = 0; start < items.length; start += BATCH_CONCURRENCY) {
-        if (!isUndoAlive()) {
-          retired = true;
-          break;
-        }
-        const chunk = items.slice(start, start + BATCH_CONCURRENCY);
-        const outcomes = await Promise.all(
-          chunk.map(async (item): Promise<"ok" | "retired"> => {
-            if (!isUndoAlive()) return "retired";
-            touchedWorkspaces.add(item.workspaceId);
-            const itemAlive = createActionAlive(
-              item.workspaceId,
-              item.channelId,
-              item.conversationId,
-              item.placementKind === "unknown",
-              isUndoAlive,
-            );
-            let result: WaitingDismissalResult;
-            try {
-              result = await ports.sendRestore(item.workspaceId, item.itemKind, item.itemId, itemAlive);
-            } catch {
-              result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
-            }
-            if (!ownsUndo()) return "retired";
-            if (!isUndoAlive() || isRetiredResult(result)) return "retired";
-            batch.undone += 1;
-            ports.render();
-            return "ok";
-          }),
-        );
-        if (!ownsUndo()) return;
-        if (!isUndoAlive() || outcomes.includes("retired")) {
-          retired = true;
-          break;
-        }
-      }
-
-      if (!ownsUndo()) return;
-      if (retired || !isUndoAlive()) {
-        retireBatchInternal(true);
-        return;
-      }
-
-      batch.retired = true;
-      activeBatch = null;
-      batchGen += 1;
-      for (const wsId of touchedWorkspaces) {
-        ports.invalidateArchived(wsId);
-      }
-      ports.render();
-      await reloadBatchWorkspaces(touchedWorkspaces);
-      if (ports.isAlive() && batch.accountAlive() && globalGen === batch.capturedGlobalGen) {
-        ports.onBatchUndoFinished?.();
-      }
-    },
-
     retireBatch(renderIfChanged = true): boolean {
       return retireBatchInternal(renderIfChanged);
     },
@@ -898,7 +792,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     async dismiss(target: WaitingDismissTarget): Promise<void> {
       if (!ports.isAlive()) return;
       if (activeBatch) {
-        if (activeBatch.phase === "running" || activeBatch.phase === "undoing") return;
+        if (activeBatch.phase === "running") return;
         retireBatchInternal(false);
       }
       const key = `${target.slotKind}:${target.cardId}`;

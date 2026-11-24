@@ -7254,6 +7254,7 @@ import "../../styles/kylon-image-viewer.css";
         placement: todo.placement,
         channelId: todo.channel_id,
         conversationId: todo.conversation_id ?? null,
+        ...(todo.offer_id ? { offerId: todo.offer_id } : {}),
         channelLabel: waitingTodoChannelLabel(workspace.id, todo.placement, todo.channel_id, todo.conversation_id ?? null),
       }));
 
@@ -7537,6 +7538,8 @@ import "../../styles/kylon-image-viewer.css";
     let waitingPanelModPromise: Promise<WaitingPanelModule> | null = null;
     let waitingSurface: WaitingSurface | null = null;
     let waitingOpenEpoch = 0;
+    let waitingPanelLifetime = 0;
+    let waitingPanelWasOpen = false;
 
     const loadWaitingPanelModule = (): Promise<WaitingPanelModule> => {
       if (waitingPanelMod) return Promise.resolve(waitingPanelMod);
@@ -7560,6 +7563,10 @@ import "../../styles/kylon-image-viewer.css";
           if (typeof closeEntityPanel === "function") closeEntityPanel(false);
         },
         onStateChange: (open) => {
+          if (open !== waitingPanelWasOpen) {
+            waitingPanelWasOpen = open;
+            waitingPanelLifetime += 1;
+          }
           if (!open) {
             clearWaitingArchivedCache();
             waitingDismissalCtrl.retireBatch(false);
@@ -7908,6 +7915,19 @@ import "../../styles/kylon-image-viewer.css";
 
     const waitingDismissalCtrl = createWaitingDismissalController({
       captureAccountGuard: () => waitingActionContext()?.isAlive ?? (() => false),
+      getPanelLifetime: () => waitingPanelLifetime,
+      isBatchScopeCurrent: (batchScope) => {
+        if (!waitingSurface?.isOpen() || waitingTab !== "active" || waitingSurvey.active) return false;
+        if (batchScope.scope !== waitingScope) return false;
+        const place = currentWaitingPlace();
+        if (batchScope.scope === "channel") {
+          return batchScope.placeKey === waitingPlaceKeyFor(place);
+        }
+        if (batchScope.scope === "workspace") {
+          return batchScope.workspaceIds.has(place.workspaceId.trim().toLowerCase());
+        }
+        return workspaces.length > 0;
+      },
       sendDismiss: async (workspaceId, itemKind, itemId, actionAlive) => {
         const ctx = waitingActionContext();
         if (!ctx || (actionAlive && !actionAlive())) {
@@ -8077,14 +8097,11 @@ import "../../styles/kylon-image-viewer.css";
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-done" });
         }
       },
-      onBatchUndoFinished: () => {
-        const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
-          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
-          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-undone" });
-        }
-      },
     });
+
+    // A review joins a batch only when the Waiting row itself carries its offer id, so the batch
+    // dismisses exactly the offer the person confirmed. No lookup in any other cached read.
+    const pinnedReviewOfferId = (item: WaitingTodoItem): string => item.offerId?.trim() ?? "";
 
     const collectWaitingBatchTargets = (scope: WaitingScope, place: WaitingPlace): WaitingDismissBatchTarget[] => {
       if (!waitingPanelMod) return [];
@@ -8110,10 +8127,12 @@ import "../../styles/kylon-image-viewer.css";
       }
       for (const item of visibleTodos) {
         const itemKind: WaitingDismissalItemKind = item.reason === "request" ? "review" : "todo";
+        const itemId = itemKind === "review" ? pinnedReviewOfferId(item) : item.id;
+        if (!itemId) continue;
         out.push({
           slotKind: "todo",
           itemKind,
-          itemId: itemKind === "review" ? "" : item.id,
+          itemId,
           cardId: item.id,
           workspaceId: item.workspaceId,
           channelId: item.channelId ?? null,
@@ -8393,6 +8412,11 @@ import "../../styles/kylon-image-viewer.css";
         waitingDismissalCtrl.retireBatch(false);
       }
       const activeDismissedPlaceholders = waitingDismissalCtrl.placeholdersFor(placeKey, waitingScope);
+      const canDismissAll =
+        !complete ||
+        waitingInFlight ||
+        waitingPanelOverviewFailed ||
+        collectWaitingBatchTargets(waitingScope, place).length >= 2;
       waitingPanelMod.renderWaitingPanel(
         container,
         {
@@ -8495,11 +8519,10 @@ import "../../styles/kylon-image-viewer.css";
           },
           onDismissTodo: (item) => void dismissWaitingPanelItem({ slotKind: "todo", item }),
           onUndoDismiss: (placeholder) => void undoWaitingDismissal(placeholder.key),
-          onDismissAllStart: () => startWaitingDismissAll(),
+          ...(canDismissAll ? { onDismissAllStart: () => startWaitingDismissAll() } : {}),
           onDismissAllConfirm: () => void waitingDismissalCtrl.confirmBatch(),
           onDismissAllCancel: () => waitingDismissalCtrl.cancelBatchConfirm(),
           onDismissAllStop: () => waitingDismissalCtrl.stopBatch(),
-          onUndoDismissBatch: () => void waitingDismissalCtrl.undoBatch(),
           onOpenCatchUp: (href) => {
             clearWaitingStatus();
             waitingSurface?.close(false);
@@ -8682,6 +8705,8 @@ import "../../styles/kylon-image-viewer.css";
       if (typeof waitingAuthGeneration !== "undefined") waitingAuthGeneration += 1;
       waitingGeneration += 1;
       waitingOpenEpoch += 1;
+      if (typeof waitingPanelLifetime !== "undefined") waitingPanelLifetime += 1;
+      if (typeof waitingPanelWasOpen !== "undefined") waitingPanelWasOpen = false;
       waitingInFlight = false;
       waitingAgain = false;
       if (typeof waitingAgainMaxPages !== "undefined") waitingAgainMaxPages = undefined;

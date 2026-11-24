@@ -1480,6 +1480,7 @@ async function observeWaitingDismissalFence() {
       panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all]")!.click();
       await wait(() =>
         panel()?.querySelector("[data-waiting-batch-prompt]")?.textContent === "Dismiss all 5?" &&
+        panel()?.querySelector("[data-waiting-batch-note]")?.textContent === "You can restore items one by one from Archived." &&
         panel()?.querySelector("[data-waiting-dismiss-all-confirm]")?.textContent === "Dismiss 5",
         "in-place Dismiss all 5? confirm opened");
       f.holdDismissAtIndex = 3;
@@ -1507,7 +1508,7 @@ async function observeWaitingDismissalFence() {
       return;
     }
 
-    // 9b. Clean control for Batch "Dismiss all": 5 dismissed -> "Dismissed 5" -> Undo restores all 5.
+    // 9b. Clean control for Batch "Dismiss all": 5 dismissed -> "Dismissed 5", no Undo anywhere in panel, list empty.
     if (f.scenario === "batch-dismiss-control") {
       await openPanelWorkspaceScope(false);
       await wait(() => f.batchAskIds.every((id: string) => shown(card(id))) && shown(panel()?.querySelector("[data-waiting-dismiss-all]")),
@@ -1515,29 +1516,29 @@ async function observeWaitingDismissalFence() {
       panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all]")!.click();
       await wait(() =>
         panel()?.querySelector("[data-waiting-batch-prompt]")?.textContent === "Dismiss all 5?" &&
-        panel()?.querySelector("[data-waiting-dismiss-all-confirm]")?.textContent === "Dismiss 5",
+        panel()?.querySelector("[data-waiting-batch-note]")?.textContent === "You can restore items one by one from Archived." &&
+        panel()?.querySelector("[data-waiting-dismiss-all-confirm]")?.textContent === "Dismiss 5" &&
+        panel()?.querySelector("[data-waiting-dismiss-all-cancel]")?.textContent === "Cancel",
         "in-place Dismiss all 5? confirm opened");
       panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-confirm]")!.click();
       await wait(() =>
         f.dismissCommands.length === 5 &&
         shown(panel()?.querySelector("[data-waiting-batch-result]")),
         "all 5 dismissed and batch result row shown");
-      check(panel()!.querySelector("[data-waiting-batch-result-label]")?.textContent === "Dismissed 5",
+      const resultRow = panel()!.querySelector("[data-waiting-batch-result]")!;
+      check(resultRow.querySelector("[data-waiting-batch-result-label]")?.textContent === "Dismissed 5",
         "expected Dismissed 5 result row");
-      check(panel()!.querySelector("[data-waiting-batch-undo]")?.textContent === "Undo",
-        "expected batch Undo button");
+      check(resultRow.querySelectorAll("button").length === 0,
+        "batch result row must have no button");
+      check(!panel()?.querySelector("[data-waiting-batch-undo]") && !panel()?.querySelector("[data-waiting-undo]"),
+        "no Undo control may exist anywhere in the panel");
+      check(Array.from(panel()!.querySelectorAll("button")).every((btn) => !/undo/i.test(btn.textContent ?? "")),
+        "no button in the panel may read Undo");
       check(f.batchAskIds.every((id: string) => !card(id)), "all 5 cards removed from list");
+      check(panel()!.querySelectorAll("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]").length === 0,
+        "list must be empty");
       check(panel()!.querySelectorAll("[data-waiting-dismissed]").length === 0, "no per-item Dismissed rows for batch");
-
-      panel()!.querySelector<HTMLButtonElement>("[data-waiting-batch-undo]")!.click();
-      await wait(() =>
-        f.restoreCommands.length === 5 &&
-        !panel()?.querySelector("[data-waiting-batch-result]") &&
-        f.batchAskIds.every((id: string) => shown(card(id))),
-        "batch Undo restored all 5 items and reloaded them");
-      const restoredIds = f.restoreCommands.map((c: { item_id: string }) => c.item_id);
-      check(f.batchAskIds.every((id: string) => restoredIds.includes(id)),
-        "Undo must restore every item the batch dismissed: " + JSON.stringify(restoredIds));
+      check(f.restoreCommands.length === 0, "batch dismiss must never call restore_waiting_item");
       document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -1664,7 +1665,7 @@ test("Waiting dismissal C3 (mounted Dashboard): retired Dismiss, Undo, Archived 
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });
 
-test("Waiting dismissal batch (mounted Dashboard): Dismiss all stops with zero further dispatches on same-person replacement login, and clean control dismisses and undoes five", { timeout: 180_000 }, async () => {
+test("Waiting dismissal batch (mounted Dashboard): Dismiss all stops with zero further dispatches on same-person replacement login, and clean control dismisses five with no batch Undo", { timeout: 180_000 }, async () => {
   const outcomes = await runFenceScenarios([
     "batch-dismiss-login-swap",
     "batch-dismiss-control",

@@ -117,6 +117,7 @@ export interface WaitingTodoEntry {
   agent_id: Uuid | null; state_at: IsoTime;
   placement: WaitingTodoPlacement; channel_id: Uuid | null;
   conversation_id?: Uuid | null;
+  offer_id?: Uuid | null;
 }
 /** The viewer's open/doing assigned and waiting to-dos in one workspace (`truncated` when more pages remain). */
 export interface WaitingTodosQueue {
