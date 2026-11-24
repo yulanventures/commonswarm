@@ -268,6 +268,15 @@ requesting an account-wide sign-out: it revokes refresh sessions, while access t
 already issued stay valid until they expire. Remote device listing/renaming/revocation
 remains deferred.
 
+### Local engine (preview)
+
+```bash
+cswarm engine run --harness <claude|codex> [--cwd <folder>] [--profile <path>] [--json]
+cswarm engine status [--profile <path>] [--json]
+```
+
+Preview only: `engine run` owns a managed seat's headless harness one turn at a time, and does not start live runs yet unless `CSWARM_ENGINE_ALLOW_LIVE=1` is set (without it, `engine run` exits with code 3 before taking the seat lock or calling the network). `engine status` inspects whether a runner holds the seat lock, journal counts, and the last stop reason without starting anything.
+
 ### First-dogfood fixture bridge
 
 For legacy fixture testing, after logging in once, copy the UID printed by

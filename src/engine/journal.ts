@@ -267,6 +267,45 @@ export class Journal {
     return this.count;
   }
 
+  static async inspect(filePath: string): Promise<{ readonly exists: boolean; readonly records: readonly JournalRecord[] }> {
+    const noFollow = constants.O_NOFOLLOW ?? 0;
+    let handle: FileHandle;
+    try {
+      handle = await open(filePath, constants.O_RDONLY | noFollow);
+    } catch (err) {
+      const code = errnoCode(err);
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return { exists: false, records: [] };
+      }
+      if (code === "ELOOP" || code === "EMLINK") {
+        throw new Error("Journal file must not be a symlink");
+      }
+      throw new Error("Unable to inspect journal file");
+    }
+    try {
+      const st = await handle.stat();
+      if (!st.isFile()) {
+        throw new Error("Journal path must be a regular file");
+      }
+      if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+        throw new Error("Journal file must be owned by the current user");
+      }
+      if ((st.mode & GROUP_OTHER_MASK) !== 0) {
+        throw new Error("Journal file must not allow group or other permissions");
+      }
+      const raw = await readAll(handle, st.size);
+      const parsed = parseJournalBuffer(raw);
+      return { exists: true, records: parsed.records };
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Journal ")) {
+        throw err;
+      }
+      throw new Error("Unable to inspect journal file");
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
+
   static async open(filePath: string): Promise<Journal> {
     await ensureJournalDirectory(dirname(filePath));
     const handle = await openVerifiedHandle(filePath);

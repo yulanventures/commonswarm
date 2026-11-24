@@ -137,6 +137,52 @@ async function ensureLockFile(filePath: string): Promise<void> {
   await verifyNode(filePath, flags, 0o600, "file", existed ? null : 0o600);
 }
 
+export type SeatLockProbeState = "held" | "free" | "absent" | "unavailable";
+
+export async function probeSeatLock(options: AcquireSeatLockOptions): Promise<SeatLockProbeState> {
+  if (typeof options.root !== "string" || options.root.includes("\0") || !isAbsolute(options.root)) {
+    throw new SeatLockError("seat_lock_unsafe");
+  }
+  const key = seatLockKey(options);
+  const rootDir = resolve(options.root);
+  const lockPath = join(rootDir, "locks", `${key}.lock`);
+  if (activeLocks.has(lockPath)) return "held";
+
+  let st;
+  try {
+    st = await lstat(lockPath);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === "ENOENT" || code === "ENOTDIR") return "absent";
+    throw new SeatLockError(code && UNSAFE_ERRNOS.has(code) ? "seat_lock_unsafe" : "seat_lock_unavailable");
+  }
+  if (st.isSymbolicLink() || !st.isFile()) throw new SeatLockError("seat_lock_unsafe");
+  if (typeof process.getuid === "function" && st.uid !== process.getuid()) throw new SeatLockError("seat_lock_unsafe");
+  if ((st.mode & 0o777) !== 0o600) throw new SeatLockError("seat_lock_unsafe");
+
+  let DatabaseSync: SqliteCtor;
+  try {
+    const mod = (await import("node:sqlite")) as { DatabaseSync?: unknown };
+    if (typeof mod.DatabaseSync !== "function") throw new Error("missing");
+    DatabaseSync = mod.DatabaseSync as SqliteCtor;
+  } catch {
+    return "unavailable";
+  }
+
+  let db: SqliteDb | null = null;
+  try {
+    db = new DatabaseSync(lockPath, { timeout: 0 });
+    if (readJournalMode(db) !== "delete") return "unavailable";
+    db.exec("BEGIN EXCLUSIVE;");
+    return "free";
+  } catch (err) {
+    if (isSqliteLocked(err)) return "held";
+    return "unavailable";
+  } finally {
+    if (db !== null) closeDb(db);
+  }
+}
+
 export async function acquireSeatLock(options: AcquireSeatLockOptions): Promise<SeatLockHandle> {
   if (typeof options.root !== "string" || options.root.includes("\0") || !isAbsolute(options.root)) {
     throw new SeatLockError("seat_lock_unsafe");

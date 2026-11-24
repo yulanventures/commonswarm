@@ -15,6 +15,7 @@ import {
   type Decision,
   type Effect,
   type EngineState,
+  type RecoveryResult,
 } from "./core.js";
 import { Journal } from "./journal.js";
 import {
@@ -33,6 +34,11 @@ const MAX_OPERATOR_ERROR_CHARS = 500;
 export type StopReason = "stopped" | "authority_lost" | "cloud_failed" | "journal_failed" | "harness_port_failed";
 export interface RunResult { readonly reason: StopReason; }
 
+export interface PreopenedJournal {
+  readonly journal: Journal;
+  readonly recovered: RecoveryResult;
+}
+
 export interface RunnerOptions {
   readonly journalPath: string;
   readonly harness: HarnessPort;
@@ -43,6 +49,9 @@ export interface RunnerOptions {
   readonly settledIdCap: number;
   readonly generateId?: IdGenerator;
   readonly operator?: OperatorPort;
+  readonly preopenedJournal?: PreopenedJournal;
+  readonly onHarnessClosed?: () => Promise<void> | void;
+  readonly onBeforeJournalClose?: () => Promise<void> | void;
 }
 
 type RaceOutcome<T> =
@@ -73,12 +82,14 @@ export class EngineRunner {
   private recordsSinceCompact = 0;
   private started = false;
   private stopping = false;
+  private escalated = false;
   private failed = false;
   private authorityLost = false;
   private shutdownComplete = false;
   private stopReason: StopReason = "stopped";
   private interruptedHarness = false;
   private interruptPromise: Promise<void> | null = null;
+  private escalateClosePromise: Promise<void> | null = null;
   private lifecyclePromise: Promise<RunResult> = Promise.resolve({ reason: "stopped" });
 
   constructor(options: RunnerOptions) {
@@ -102,27 +113,47 @@ export class EngineRunner {
   async start(): Promise<void> {
     if (this.started) throw new Error("Engine runner already started");
     this.started = true;
-    if (this.authorityLost) return this.failDuringStart("authority_lost");
+    if (this.authorityLost) {
+      if (this.options.preopenedJournal !== undefined) {
+        this.journal = this.options.preopenedJournal.journal;
+      }
+      return this.failDuringStart("authority_lost");
+    }
 
-    const journal = await Journal.open(this.options.journalPath);
-    this.journal = journal;
-    this.recordsSinceCompact = journal.recordCount;
-    if (this.authorityLost) return this.failDuringStart("authority_lost");
+    let journal: Journal;
+    let recovered: RecoveryResult;
+    if (this.options.preopenedJournal !== undefined) {
+      journal = this.options.preopenedJournal.journal;
+      recovered = this.options.preopenedJournal.recovered;
+      this.journal = journal;
+      this.recordsSinceCompact = journal.recordCount;
+      this.state = recovered.state;
+    } else {
+      journal = await Journal.open(this.options.journalPath);
+      this.journal = journal;
+      this.recordsSinceCompact = journal.recordCount;
+      if (this.authorityLost) return this.failDuringStart("authority_lost");
 
-    const recovered = recover(journal.records, this.options.clock.now(), {
-      replyRetryHorizonMs: this.options.replyRetryHorizonMs,
-      settledIdCap: this.options.settledIdCap,
-      generateId: this.generateId,
-    });
-    if (recovered.records.length > 0) {
-      try {
-        await journal.appendAll(recovered.records);
-        this.recordsSinceCompact += recovered.records.length;
-      } catch {
-        return this.failDuringStart("journal_failed");
+      recovered = recover(journal.records, this.options.clock.now(), {
+        replyRetryHorizonMs: this.options.replyRetryHorizonMs,
+        settledIdCap: this.options.settledIdCap,
+        generateId: this.generateId,
+      });
+      if (recovered.records.length > 0) {
+        try {
+          await journal.appendAll(recovered.records);
+          this.recordsSinceCompact += recovered.records.length;
+        } catch {
+          return this.failDuringStart("journal_failed");
+        }
+      }
+      this.state = recovered.state;
+      for (const record of recovered.records) {
+        if (record.type === "turn_finished" && record.outcome === "interrupted") {
+          await this.reportOperator("turn_finished", { messageId: record.messageId, outcome: "interrupted" });
+        }
       }
     }
-    this.state = recovered.state;
 
     for (const effect of recovered.effects) {
       if (this.authorityLost) return this.failDuringStart("authority_lost");
@@ -146,6 +177,31 @@ export class EngineRunner {
     if (!this.started) return { reason: this.stopReason };
     this.stopping = true;
     this.claimAbort.abort();
+    return this.lifecyclePromise;
+  }
+
+  escalateStop(): Promise<RunResult> {
+    if (!this.started) return Promise.resolve({ reason: this.stopReason });
+    this.stopping = true;
+    this.escalated = true;
+    this.claimAbort.abort();
+    if (!this.interruptedHarness) {
+      this.interruptedHarness = true;
+      try {
+        const res = this.options.harness.interrupt();
+        if (res !== undefined) this.interruptPromise = Promise.resolve(res).catch(() => {});
+      } catch {
+        // Best-effort interrupt during escalated shutdown.
+      }
+    }
+    if (this.escalateClosePromise === null) {
+      try {
+        const res = this.options.harness.close?.();
+        this.escalateClosePromise = Promise.resolve(res).catch(() => {});
+      } catch {
+        this.escalateClosePromise = Promise.resolve();
+      }
+    }
     return this.lifecyclePromise;
   }
 
@@ -190,6 +246,23 @@ export class EngineRunner {
   }
 
   private async finishShutdown(): Promise<RunResult> {
+    if (this.interruptPromise !== null) await this.interruptPromise;
+    try {
+      if (this.escalateClosePromise !== null) await this.escalateClosePromise;
+      await this.options.harness.close?.();
+    } catch {
+      // Best-effort harness teardown during runner shutdown.
+    }
+    try {
+      await this.options.onHarnessClosed?.();
+    } catch {
+      // Best-effort post-close containment cleanup.
+    }
+    try {
+      await this.options.onBeforeJournalClose?.();
+    } catch {
+      // Best-effort session release before journal close.
+    }
     if (this.journal !== null) {
       try {
         await this.journal.flush();
@@ -201,12 +274,6 @@ export class EngineRunner {
         }
       }
       this.journal = null;
-    }
-    if (this.interruptPromise !== null) await this.interruptPromise;
-    try {
-      await this.options.harness.close?.();
-    } catch {
-      // Best-effort harness teardown during runner shutdown.
     }
     this.shutdownComplete = true;
     const result: RunResult = { reason: this.stopReason };
@@ -321,11 +388,16 @@ export class EngineRunner {
         effect = retry;
         continue;
       }
+      const origin = this.state.owedReplies.find((r) => r.messageId === effect.messageId)?.origin;
       try {
         await this.commit((s) => confirmReplyPosted(s, effect.messageId, this.options.clock.now()));
       } catch {
         return "journal_failed";
       }
+      await this.reportOperator(
+        origin === "interrupted" ? "interrupted_notice_posted" : "reply_posted",
+        { messageId: effect.messageId, commandId: effect.command.commandId },
+      );
       return null;
     }
     return "cloud_failed";
@@ -362,24 +434,25 @@ export class EngineRunner {
 
     const startEffect = findEffect(effects, "start_turn");
     if (!startEffect) return true;
+    await this.reportOperator("turn_started", { messageId: startEffect.messageId });
 
     let handedOver = false;
     let markSeenPromise: Promise<boolean> | null = null;
     const onHandedOver = (): void => {
-      if (handedOver || this.authorityLost || this.failed) return;
+      if (handedOver || this.authorityLost || this.failed || this.escalated) return;
       handedOver = true;
       markSeenPromise = this.executeMarkSeen(startEffect.messageId, startEffect.leaseId);
     };
 
     const turnOutcome = await this.raceAuthority(() => this.options.harness.runTurn(startEffect.text, onHandedOver));
-    if (turnOutcome.kind === "authority_lost") {
+    if (turnOutcome.kind === "authority_lost" || this.escalated) {
       if (markSeenPromise !== null) await markSeenPromise;
       return false;
     }
 
     if (markSeenPromise !== null) {
       const seenOk = await markSeenPromise;
-      if (!seenOk || this.authorityLost || this.failed) return false;
+      if (!seenOk || this.authorityLost || this.failed || this.escalated) return false;
     }
 
     let replyText: string | null = null;
@@ -400,11 +473,15 @@ export class EngineRunner {
         : finishTurnWithFailure(s, startEffect.messageId, this.options.clock.now(), this.generateId),
     );
     if (replyEffects === null) return false;
+    await this.reportOperator("turn_finished", {
+      messageId: startEffect.messageId,
+      outcome: replyText !== null ? "replied" : "failed",
+    });
 
     if (harnessError !== null) {
       await this.reportOperator("turn_failed", { messageId: startEffect.messageId, error: harnessError });
     }
-    if (this.authorityLost || this.failed) return false;
+    if (this.authorityLost || this.failed || this.escalated) return false;
     if (!(await this.runPostReplyEffects(replyEffects))) return false;
     return this.maybeCompact();
   }
@@ -422,6 +499,9 @@ export class EngineRunner {
         acceptMessage(s, message, this.options.clock.now(), this.generateId),
       );
       if (acceptEffects === null || this.authorityLost) break;
+      if (this.state.pending?.messageId === message.id) {
+        await this.reportOperator("message_accepted", { messageId: message.id });
+      }
 
       if (acceptEffects.length > 0) {
         const seenEffect = findEffect(acceptEffects, "mark_seen");

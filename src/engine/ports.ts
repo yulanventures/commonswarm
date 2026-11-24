@@ -48,7 +48,12 @@ export type IdGenerator = () => string;
 export type OperatorReportKind =
   | "unknown_reply_outcome"
   | "turn_failed"
-  | "runner_stopped";
+  | "runner_stopped"
+  | "message_accepted"
+  | "turn_started"
+  | "turn_finished"
+  | "reply_posted"
+  | "interrupted_notice_posted";
 
 export interface OperatorPort {
   report(

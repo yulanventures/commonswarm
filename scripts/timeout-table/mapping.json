@@ -4686,7 +4686,21 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/engine/seat-lock.ts:164",
+          "citation": "src/engine/seat-lock.ts:174",
+          "detail": "SQLite busy timeout set to 0 ms in probeSeatLock so status inspection reports a held lock immediately without waiting.",
+          "operation": {
+            "name": "engine-seat-lock-probe-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local SQLite busy timeout (0 ms) for non-blocking seat lock status probing, not a network wait."
+          }
+        },
+        "src/engine/seat-lock.ts:timeout#2": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/engine/seat-lock.ts:210",
           "detail": "SQLite busy timeout set to 0 ms on the seat lock database so a lock held by another runner is refused at once.",
           "operation": {
             "name": "engine-seat-lock-busy-timeout",

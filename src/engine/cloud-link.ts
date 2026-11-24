@@ -46,14 +46,16 @@ const NON_RETRYABLE = new Set<CloudLinkErrorCode>([
 export class CloudLinkError extends Error {
   readonly code: CloudLinkErrorCode;
   readonly seatKind?: UnsupportedSeatKind;
+  readonly serverReason?: string;
   readonly retryable: boolean;
   constructor(code: "seat_unsupported", seatKind: UnsupportedSeatKind);
-  constructor(code: Exclude<CloudLinkErrorCode, "seat_unsupported">);
-  constructor(code: CloudLinkErrorCode, seatKind?: UnsupportedSeatKind) {
-    super(code === "seat_unsupported" ? SEAT_MESSAGES[seatKind!] : ERROR_MESSAGES[code]);
+  constructor(code: Exclude<CloudLinkErrorCode, "seat_unsupported">, serverReason?: string);
+  constructor(code: CloudLinkErrorCode, detail?: UnsupportedSeatKind | string) {
+    super(code === "seat_unsupported" ? SEAT_MESSAGES[detail as UnsupportedSeatKind] : ERROR_MESSAGES[code]);
     this.name = "CloudLinkError";
     this.code = code;
-    if (seatKind !== undefined) this.seatKind = seatKind;
+    if (code === "seat_unsupported") this.seatKind = detail as UnsupportedSeatKind;
+    else if (typeof detail === "string" && detail.length > 0) this.serverReason = detail;
     this.retryable = !NON_RETRYABLE.has(code);
   }
 }
@@ -82,6 +84,8 @@ export interface OpenCloudLinkOptions {
 
 export interface CloudLinkHandle {
   readonly port: CloudPort;
+  readonly generation: number;
+  readonly sessionId: string;
   close(): Promise<void>;
 }
 
@@ -205,7 +209,7 @@ export async function openCloudLink(options: OpenCloudLinkOptions): Promise<Clou
       })).generation;
       break;
     } catch (err) {
-      if (err instanceof AgentSessionError && err.code === "session_not_managed") throw new CloudLinkError("session_not_managed");
+      if (err instanceof AgentSessionError && err.code === "session_not_managed") throw new CloudLinkError("session_not_managed", err.message);
       if (err instanceof AgentSessionError && err.code === "session_conflict") {
         const remaining = deadline - clock.now();
         if (remaining <= 0) throw new CloudLinkError("seat_busy");
@@ -361,5 +365,5 @@ export async function openCloudLink(options: OpenCloudLinkOptions): Promise<Clou
     })();
     return closePromise;
   };
-  return { port, close };
+  return { port, generation, sessionId, close };
 }

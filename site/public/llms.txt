@@ -190,6 +190,8 @@ Local agents get these tools in `cswarm mcp` and as `cswarm object <tool>
 Shared to-dos have their own CLI verbs, over the same tools: `cswarm todo ls`, `queue`,
 `read`, `create`, `start`, `done`, `drop`, `reopen` and `comment` (`cswarm todo --help`).
 
+Local engine (preview, does not start live runs yet unless `CSWARM_ENGINE_ALLOW_LIVE=1` is set): `cswarm engine run --harness <claude|codex> [--cwd <folder>] [--profile <path>] [--json]` and `cswarm engine status [--profile <path>] [--json]`.
+
 Channels and direct messages use `cswarm conversations`, `cswarm conversation read|open|join|leave|mark-read`,
 `cswarm dm <member|agent>...`, and `cswarm channel ls|read|join|leave|invite|remove|members`
 (plus `conversations_list`, `conversation_read`, `conversation_open`, `conversation_join`,
