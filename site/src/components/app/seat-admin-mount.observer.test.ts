@@ -999,15 +999,21 @@ async function observeSeatAdminApp() {
       assert(sessionStorage.getItem(reauthKey) === null, "different account sign-in clears prior user's reauth intent");
       assert(!document.querySelector("dialog[data-seat-admin-confirm]"), "different account never opens prior user's confirmation dialog");
 
-      // Step 2: Ordinary Sign out stays global (?scope=global); restore owner's reauth intent and verify refreshed-only AMR is refused.
+      // Step 2: Ordinary Sign out ends this browser's session only (local scope; global revocation is not sent by this button); restore owner's reauth intent and verify refreshed-only AMR is refused.
+      const logoutsBeforeOrdinarySignOut = f.requests.filter((r: any) => r.path === "/auth/v1/logout").length;
       document.querySelector<HTMLButtonElement>("[data-signout]")!.click();
       await wait(
         () => document.querySelector<HTMLElement>("live-dashboard")?.dataset.state === "signed-out",
         "signed out different user",
       );
+      const ordinarySignOutLogouts = f.requests
+        .filter((r: any) => r.path === "/auth/v1/logout")
+        .slice(logoutsBeforeOrdinarySignOut);
       assert(
-        f.requests.some((r: any) => r.path === "/auth/v1/logout" && r.search === "?scope=global"),
-        "ordinary Sign out button preserves global scope",
+        ordinarySignOutLogouts.length === 1 &&
+          ordinarySignOutLogouts[0].search === "?scope=local" &&
+          !ordinarySignOutLogouts.some((r: any) => r.search === "?scope=global"),
+        "an ordinary Sign out ends this browser's session only (local scope); global revocation is not sent by this button",
       );
       sessionStorage.setItem(reauthKey, savedIntentRaw!);
       f.authMode = "refreshed-only";
