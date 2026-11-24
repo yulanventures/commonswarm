@@ -5,7 +5,6 @@ SELECT
     WHERE p.oid = to_regprocedure('swarm.waiting_ask_autoclear_status(uuid,uuid,timestamp with time zone)')
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
   )
-  AND NOT has_function_privilege('PUBLIC', 'swarm.waiting_ask_autoclear_status(uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm.waiting_ask_autoclear_status(uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('authenticated', 'swarm.waiting_ask_autoclear_status(uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_read', 'swarm.waiting_ask_autoclear_status(uuid,uuid,timestamp with time zone)', 'EXECUTE')
@@ -16,7 +15,6 @@ SELECT
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
       AND position('waiting_ask_autoclear_status' IN p.prosrc) > 0
   )
-  AND NOT has_function_privilege('PUBLIC', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('authenticated', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_read', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')

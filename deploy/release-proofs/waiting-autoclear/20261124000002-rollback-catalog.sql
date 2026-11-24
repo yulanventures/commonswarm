@@ -7,8 +7,9 @@ SELECT
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
       AND position('waiting_ask_autoclear_status' IN p.prosrc) = 0
   )
-  AND NOT has_function_privilege('PUBLIC', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('authenticated', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_read', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_command', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
   AND EXISTS (
     SELECT 1 FROM pg_proc p

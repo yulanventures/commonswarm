@@ -37,6 +37,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import postgres from "postgres";
 import { dbAssert, repoSql, runSql } from "../support/admin-schema-db.js";
+import { sqlPhase } from "../support/admin-schema-process.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 import * as todos from "../../src/protocol/household-todos.js";
 import * as todoPolicy from "../../src/protocol/household-todo-policy.js";
@@ -78,29 +79,13 @@ const noStorage = {
   putImmutable: async () => { throw new Error("Unexpected Storage I/O"); },
   read: async () => { throw new Error("Unexpected Storage I/O"); },
 };
-const postNotice: HouseholdTodoNoticePort = async (tx, workspace, identity, intent) => {
-  const signal = randomUUID();
-  const first = intent.to[0]!;
-  await tx`
-    INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until)
-    VALUES (
-      ${signal}::uuid,${workspace}::uuid,${identity.principal_id ?? identity.user_id}::uuid,
-      ${identity.principal_id ? "agent" : "user"},
-      ${first.kind === "user" ? first.id : null}::uuid,${first.kind === "agent" ? first.id : null}::uuid,
-      ${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day'
-    )
-  `;
-  for (const [position, to] of intent.to.entries()) {
-    await tx`
-      INSERT INTO swarm.signal_recipients(signal_id,workspace_id,recipient_user_id,recipient_agent_principal_id,position)
-      VALUES (
-        ${signal}::uuid,${workspace}::uuid,
-        ${to.kind === "user" ? to.id : null}::uuid,${to.kind === "agent" ? to.id : null}::uuid,${position}
-      )
-    `;
-  }
-  return { to: intent.to, status: "sent", signal_id: signal };
-};
+// Do not inject unrelated ask signals into swarm.signals when seeding household to-do offers:
+// tests explicitly seed the asks whose decision_queue / home_overview counts they assert.
+const noNotice: HouseholdTodoNoticePort = async (_tx, _workspace, _identity, intent) => ({
+  to: intent.to,
+  status: "not_sent",
+  reason: "signal_rate_limited",
+});
 
 function makeTodoStore() {
   const access = createHouseholdObjectStore({
@@ -110,13 +95,17 @@ function makeTodoStore() {
     fileContentAllowed: () => false,
     recheckCredential: async () => true,
   }).access;
-  return createHouseholdTodoStore({ core: todoCore, access, notice: postNotice });
+  return createHouseholdTodoStore({ core: todoCore, access, notice: noNotice });
 }
 
 function committedTodo(result: { outcome: todos.TodoOutcome }): todos.Todo {
-  assert.equal(result.outcome.status, "committed");
+  assert.equal(
+    result.outcome.status,
+    "committed",
+    `expected committed todo outcome, got ${JSON.stringify(result.outcome)}`,
+  );
   if (result.outcome.status !== "committed" || !("todo_id" in result.outcome.value)) {
-    throw new Error("Expected committed todo outcome");
+    throw new Error(`Expected committed todo outcome, got ${JSON.stringify(result.outcome)}`);
   }
   return result.outcome.value;
 }
@@ -184,27 +173,31 @@ test("20261124000002 rolls back cleanly, re-applies with proofs, and all 5 read 
   const reviewOfferId = randomUUID();
 
   const snapshotFive = (label: string, userId: string) => `
-    SELECT set_config('request.jwt.claims', '${JSON.stringify({ role: "authenticated", sub: userId })}', true);
-    SET LOCAL ROLE authenticated;
-    INSERT INTO pg_temp.read_snapshots(label, dq, dqp, wt, wa, ho)
-    SELECT
-      '${label}',
-      swarm_read.decision_queue('${wsId}'::uuid) - 'generated_at',
-      swarm_read.decision_queue_page('${wsId}'::uuid, NULL, NULL) - 'generated_at',
-      swarm_read.waiting_todos_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at',
-      swarm_read.waiting_archived_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at',
-      (
-        SELECT elem
-        FROM jsonb_array_elements((swarm_read.home_overview())->'workspaces') AS elem
-        WHERE elem->>'workspace_id' = '${wsId}'
-      );
-    RESET ROLE;
+    DO $snap$
+    DECLARE
+      v_dq jsonb;
+      v_dqp jsonb;
+      v_wt jsonb;
+      v_wa jsonb;
+      v_ho jsonb;
+    BEGIN
+      PERFORM pg_catalog.set_config('request.jwt.claims', '${JSON.stringify({ role: "authenticated", sub: userId })}', true);
+      SET LOCAL ROLE authenticated;
+      v_dq := swarm_read.decision_queue('${wsId}'::uuid) - 'generated_at';
+      v_dqp := swarm_read.decision_queue_page('${wsId}'::uuid, NULL, NULL) - 'generated_at';
+      v_wt := swarm_read.waiting_todos_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at';
+      v_wa := swarm_read.waiting_archived_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at';
+      SELECT elem INTO v_ho
+      FROM pg_catalog.jsonb_array_elements((swarm_read.home_overview())->'workspaces') AS elem
+      WHERE elem->>'workspace_id' = '${wsId}';
+      RESET ROLE;
+      PERFORM pg_catalog.set_config('request.jwt.claims', '', true);
+      INSERT INTO pg_temp.read_snapshots(label, dq, dqp, wt, wa, ho)
+      VALUES ('${label}', v_dq, v_dqp, v_wt, v_wa, v_ho);
+    END $snap$;
   `;
 
-  runSql(`
-    ${catalogAssert(false)}
-    ${repoSql(`${proofRoot}-functional.sql`)}
-
+  const fixtureSql = `
     -- Seed a fixture where NONE of the new auto-clear rules apply (all senders live,
     -- all channels unarchived, viewer active in every channel/DM, no expired asks, no withdrawn offers).
     INSERT INTO auth.users (id, email)
@@ -219,12 +212,15 @@ test("20261124000002 rolls back cleanly, re-applies with proofs, and all 5 read 
     VALUES ('${wsId}'::uuid, '${aliceId}'::uuid, 'owner'), ('${wsId}'::uuid, '${bobId}'::uuid, 'member');
     INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
     VALUES ('${scoutId}'::uuid, '${wsId}'::uuid, '${aliceId}'::uuid, 'ParityScout');
+    INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id, added_by)
+    VALUES ('${wsId}'::uuid, '${scoutId}'::uuid, '${aliceId}'::uuid, '${aliceId}'::uuid)
+    ON CONFLICT (principal_id, workspace_id) DO NOTHING;
     INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
     VALUES ('${wsId}'::uuid, 'shared');
     INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
     VALUES
-      ('${wsId}'::uuid, '${aliceId}'::uuid, 'editor', '${randomUUID()}'::uuid, statement_timestamp()),
-      ('${wsId}'::uuid, '${bobId}'::uuid, 'editor', '${randomUUID()}'::uuid, statement_timestamp());
+      ('${wsId}'::uuid, '${aliceId}'::uuid, 'editor', '${randomUUID()}'::uuid, pg_catalog.statement_timestamp()),
+      ('${wsId}'::uuid, '${bobId}'::uuid, 'editor', '${randomUUID()}'::uuid, pg_catalog.statement_timestamp());
     INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_principal, created_by_kind)
     VALUES ('${privChId}'::uuid, '${wsId}'::uuid, 'parity-secret', 'private', '${aliceId}'::uuid, 'user');
     INSERT INTO swarm.channel_members (channel_id, workspace_id, member_kind, user_id, added_by_principal, added_by_kind)
@@ -243,18 +239,18 @@ test("20261124000002 rolls back cleanly, re-applies with proofs, and all 5 read 
     VALUES ('${randomUUID()}'::uuid, '${wsId}'::uuid, '${aliceId}'::uuid, 'user', '${answeredAskId}'::uuid, 'note', 'Answered!', '9999-12-31T23:59:59Z');
     SET CONSTRAINTS ALL IMMEDIATE;
     INSERT INTO swarm.waiting_dismissals (workspace_id, user_id, item_kind, item_id, dismissed_at)
-    VALUES ('${wsId}'::uuid, '${aliceId}'::uuid, 'ask', '${dismissedAskId}'::uuid, statement_timestamp());
+    VALUES ('${wsId}'::uuid, '${aliceId}'::uuid, 'ask', '${dismissedAskId}'::uuid, pg_catalog.statement_timestamp());
     INSERT INTO swarm.household_todos (
       workspace_id, todo_id, version, title, notes, state,
       created_by_user, created_at, assignee_user, assigned_by_user, assigned_at,
       gate_kind, state_by_user, state_at, comment_count, last_seq
     ) VALUES
       ('${wsId}'::uuid, '${assignedTodoId}'::uuid, 1, 'Parity assigned', '', 'open',
-       '${aliceId}'::uuid, statement_timestamp(), '${aliceId}'::uuid, '${aliceId}'::uuid, statement_timestamp(),
-       'none', '${aliceId}'::uuid, statement_timestamp(), 0, 1),
+       '${aliceId}'::uuid, pg_catalog.statement_timestamp(), '${aliceId}'::uuid, '${aliceId}'::uuid, pg_catalog.statement_timestamp(),
+       'none', '${aliceId}'::uuid, pg_catalog.statement_timestamp(), 0, 1),
       ('${wsId}'::uuid, '${doneTodoId}'::uuid, 1, 'Parity done', '', 'done',
-       '${aliceId}'::uuid, statement_timestamp(), '${aliceId}'::uuid, '${aliceId}'::uuid, statement_timestamp(),
-       'none', '${aliceId}'::uuid, statement_timestamp(), 0, 2);
+       '${aliceId}'::uuid, pg_catalog.statement_timestamp(), '${aliceId}'::uuid, '${aliceId}'::uuid, pg_catalog.statement_timestamp(),
+       'none', '${aliceId}'::uuid, pg_catalog.statement_timestamp(), 0, 2);
     INSERT INTO swarm.household_todos (
       workspace_id, todo_id, version, title, notes, state,
       created_by_user, created_at, offer_id, offer_principal, offer_decider,
@@ -262,56 +258,86 @@ test("20261124000002 rolls back cleanly, re-applies with proofs, and all 5 read 
       gate_kind, state_by_user, state_at, comment_count, last_seq
     ) VALUES (
       '${wsId}'::uuid, '${reviewTodoId}'::uuid, 1, 'Parity review', '', 'open',
-      '${bobId}'::uuid, statement_timestamp(), '${reviewOfferId}'::uuid, '${scoutId}'::uuid, '${aliceId}'::uuid,
-      'queue', '{"kind":"none"}'::jsonb, '${bobId}'::uuid, statement_timestamp(),
-      'none', '${bobId}'::uuid, statement_timestamp(), 0, 3
+      '${bobId}'::uuid, pg_catalog.statement_timestamp(), '${reviewOfferId}'::uuid, '${scoutId}'::uuid, '${aliceId}'::uuid,
+      'queue', '{"kind":"none"}'::jsonb, '${bobId}'::uuid, pg_catalog.statement_timestamp(),
+      'none', '${bobId}'::uuid, pg_catalog.statement_timestamp(), 0, 3
     );
 
     CREATE TEMP TABLE pg_temp.read_snapshots (
       label text PRIMARY KEY,
-      dq jsonb,
-      dqp jsonb,
-      wt jsonb,
-      wa jsonb,
-      ho jsonb
+      dq jsonb NOT NULL,
+      dqp jsonb NOT NULL,
+      wt jsonb NOT NULL,
+      wa jsonb NOT NULL,
+      ho jsonb NOT NULL
     );
+  `;
 
-    ${snapshotFive("after_alice", aliceId)}
-    ${snapshotFive("after_bob", bobId)}
-
-    -- Roll back to 20261124000001 bodies and verify rollback catalog + exact parity.
-    ${repoSql(`${proofRoot}-rollback.sql`)}
-    ${catalogAssert(true)}
-
-    ${snapshotFive("before_alice", aliceId)}
-    ${snapshotFive("before_bob", bobId)}
-
-    ${dbAssert(`
-      SELECT
-        a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
-      FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
-      WHERE a.label = 'after_alice' AND b.label = 'before_alice'
-    `, "all 5 read functions must match 20261124000001 verbatim for Alice when no new rules apply")}
-    ${dbAssert(`
-      SELECT
-        a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
-      FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
-      WHERE a.label = 'after_bob' AND b.label = 'before_bob'
-    `, "all 5 read functions must match 20261124000001 verbatim for Bob when no new rules apply")}
-
-    -- Re-apply 20261124000002 and re-verify proofs + parity.
-    ${repoSql("supabase/migrations/20261124000002_waiting_autoclear.sql")}
-    ${catalogAssert(false)}
-    ${repoSql(`${proofRoot}-functional.sql`)}
-
-    ${snapshotFive("reapplied_alice", aliceId)}
-    ${dbAssert(`
-      SELECT
-        a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
-      FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
-      WHERE a.label = 'reapplied_alice' AND b.label = 'before_alice'
-    `, "re-applied 20261124000002 matches 20261124000001 verbatim for Alice when no new rules apply")}
-  `);
+  // Run the entire rollback, rollback-catalog, re-apply, catalog/functional proof, and
+  // 5-read-function parity check inside ONE runSql transaction so state carries across
+  // rollback -> re-apply and the "before" snapshot runs against the 20261124000001 bodies.
+  runSql(
+    sqlPhase("autoclear-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +
+      sqlPhase("autoclear-parity-fixture", fixtureSql) +
+      sqlPhase(
+        "autoclear-snapshot-after",
+        snapshotFive("after_alice", aliceId) +
+          snapshotFive("after_bob", bobId) +
+          dbAssert(
+            `SELECT (dq->>'total')::int = 3 AND (dqp->>'total')::int = 3 AND (wt->>'total')::int = 2 AND (wa->>'total')::int = 3
+             FROM pg_temp.read_snapshots WHERE label = 'after_alice'`,
+            "parity fixture baseline counts for Alice",
+          ) +
+          dbAssert(
+            `SELECT (dq->>'total')::int = 0 AND (dqp->>'total')::int = 0 AND (wt->>'total')::int = 0 AND (wa->>'total')::int = 0
+             FROM pg_temp.read_snapshots WHERE label = 'after_bob'`,
+            "parity fixture baseline counts for Bob",
+          ),
+      ) +
+      sqlPhase("autoclear-rollback", repoSql(`${proofRoot}-rollback.sql`) + "\n" + catalogAssert(true)) +
+      sqlPhase(
+        "autoclear-snapshot-before-and-compare",
+        snapshotFive("before_alice", aliceId) +
+          snapshotFive("before_bob", bobId) +
+          dbAssert(
+            `SELECT a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
+             FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
+             WHERE a.label = 'after_alice' AND b.label = 'before_alice'`,
+            "all 5 read functions must match 20261124000001 verbatim for Alice when no new rules apply",
+          ) +
+          dbAssert(
+            `SELECT a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
+             FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
+             WHERE a.label = 'after_bob' AND b.label = 'before_bob'`,
+            "all 5 read functions must match 20261124000001 verbatim for Bob when no new rules apply",
+          ),
+      ) +
+      sqlPhase(
+        "autoclear-reapply",
+        repoSql("supabase/migrations/20261124000002_waiting_autoclear.sql") +
+          "\n" +
+          catalogAssert(false) +
+          "\n" +
+          repoSql(`${proofRoot}-functional.sql`),
+      ) +
+      sqlPhase(
+        "autoclear-snapshot-reapplied-and-compare",
+        snapshotFive("reapplied_alice", aliceId) +
+          snapshotFive("reapplied_bob", bobId) +
+          dbAssert(
+            `SELECT a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
+             FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
+             WHERE a.label = 'reapplied_alice' AND b.label = 'before_alice'`,
+            "re-applied 20261124000002 matches 20261124000001 verbatim for Alice when no new rules apply",
+          ) +
+          dbAssert(
+            `SELECT a.dq = b.dq AND a.dqp = b.dqp AND a.wt = b.wt AND a.wa = b.wa AND a.ho = b.ho
+             FROM pg_temp.read_snapshots a, pg_temp.read_snapshots b
+             WHERE a.label = 'reapplied_bob' AND b.label = 'before_bob'`,
+            "re-applied 20261124000002 matches 20261124000001 verbatim for Bob when no new rules apply",
+          ),
+      ),
+  );
 });
 
 const ROLLBACK_WITNESS = Symbol("rollback-waiting-autoclear-witness");
@@ -330,7 +356,6 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
   const privChReadableId = randomUUID();
   const privChUnreadableId = randomUUID();
   const privChLostId = randomUUID();
-  const dmConvId = randomUUID();
 
   const liveAskId = randomUUID();
   const selfFollowupAskId = randomUUID();
@@ -432,7 +457,6 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
         SELECT swarm.conversation_open(${wsId}::uuid, 'user', ${aliceId}::uuid, ARRAY[]::uuid[], ARRAY[${revokedAgentId}]::uuid[], false) AS r
       `;
       const actualDmRevokedConvId = dmRevokedOpen!.r.conversation.conversation_id;
-      void dmConvId;
 
       // Seed asks — initially ALL live (except expiredAskId which has explicit past until, and privChUnreadableAskId where Alice isn't in channel).
       await tx`SET CONSTRAINTS ALL DEFERRED`;
@@ -483,14 +507,21 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
         title: "Withdrawable review task",
         assign: { to: { kind: "agent", id: liveAgentId } },
       }));
-      assert.ok(reviewTodo.offer?.offer_id);
+      assert.ok(
+        reviewTodo.offer?.offer_id,
+        `expected pending offer on reviewTodo, got ${JSON.stringify(reviewTodo)}`,
+      );
       const reviewOfferId = reviewTodo.offer.offer_id;
 
       // Alice dismisses dismissedThenRevokedAskId while it is still live!
       const [dismissBefore] = await tx<{ r: Row }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'ask', ${dismissedThenRevokedAskId}::uuid) AS r
       `;
-      assert.equal(dismissBefore!.r.status, "ok");
+      assert.equal(
+        dismissBefore!.r.status,
+        "ok",
+        `dismiss_waiting_item before revocation failed: result=${JSON.stringify(dismissBefore!.r)}`,
+      );
       await tx`RESET ROLE`;
 
       // Baseline BEFORE transitions: verify all live asks are listed and counted, and decision_queue == decision_queue_page == home_overview!
@@ -510,25 +541,63 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
         leftDmAskId,
         leftDmRevokedAskId,
       ].sort();
-      assert.equal(beforeSnap.dq.total, expectedBeforeAskIds.length);
-      assert.deepEqual(askIdsInOrder(beforeSnap.dq.asks), expectedBeforeAskIds);
-      assert.deepEqual(askIdsInOrder(beforeSnap.dqp.asks), expectedBeforeAskIds);
+      assert.equal(
+        beforeSnap.dq.total,
+        expectedBeforeAskIds.length,
+        `beforeSnap.dq.total mismatch: dq=${JSON.stringify(beforeSnap.dq)}`,
+      );
+      assert.deepEqual(
+        askIdsInOrder(beforeSnap.dq.asks),
+        expectedBeforeAskIds,
+        `beforeSnap.dq.asks mismatch: dq=${JSON.stringify(beforeSnap.dq)}`,
+      );
+      assert.deepEqual(
+        askIdsInOrder(beforeSnap.dqp.asks),
+        expectedBeforeAskIds,
+        `beforeSnap.dqp.asks mismatch: dqp=${JSON.stringify(beforeSnap.dqp)}`,
+      );
       // home_overview caps at 10 newest asks, all of which must come from the exact same eligible set (including selfFollowupAskId, excluding dismissedThenRevokedAskId & expiredAskId & archivedPrivUnreadableAskId).
-      assert.equal(beforeSnap.wsOverview!.needs_you.asks.length, 10);
+      assert.equal(
+        beforeSnap.wsOverview!.needs_you.asks.length,
+        10,
+        `beforeSnap.wsOverview.needs_you.asks cap mismatch: wsOverview=${JSON.stringify(beforeSnap.wsOverview)}`,
+      );
       for (const a of beforeSnap.wsOverview!.needs_you.asks) {
-        assert.ok(expectedBeforeAskIds.includes(a.signal_id), `home_overview ask ${a.signal_id} must be in eligible set`);
+        assert.ok(
+          expectedBeforeAskIds.includes(a.signal_id),
+          `home_overview ask ${a.signal_id} must be in eligible set; ask=${JSON.stringify(a)}`,
+        );
       }
-      assert.equal(beforeSnap.wt.total, 1);
-      assert.equal(beforeSnap.wt.todos[0]!.reason, "request");
-      assert.equal(beforeSnap.wsOverview!.needs_you.waiting.length, 1);
+      assert.equal(
+        beforeSnap.wt.total,
+        1,
+        `beforeSnap.wt.total mismatch: wt=${JSON.stringify(beforeSnap.wt)}`,
+      );
+      assert.equal(
+        beforeSnap.wt.todos[0]!.reason,
+        "request",
+        `beforeSnap.wt.todos[0].reason mismatch: todo=${JSON.stringify(beforeSnap.wt.todos[0])}`,
+      );
+      assert.equal(
+        beforeSnap.wsOverview!.needs_you.waiting.length,
+        1,
+        `beforeSnap.wsOverview.needs_you.waiting mismatch: wsOverview=${JSON.stringify(beforeSnap.wsOverview)}`,
+      );
 
       // Verify expiredAskId is ALREADY in Archived as 'expired' / 'Expired' with archived_at = until.
       const beforeExpired = beforeSnap.wa.items.find((i) => i.item_key === `ask:${expiredAskId}`);
-      assert.ok(beforeExpired, "expired ask must appear in Archived");
-      assert.equal(beforeExpired.outcome_kind, "expired");
-      assert.equal(beforeExpired.outcome_text, "Expired");
-      assert.equal(beforeExpired.answered_by, null);
-      assert.equal(Date.parse(beforeExpired.archived_at), Date.parse(ts(-400)));
+      assert.ok(
+        beforeExpired,
+        `expired ask ${expiredAskId} must appear in Archived; wa=${JSON.stringify(beforeSnap.wa)}`,
+      );
+      assert.equal(beforeExpired.outcome_kind, "expired", `beforeExpired=${JSON.stringify(beforeExpired)}`);
+      assert.equal(beforeExpired.outcome_text, "Expired", `beforeExpired=${JSON.stringify(beforeExpired)}`);
+      assert.equal(beforeExpired.answered_by, null, `beforeExpired=${JSON.stringify(beforeExpired)}`);
+      assert.equal(
+        Date.parse(beforeExpired.archived_at),
+        Date.parse(ts(-400)),
+        `beforeExpired=${JSON.stringify(beforeExpired)} expectedAt=${ts(-400)}`,
+      );
 
       // NOW trigger every Slice 2 rule!
       // Rule 1: Bob and BobBot answer their respective multi-addressee asks.
@@ -586,100 +655,168 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
 
       // ONLY liveAskId and selfFollowupAskId remain in Waiting on you, and ALL THREE ask reads agree 100%!
       const expectedRemaining: string[] = [liveAskId, selfFollowupAskId].sort();
-      assert.equal(afterSnap.dq.total, 2, "only live ask and self-followup ask remain in decision_queue");
-      assert.equal(afterSnap.dqp.total, 2, "decision_queue_page total matches decision_queue");
-      assert.deepEqual(askIdsInOrder(afterSnap.dq.asks), expectedRemaining);
-      assert.deepEqual(askIdsInOrder(afterSnap.dqp.asks), expectedRemaining);
-      assert.deepEqual(askIdsInOrder(afterSnap.wsOverview!.needs_you.asks), expectedRemaining, "home_overview agrees exactly with decision_queue");
+      assert.equal(
+        afterSnap.dq.total,
+        2,
+        `only live ask and self-followup ask remain in decision_queue; dq=${JSON.stringify(afterSnap.dq)}`,
+      );
+      assert.equal(
+        afterSnap.dqp.total,
+        2,
+        `decision_queue_page total matches decision_queue; dqp=${JSON.stringify(afterSnap.dqp)}`,
+      );
+      assert.deepEqual(
+        askIdsInOrder(afterSnap.dq.asks),
+        expectedRemaining,
+        `afterSnap.dq.asks mismatch; dq=${JSON.stringify(afterSnap.dq)}`,
+      );
+      assert.deepEqual(
+        askIdsInOrder(afterSnap.dqp.asks),
+        expectedRemaining,
+        `afterSnap.dqp.asks mismatch; dqp=${JSON.stringify(afterSnap.dqp)}`,
+      );
+      assert.deepEqual(
+        askIdsInOrder(afterSnap.wsOverview!.needs_you.asks),
+        expectedRemaining,
+        `home_overview agrees exactly with decision_queue; wsOverview=${JSON.stringify(afterSnap.wsOverview)}`,
+      );
 
       // Withdrawn review left waiting_todos_page AND home_overview!
-      assert.equal(afterSnap.wt.total, 0);
-      assert.equal(afterSnap.wsOverview!.needs_you.waiting.length, 0);
+      assert.equal(
+        afterSnap.wt.total,
+        0,
+        `withdrawn review must leave waiting_todos_page; wt=${JSON.stringify(afterSnap.wt)}`,
+      );
+      assert.equal(
+        afterSnap.wsOverview!.needs_you.waiting.length,
+        0,
+        `withdrawn review must leave home_overview; wsOverview=${JSON.stringify(afterSnap.wsOverview)}`,
+      );
 
       // Verify Archived outcomes!
       const archByKey = new Map(afterSnap.wa.items.map((i) => [i.item_key, i]));
 
       // Live asks stay OUT of Archived.
-      assert.equal(archByKey.has(`ask:${liveAskId}`), false);
-      assert.equal(archByKey.has(`ask:${selfFollowupAskId}`), false);
+      assert.equal(
+        archByKey.has(`ask:${liveAskId}`),
+        false,
+        `liveAskId must not appear in Archived; row=${JSON.stringify(archByKey.get(`ask:${liveAskId}`))}`,
+      );
+      assert.equal(
+        archByKey.has(`ask:${selfFollowupAskId}`),
+        false,
+        `selfFollowupAskId must not appear in Archived; row=${JSON.stringify(archByKey.get(`ask:${selfFollowupAskId}`))}`,
+      );
 
       // Rule 1: answered by another addressee / their agent.
       const bobAns = archByKey.get(`ask:${answeredByBobAskId}`);
-      assert.ok(bobAns);
-      assert.equal(bobAns.outcome_kind, "answered");
-      assert.equal(bobAns.outcome_text, "Bob handled it");
-      assert.equal(bobAns.answered_by?.by_viewer, false);
+      assert.ok(bobAns, `answeredByBobAskId missing from Archived; wa=${JSON.stringify(afterSnap.wa)}`);
+      assert.equal(bobAns.outcome_kind, "answered", `bobAns=${JSON.stringify(bobAns)}`);
+      assert.equal(bobAns.outcome_text, "Bob handled it", `bobAns=${JSON.stringify(bobAns)}`);
+      assert.equal(bobAns.answered_by?.by_viewer, false, `bobAns=${JSON.stringify(bobAns)}`);
 
       const bobAgentAns = archByKey.get(`ask:${answeredByBobAgentAskId}`);
-      assert.ok(bobAgentAns);
-      assert.equal(bobAgentAns.outcome_kind, "answered");
-      assert.equal(bobAgentAns.outcome_text, "BobBot handled it");
+      assert.ok(bobAgentAns, `answeredByBobAgentAskId missing from Archived; wa=${JSON.stringify(afterSnap.wa)}`);
+      assert.equal(bobAgentAns.outcome_kind, "answered", `bobAgentAns=${JSON.stringify(bobAgentAns)}`);
+      assert.equal(bobAgentAns.outcome_text, "BobBot handled it", `bobAgentAns=${JSON.stringify(bobAgentAns)}`);
 
       // Rule 2: agent_removed (revoked principal, revoked workspace seat, owner left, and dismissed-then-revoked).
       for (const id of [revokedAgentAskId, seatRemovedAskId, ownerLeftAskId, dismissedThenRevokedAskId]) {
         const matches = afterSnap.wa.items.filter((i) => i.item_key === `ask:${id}`);
-        assert.equal(matches.length, 1, `ask:${id} must appear exactly once in Archived`);
-        assert.equal(matches[0]!.outcome_kind, "agent_removed");
-        assert.equal(matches[0]!.outcome_text, "Agent removed");
-        assert.equal(matches[0]!.answered_by, null);
+        assert.equal(
+          matches.length,
+          1,
+          `ask:${id} must appear exactly once in Archived; matches=${JSON.stringify(matches)} wa=${JSON.stringify(afterSnap.wa)}`,
+        );
+        assert.equal(matches[0]!.outcome_kind, "agent_removed", `row=${JSON.stringify(matches[0])}`);
+        assert.equal(matches[0]!.outcome_text, "Agent removed", `row=${JSON.stringify(matches[0])}`);
+        assert.equal(matches[0]!.answered_by, null, `row=${JSON.stringify(matches[0])}`);
       }
 
       // Rule 3: sender_left.
       const senderLeft = archByKey.get(`ask:${senderLeftAskId}`);
-      assert.ok(senderLeft);
-      assert.equal(senderLeft.outcome_kind, "sender_left");
-      assert.equal(senderLeft.outcome_text, "Sender left");
-      assert.equal(senderLeft.answered_by, null);
+      assert.ok(senderLeft, `senderLeftAskId missing from Archived; wa=${JSON.stringify(afterSnap.wa)}`);
+      assert.equal(senderLeft.outcome_kind, "sender_left", `senderLeft=${JSON.stringify(senderLeft)}`);
+      assert.equal(senderLeft.outcome_text, "Sender left", `senderLeft=${JSON.stringify(senderLeft)}`);
+      assert.equal(senderLeft.answered_by, null, `senderLeft=${JSON.stringify(senderLeft)}`);
 
       // Rule 4: channel_archived (readable open + readable private appear; unreadable private MUST NOT appear).
       for (const id of [archivedOpenChAskId, archivedPrivReadableAskId]) {
         const row = archByKey.get(`ask:${id}`);
-        assert.ok(row, `ask:${id} should appear as channel_archived`);
-        assert.equal(row.outcome_kind, "channel_archived");
-        assert.equal(row.outcome_text, "Channel archived");
-        assert.equal(row.answered_by, null);
+        assert.ok(row, `ask:${id} should appear as channel_archived; wa=${JSON.stringify(afterSnap.wa)}`);
+        assert.equal(row.outcome_kind, "channel_archived", `row=${JSON.stringify(row)}`);
+        assert.equal(row.outcome_text, "Channel archived", `row=${JSON.stringify(row)}`);
+        assert.equal(row.answered_by, null, `row=${JSON.stringify(row)}`);
       }
-      assert.equal(archByKey.has(`ask:${archivedPrivUnreadableAskId}`), false, "unreadable archived private ask must not be listed");
+      assert.equal(
+        archByKey.has(`ask:${archivedPrivUnreadableAskId}`),
+        false,
+        `unreadable archived private ask must not be listed; row=${JSON.stringify(archByKey.get(`ask:${archivedPrivUnreadableAskId}`))}`,
+      );
 
       // Rule 5: viewer lost access -> NOT listed in Archived (zero leakage, even when asking agent is also revoked).
-      assert.equal(archByKey.has(`ask:${lostPrivChAskId}`), false, "removed private-channel ask must not appear in Archived");
-      assert.equal(archByKey.has(`ask:${leftDmAskId}`), false, "left DM ask must not appear in Archived");
-      assert.equal(archByKey.has(`ask:${leftDmRevokedAskId}`), false, "left DM ask from revoked agent must not appear in Archived");
+      assert.equal(
+        archByKey.has(`ask:${lostPrivChAskId}`),
+        false,
+        `removed private-channel ask must not appear in Archived; row=${JSON.stringify(archByKey.get(`ask:${lostPrivChAskId}`))}`,
+      );
+      assert.equal(
+        archByKey.has(`ask:${leftDmAskId}`),
+        false,
+        `left DM ask must not appear in Archived; row=${JSON.stringify(archByKey.get(`ask:${leftDmAskId}`))}`,
+      );
+      assert.equal(
+        archByKey.has(`ask:${leftDmRevokedAskId}`),
+        false,
+        `left DM ask from revoked agent must not appear in Archived; row=${JSON.stringify(archByKey.get(`ask:${leftDmRevokedAskId}`))}`,
+      );
       const afterJson = JSON.stringify(afterSnap.wa);
-      assert.equal(afterJson.includes("SECRET archived private ask?"), false);
-      assert.equal(afterJson.includes("SECRET lost private ask?"), false);
-      assert.equal(afterJson.includes("SECRET left DM ask?"), false);
-      assert.equal(afterJson.includes("SECRET left DM revoked agent ask?"), false);
+      assert.equal(afterJson.includes("SECRET archived private ask?"), false, `leaked archived private ask in wa=${afterJson}`);
+      assert.equal(afterJson.includes("SECRET lost private ask?"), false, `leaked lost private ask in wa=${afterJson}`);
+      assert.equal(afterJson.includes("SECRET left DM ask?"), false, `leaked left DM ask in wa=${afterJson}`);
+      assert.equal(afterJson.includes("SECRET left DM revoked agent ask?"), false, `leaked left DM revoked ask in wa=${afterJson}`);
 
       // Explicit expiry: expired.
       const expired = archByKey.get(`ask:${expiredAskId}`);
-      assert.ok(expired);
-      assert.equal(expired.outcome_kind, "expired");
-      assert.equal(expired.outcome_text, "Expired");
-      assert.equal(expired.answered_by, null);
+      assert.ok(expired, `expiredAskId missing from Archived; wa=${JSON.stringify(afterSnap.wa)}`);
+      assert.equal(expired.outcome_kind, "expired", `expired=${JSON.stringify(expired)}`);
+      assert.equal(expired.outcome_text, "Expired", `expired=${JSON.stringify(expired)}`);
+      assert.equal(expired.answered_by, null, `expired=${JSON.stringify(expired)}`);
 
       // Withdrawn review offer: withdrawn.
       const withdrawn = archByKey.get(`review:${reviewOfferId}`);
-      assert.ok(withdrawn, "withdrawn review offer must appear in Archived");
-      assert.equal(withdrawn.outcome_kind, "withdrawn");
-      assert.equal(withdrawn.outcome_text, "Withdrawn");
+      assert.ok(withdrawn, `withdrawn review offer ${reviewOfferId} must appear in Archived; wa=${JSON.stringify(afterSnap.wa)}`);
+      assert.equal(withdrawn.outcome_kind, "withdrawn", `withdrawn=${JSON.stringify(withdrawn)}`);
+      assert.equal(withdrawn.outcome_text, "Withdrawn", `withdrawn=${JSON.stringify(withdrawn)}`);
 
       // Uniform 404 on dismiss/restore for auto-cleared asks (indistinguishable from unknown UUID).
       await tx`SET LOCAL ROLE swarm_command`;
       const [unknownDismiss] = await tx<{ r: Row }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'ask', ${randomUUID()}::uuid) AS r
       `;
-      assert.deepEqual(unknownDismiss!.r, { status: "not_found" });
+      assert.deepEqual(
+        unknownDismiss!.r,
+        { status: "not_found" },
+        `unknownDismiss=${JSON.stringify(unknownDismiss!.r)}`,
+      );
       for (const clearedId of [revokedAgentAskId, senderLeftAskId, archivedOpenChAskId, expiredAskId, leftDmAskId]) {
         const [d] = await tx<{ r: Row }[]>`
           SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'ask', ${clearedId}::uuid) AS r
         `;
-        assert.deepEqual(d!.r, unknownDismiss!.r, `dismiss on cleared ask ${clearedId} must return uniform not_found`);
+        assert.deepEqual(
+          d!.r,
+          unknownDismiss!.r,
+          `dismiss on cleared ask ${clearedId} must return uniform not_found; got=${JSON.stringify(d!.r)} expected=${JSON.stringify(unknownDismiss!.r)}`,
+        );
       }
       const [restoreCleared] = await tx<{ r: Row }[]>`
         SELECT swarm.restore_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'ask', ${dismissedThenRevokedAskId}::uuid) AS r
       `;
-      assert.deepEqual(restoreCleared!.r, { status: "not_found" }, "restore on dismissed-then-revoked ask must return uniform not_found");
+      assert.deepEqual(
+        restoreCleared!.r,
+        { status: "not_found" },
+        `restore on dismissed-then-revoked ask must return uniform not_found; got=${JSON.stringify(restoreCleared!.r)}`,
+      );
       await tx`RESET ROLE`;
 
       throw ROLLBACK_WITNESS;
@@ -909,52 +1046,64 @@ test("private directed reply or private completed choice never alters another ad
       const bPrivFull = await readArchivedPage(tx, priv.wsId, priv.addresseeBId, 50);
       const bCtrlFull = await readArchivedPage(tx, ctrl.wsId, ctrl.addresseeBId, 50);
 
-      assert.equal(bPrivFull.total, 5);
-      assert.equal(bPrivFull.total, bCtrlFull.total, "B's total must match the never-answered control");
-      assert.equal(bPrivFull.truncated, bCtrlFull.truncated);
+      assert.equal(bPrivFull.total, 5, `bPrivFull=${JSON.stringify(bPrivFull)}`);
+      assert.equal(
+        bPrivFull.total,
+        bCtrlFull.total,
+        `B's total must match the never-answered control; priv=${JSON.stringify(bPrivFull)} ctrl=${JSON.stringify(bCtrlFull)}`,
+      );
+      assert.equal(
+        bPrivFull.truncated,
+        bCtrlFull.truncated,
+        `B's truncated flag mismatch; priv=${JSON.stringify(bPrivFull)} ctrl=${JSON.stringify(bCtrlFull)}`,
+      );
       assert.deepEqual(
         bPrivFull.items.map(normalizeRow),
         bCtrlFull.items.map(normalizeRow),
-        "B's Archived items must match the never-answered control field for field",
+        `B's Archived items must match the never-answered control field for field; priv=${JSON.stringify(bPrivFull.items)} ctrl=${JSON.stringify(bCtrlFull.items)}`,
       );
 
       // Verify each specific cleared outcome, timestamp, and absence of answer data for B.
       const bByKey = new Map(bPrivFull.items.map((i) => [i.item_key, i]));
       const bExpDir = bByKey.get(`ask:${priv.expDirectedAskId}`);
-      assert.ok(bExpDir);
-      assert.equal(bExpDir.outcome_kind, "expired");
-      assert.equal(bExpDir.outcome_text, "Expired");
-      assert.equal(Date.parse(bExpDir.archived_at), Date.parse(ts(-300)));
-      assert.equal(bExpDir.answered_by, null);
+      assert.ok(bExpDir, `expDirectedAskId missing from B's Archived; bPrivFull=${JSON.stringify(bPrivFull)}`);
+      assert.equal(bExpDir.outcome_kind, "expired", `bExpDir=${JSON.stringify(bExpDir)}`);
+      assert.equal(bExpDir.outcome_text, "Expired", `bExpDir=${JSON.stringify(bExpDir)}`);
+      assert.equal(Date.parse(bExpDir.archived_at), Date.parse(ts(-300)), `bExpDir=${JSON.stringify(bExpDir)}`);
+      assert.equal(bExpDir.answered_by, null, `bExpDir=${JSON.stringify(bExpDir)}`);
 
       const bSenderLeft = bByKey.get(`ask:${priv.senderLeftDirectedAskId}`);
-      assert.ok(bSenderLeft);
-      assert.equal(bSenderLeft.outcome_kind, "sender_left");
-      assert.equal(bSenderLeft.outcome_text, "Sender left");
-      assert.equal(Date.parse(bSenderLeft.archived_at), Date.parse(ts(-200)));
-      assert.equal(bSenderLeft.answered_by, null);
+      assert.ok(bSenderLeft, `senderLeftDirectedAskId missing from B's Archived; bPrivFull=${JSON.stringify(bPrivFull)}`);
+      assert.equal(bSenderLeft.outcome_kind, "sender_left", `bSenderLeft=${JSON.stringify(bSenderLeft)}`);
+      assert.equal(bSenderLeft.outcome_text, "Sender left", `bSenderLeft=${JSON.stringify(bSenderLeft)}`);
+      assert.equal(Date.parse(bSenderLeft.archived_at), Date.parse(ts(-200)), `bSenderLeft=${JSON.stringify(bSenderLeft)}`);
+      assert.equal(bSenderLeft.answered_by, null, `bSenderLeft=${JSON.stringify(bSenderLeft)}`);
 
       const bExpChoice = bByKey.get(`ask:${priv.expHiddenChoiceAskId}`);
-      assert.ok(bExpChoice);
-      assert.equal(bExpChoice.outcome_kind, "expired");
-      assert.equal(bExpChoice.outcome_text, "Expired");
-      assert.equal(Date.parse(bExpChoice.archived_at), Date.parse(ts(-250)));
-      assert.equal(bExpChoice.answered_by, null);
+      assert.ok(bExpChoice, `expHiddenChoiceAskId missing from B's Archived; bPrivFull=${JSON.stringify(bPrivFull)}`);
+      assert.equal(bExpChoice.outcome_kind, "expired", `bExpChoice=${JSON.stringify(bExpChoice)}`);
+      assert.equal(bExpChoice.outcome_text, "Expired", `bExpChoice=${JSON.stringify(bExpChoice)}`);
+      assert.equal(Date.parse(bExpChoice.archived_at), Date.parse(ts(-250)), `bExpChoice=${JSON.stringify(bExpChoice)}`);
+      assert.equal(bExpChoice.answered_by, null, `bExpChoice=${JSON.stringify(bExpChoice)}`);
 
       const bArchivedChChoice = bByKey.get(`ask:${priv.archivedChHiddenChoiceAskId}`);
-      assert.ok(bArchivedChChoice);
-      assert.equal(bArchivedChChoice.outcome_kind, "channel_archived");
-      assert.equal(bArchivedChChoice.outcome_text, "Channel archived");
-      assert.equal(Date.parse(bArchivedChChoice.archived_at), Date.parse(ts(-220)));
-      assert.equal(bArchivedChChoice.answered_by, null);
+      assert.ok(bArchivedChChoice, `archivedChHiddenChoiceAskId missing from B's Archived; bPrivFull=${JSON.stringify(bPrivFull)}`);
+      assert.equal(bArchivedChChoice.outcome_kind, "channel_archived", `bArchivedChChoice=${JSON.stringify(bArchivedChChoice)}`);
+      assert.equal(bArchivedChChoice.outcome_text, "Channel archived", `bArchivedChChoice=${JSON.stringify(bArchivedChChoice)}`);
+      assert.equal(Date.parse(bArchivedChChoice.archived_at), Date.parse(ts(-220)), `bArchivedChChoice=${JSON.stringify(bArchivedChChoice)}`);
+      assert.equal(bArchivedChChoice.answered_by, null, `bArchivedChChoice=${JSON.stringify(bArchivedChChoice)}`);
 
       // Visible-answer control: unaddressed reply wins ONCE for B even though the ask also expired.
       const bVisibleMatches = bPrivFull.items.filter((i) => i.item_key === `ask:${priv.visibleAnswerExpiredAskId}`);
-      assert.equal(bVisibleMatches.length, 1, "visible answer must appear once for B, not also as expired");
-      assert.equal(bVisibleMatches[0]!.outcome_kind, "answered");
-      assert.equal(bVisibleMatches[0]!.outcome_text, "Public answer both can read");
-      assert.equal(Date.parse(bVisibleMatches[0]!.archived_at), Date.parse(ts(-180)));
-      assert.equal(bVisibleMatches[0]!.answered_by?.by_viewer, false);
+      assert.equal(
+        bVisibleMatches.length,
+        1,
+        `visible answer must appear once for B, not also as expired; matches=${JSON.stringify(bVisibleMatches)}`,
+      );
+      assert.equal(bVisibleMatches[0]!.outcome_kind, "answered", `row=${JSON.stringify(bVisibleMatches[0])}`);
+      assert.equal(bVisibleMatches[0]!.outcome_text, "Public answer both can read", `row=${JSON.stringify(bVisibleMatches[0])}`);
+      assert.equal(Date.parse(bVisibleMatches[0]!.archived_at), Date.parse(ts(-180)), `row=${JSON.stringify(bVisibleMatches[0])}`);
+      assert.equal(bVisibleMatches[0]!.answered_by?.by_viewer, false, `row=${JSON.stringify(bVisibleMatches[0])}`);
 
       // Zero secret answer content anywhere in B's response.
       const bJson = JSON.stringify(bPrivFull);
@@ -966,7 +1115,7 @@ test("private directed reply or private completed choice never alters another ad
         "SECRET_CHOICE_REPLY_BODY",
         "SECRET_ARCHIVED_CH_CHOICE_BODY",
       ]) {
-        assert.equal(bJson.includes(secret), false, `B's Archived page must never leak ${secret}`);
+        assert.equal(bJson.includes(secret), false, `B's Archived page must never leak ${secret}; bPrivFull=${bJson}`);
       }
 
       // 2. Compare B's keyset cursor pagination (limit = 2) page-for-page against the never-answered control.
@@ -977,30 +1126,42 @@ test("private directed reply or private completed choice never alters another ad
       let pageCount = 0;
       for (;;) {
         pageCount += 1;
-        assert.ok(pageCount <= 5, "pagination must terminate in 3 pages");
+        assert.ok(pageCount <= 5, `pagination must terminate in 3 pages; pageCount=${pageCount}`);
         const pPage = await readArchivedPage(tx, priv.wsId, priv.addresseeBId, 2, pAfterAt, pAfterKey);
         const cPage = await readArchivedPage(tx, ctrl.wsId, ctrl.addresseeBId, 2, cAfterAt, cAfterKey);
-        assert.equal(pPage.total, cPage.total, `page ${pageCount} total matches control`);
-        assert.equal(pPage.truncated, cPage.truncated, `page ${pageCount} truncated matches control`);
+        assert.equal(
+          pPage.total,
+          cPage.total,
+          `page ${pageCount} total matches control; pPage=${JSON.stringify(pPage)} cPage=${JSON.stringify(cPage)}`,
+        );
+        assert.equal(
+          pPage.truncated,
+          cPage.truncated,
+          `page ${pageCount} truncated matches control; pPage=${JSON.stringify(pPage)} cPage=${JSON.stringify(cPage)}`,
+        );
         assert.deepEqual(
           pPage.items.map(normalizeRow),
           cPage.items.map(normalizeRow),
-          `page ${pageCount} items match control`,
+          `page ${pageCount} items match control; pPage=${JSON.stringify(pPage)} cPage=${JSON.stringify(cPage)}`,
         );
         if (!pPage.truncated) break;
         const pLast = pPage.items[pPage.items.length - 1]!;
         const cLast = cPage.items[cPage.items.length - 1]!;
-        assert.equal(Date.parse(pLast.archived_at), Date.parse(cLast.archived_at), `page ${pageCount} cursor timestamp matches control`);
+        assert.equal(
+          Date.parse(pLast.archived_at),
+          Date.parse(cLast.archived_at),
+          `page ${pageCount} cursor timestamp matches control; pLast=${JSON.stringify(pLast)} cLast=${JSON.stringify(cLast)}`,
+        );
         pAfterAt = pLast.archived_at;
         pAfterKey = pLast.item_key;
         cAfterAt = cLast.archived_at;
         cAfterKey = cLast.item_key;
       }
-      assert.equal(pageCount, 3, "5 rows at limit 2 span 3 cursor pages");
+      assert.equal(pageCount, 3, `5 rows at limit 2 span 3 cursor pages; got pageCount=${pageCount}`);
 
       // 3. Addressee A sees ALL 5 asks as 'answered', ONCE each (never duplicated as cleared).
       const aPrivFull = await readArchivedPage(tx, priv.wsId, priv.addresseeAId, 50);
-      assert.equal(aPrivFull.total, 5);
+      assert.equal(aPrivFull.total, 5, `aPrivFull=${JSON.stringify(aPrivFull)}`);
       const expectedForA: Array<[string, string, number]> = [
         [priv.expDirectedAskId, "SECRET_DIRECTED_EXPIRY_REPLY", Date.parse(ts(-400))],
         [priv.senderLeftDirectedAskId, "SECRET_DIRECTED_DM_REPLY", Date.parse(ts(-390))],
@@ -1010,11 +1171,15 @@ test("private directed reply or private completed choice never alters another ad
       ];
       for (const [askId, expectedText, expectedAt] of expectedForA) {
         const matches = aPrivFull.items.filter((i) => i.item_key === `ask:${askId}`);
-        assert.equal(matches.length, 1, `ask:${askId} must appear exactly once for A`);
-        assert.equal(matches[0]!.outcome_kind, "answered");
-        assert.equal(matches[0]!.outcome_text, expectedText);
-        assert.equal(Date.parse(matches[0]!.archived_at), expectedAt);
-        assert.equal(matches[0]!.answered_by?.by_viewer, true);
+        assert.equal(
+          matches.length,
+          1,
+          `ask:${askId} must appear exactly once for A; matches=${JSON.stringify(matches)} aPrivFull=${JSON.stringify(aPrivFull)}`,
+        );
+        assert.equal(matches[0]!.outcome_kind, "answered", `row=${JSON.stringify(matches[0])}`);
+        assert.equal(matches[0]!.outcome_text, expectedText, `row=${JSON.stringify(matches[0])}`);
+        assert.equal(Date.parse(matches[0]!.archived_at), expectedAt, `row=${JSON.stringify(matches[0])}`);
+        assert.equal(matches[0]!.answered_by?.by_viewer, true, `row=${JSON.stringify(matches[0])}`);
       }
 
       // 4. Live queue rule unchanged: an unexpired ask privately answered by A still leaves B's Waiting on you
@@ -1050,19 +1215,31 @@ test("private directed reply or private completed choice never alters another ad
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
 
       const bLiveSnap = await readAllFiveAs(tx, priv.wsId, priv.addresseeBId);
-      assert.equal(bLiveSnap.dq.total, 0, "global ask_answered still clears live decision_queue for B");
-      assert.equal(bLiveSnap.dqp.total, 0, "global ask_answered still clears live decision_queue_page for B");
-      assert.equal(bLiveSnap.wsOverview!.needs_you.asks.length, 0, "global ask_answered still clears home_overview for B");
+      assert.equal(
+        bLiveSnap.dq.total,
+        0,
+        `global ask_answered still clears live decision_queue for B; dq=${JSON.stringify(bLiveSnap.dq)}`,
+      );
+      assert.equal(
+        bLiveSnap.dqp.total,
+        0,
+        `global ask_answered still clears live decision_queue_page for B; dqp=${JSON.stringify(bLiveSnap.dqp)}`,
+      );
+      assert.equal(
+        bLiveSnap.wsOverview!.needs_you.asks.length,
+        0,
+        `global ask_answered still clears home_overview for B; wsOverview=${JSON.stringify(bLiveSnap.wsOverview)}`,
+      );
       assert.equal(
         bLiveSnap.wa.items.some((i) => i.item_key === `ask:${liveDirectedAskId}`),
         false,
-        "unexpired ask with private answer stays out of B's Archived until an auto-clear condition holds",
+        `unexpired ask with private answer stays out of B's Archived until an auto-clear condition holds; wa=${JSON.stringify(bLiveSnap.wa)}`,
       );
       const aLiveSnap = await readAllFiveAs(tx, priv.wsId, priv.addresseeAId);
       assert.equal(
         aLiveSnap.wa.items.filter((i) => i.item_key === `ask:${liveDirectedAskId}`).length,
         1,
-        "A sees the live privately-answered ask once in Archived",
+        `A sees the live privately-answered ask once in Archived; wa=${JSON.stringify(aLiveSnap.wa)}`,
       );
 
       throw ROLLBACK_WITNESS;
