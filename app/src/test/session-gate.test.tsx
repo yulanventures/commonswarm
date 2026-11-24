@@ -1,7 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
-import { deploymentOriginHash } from '../../../shared/browser-session/index.js';
+import {
+  AuthRecoveryRequired,
+  SessionExpired,
+  deploymentOriginHash,
+} from '../../../shared/browser-session/index.js';
 import { AppRoutes } from '../App';
 import { readConversations, readWorkspaces } from '../data/api';
 import { StaleFenceError } from '../data/fence';
@@ -311,5 +315,111 @@ describe('Session gate fail-closed states', () => {
     expect(harness.postgrestCalls).toHaveLength(0);
 
     gate.dispose();
+  });
+});
+
+describe('Session gate recovery timeout vs genuine sign-out', () => {
+  it('AuthRecoveryRequired stays closed (not signed_out, no private view), retries, and authenticates on recovery [fails until the refresh-stall fix]', async () => {
+    vi.useFakeTimers();
+    const validSession = makeFakeSession({ userId: 'user-1', sessionId: 'sid-recovered' });
+    const harness = createFakeSessionHarness(null);
+    let attempts = 0;
+    harness.setCurrentSessionHandler(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new AuthRecoveryRequired();
+      }
+      harness.setSession(validSession);
+      return validSession;
+    });
+
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage: createFakeStorage(),
+      createSession: () => harness.browserSession,
+      fetchImpl: harness.fetchImpl,
+    });
+    const controller = createDataController(gate);
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/agents/atlas']}>
+          <AppRoutes controller={controller} />
+        </MemoryRouter>,
+      );
+
+      // Flush the first currentSession() rejection (AuthRecoveryRequired).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(attempts).toBe(1);
+      expect(gate.state.status).not.toBe('signed_out');
+      expect(gate.state.status).not.toBe('authenticated');
+      expect(gate.state.status).not.toBe('sample');
+      expect(screen.queryByTestId('signed-out-screen')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('private-view-root')).not.toBeInTheDocument();
+      expect(gate.userId).toBeNull();
+      expect(harness.fetchCalls).toHaveLength(0);
+      expect(harness.postgrestCalls).toHaveLength(0);
+
+      // Allow the gate's retry to run and observe the now-resolving session.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+
+      expect(attempts).toBeGreaterThanOrEqual(2);
+      expect(gate.state).toEqual({ status: 'authenticated' });
+      expect(gate.userId).toBe('user-1');
+      expect(screen.queryByTestId('signed-out-screen')).not.toBeInTheDocument();
+      expect(screen.getByTestId('private-view-root')).toBeInTheDocument();
+    } finally {
+      controller.dispose();
+      gate.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: genuine SessionExpired rejection and missing session still fail closed to signed_out', async () => {
+    for (const mode of ['expired', 'missing'] as const) {
+      const harness = createFakeSessionHarness(null);
+      harness.setCurrentSessionHandler(async () => {
+        if (mode === 'expired') {
+          throw new SessionExpired();
+        }
+        return null;
+      });
+
+      const gate = createSessionGate({
+        runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+        multiAccountEnabled: false,
+        hasWebLocks: () => true,
+        storage: createFakeStorage(),
+        createSession: () => harness.browserSession,
+        fetchImpl: harness.fetchImpl,
+      });
+      const controller = createDataController(gate);
+
+      const { unmount } = render(
+        <MemoryRouter initialEntries={['/agents/atlas']}>
+          <AppRoutes controller={controller} />
+        </MemoryRouter>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('signed-out-screen')).toBeInTheDocument();
+      });
+      expect(gate.state).toEqual({ status: 'signed_out' });
+      expect(gate.userId).toBeNull();
+      expect(screen.queryByTestId('private-view-root')).not.toBeInTheDocument();
+      expect(harness.fetchCalls).toHaveLength(0);
+      expect(harness.postgrestCalls).toHaveLength(0);
+
+      unmount();
+      controller.dispose();
+      gate.dispose();
+    }
   });
 });
