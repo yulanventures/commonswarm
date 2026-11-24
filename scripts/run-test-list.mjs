@@ -7,27 +7,49 @@
  * --list-only prints the expanded file set in run order, one per line and runs nothing.
  * Node-args mode: node scripts/run-test-list.mjs -- [node --test flags and files/globs...]
  * passes its arguments to node --test literally (the p1-cli package script keeps its glob this way).
+ * Set CSWARM_KEEP_TEST_TMP=1 to keep the run temp folder on exit and print its path.
  *
- * Temp ownership: each real run creates one private run directory under the resolved OS temp
- * parent and points only the child's TMPDIR at it (HOME is never touched). After the child has
- * been reaped (close) the runner SIGKILLs any remainder of the group this run created, then
- * removes exactly that directory only once that group is proven unable to run more code — it
- * has left the process table, or only zombies remain in it (see waitForGroupQuiesce). That
- * removal happens on pass, failure, spawn failure (a synchronous spawn throw included),
- * SIGINT/SIGTERM/SIGHUP to the runner, and SIGKILL of the child. If the proof cannot be
- * obtained within the bound, the directory is retained and the run exits nonzero instead of
- * deleting under possible writers. Cleanup refuses anything that is not still the exact
- * directory this run created. Limit: if the runner itself is SIGKILLed or crashes, no JS
- * cleanup can execute; that case belongs to an outer owner, not this process. There is no
- * kill guarantee for a process that leaves the owned group (its own setsid). */
+ * Temp ownership: each real run first sweeps stale cswarm-test-run-* folders under the resolved
+ * OS temp parent (older than 6 h with a dead owner PID in .owner-pid, or older than 24 h if the
+ * marker is missing/unreadable; live owners are never removed), then creates one private run
+ * directory with its own .owner-pid marker and points only the child's TMPDIR at it (HOME is
+ * never touched). After the child has been reaped (close) the runner SIGKILLs any remainder of
+ * the group this run created, then removes exactly that directory only once that group is proven
+ * unable to run more code — it has left the process table, or only zombies remain in it (see
+ * waitForGroupQuiesce). That removal happens on pass, failure, uncaught error, spawn failure (a
+ * synchronous spawn throw included), SIGINT/SIGTERM/SIGHUP to the runner (exiting 130/143/129),
+ * and SIGKILL of the child. If the proof cannot be obtained within the bound, the directory is
+ * retained and the run exits nonzero instead of deleting under possible writers. Cleanup refuses
+ * anything that is not still the exact directory this run created under the system temp dir.
+ * Limit: if the runner itself is SIGKILLed or crashes, the next run's startup sweep collects it
+ * once stale. There is no kill guarantee for a process that leaves the owned group (its own setsid). */
 import { execFile, spawn } from "node:child_process";
-import { existsSync, globSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import {
+  existsSync,
+  globSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { constants as osConstants, homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const GLOB = /[*?[\]{}]/;
 const RUN_PREFIX = "cswarm-test-run-";
+const OWNER_MARKER = ".owner-pid";
+const KEEP_TMP_ENV = "CSWARM_KEEP_TEST_TMP";
+const SWEEP_AGE_MS = 6 * 60 * 60 * 1000;
+const SWEEP_ORPHAN_AGE_MS = 24 * 60 * 60 * 1000;
+const SIGNAL_EXIT_CODES = {
+  SIGHUP: 128 + (osConstants.signals.SIGHUP ?? 1),
+  SIGINT: 128 + (osConstants.signals.SIGINT ?? 2),
+  SIGTERM: 128 + (osConstants.signals.SIGTERM ?? 15),
+};
 // The known caller (scripts/run-gates.sh) escalates a gate-group TERM to KILL after 2 s.
 // That KILL reaches this runner but not the detached child group this run creates, so signal
 // teardown is sized to finish inside the caller's grace: at most SHUTDOWN_GRACE_MS for the
@@ -72,20 +94,51 @@ export function expand(entries) {
   return [...files];
 }
 
+function shouldKeepRunRoot(env = process.env) {
+  const raw = env[KEEP_TMP_ENV];
+  if (typeof raw !== "string") return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized !== "" && normalized !== "0" && normalized !== "false";
+}
+
+function assertSafeRunRootPath(root, expectedParent) {
+  if (typeof root !== "string" || root === "" || !isAbsolute(root)) {
+    throw new Error("refusing unsafe run root");
+  }
+  const sysTmp = realpathSync(tmpdir());
+  if (
+    root === "/" ||
+    root === homedir() ||
+    root === sysTmp ||
+    dirname(root) !== expectedParent ||
+    expectedParent !== sysTmp ||
+    !basename(root).startsWith(RUN_PREFIX)
+  ) {
+    throw new Error("run root is outside its owned parent");
+  }
+}
+
 function createRunRoot() {
   // Resolve first: the temp parent itself may be a symlink (macOS /tmp -> /private/tmp).
   const parent = realpathSync(tmpdir());
   const root = mkdtempSync(join(parent, RUN_PREFIX));
-  const entry = lstatSync(root);
-  return { parent, root, identity: { dev: entry.dev, ino: entry.ino, uid: entry.uid } };
+  try {
+    writeFileSync(join(root, OWNER_MARKER), `${process.pid}\n`, { mode: 0o600 });
+    const entry = lstatSync(root);
+    return { parent, root, identity: { dev: entry.dev, ino: entry.ino, uid: entry.uid } };
+  } catch (error) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup of a half-initialized root before rethrowing.
+    }
+    throw error;
+  }
 }
 
-function removeRunRoot({ parent, root, identity }) {
+export function removeRunRoot({ parent, root, identity }) {
   try {
-    if (!root || root === "/" || root === homedir()) throw new Error("refusing unsafe run root");
-    if (dirname(root) !== parent || !basename(root).startsWith(RUN_PREFIX)) {
-      throw new Error("run root is outside its owned parent");
-    }
+    assertSafeRunRootPath(root, parent);
     const entry = lstatSync(root, { throwIfNoEntry: false });
     if (!entry) return true;
     if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("run root was replaced");
@@ -101,6 +154,107 @@ function removeRunRoot({ parent, root, identity }) {
     console.error(`run-test-list: cleanup failed for ${root}: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ESRCH") return false;
+    // EPERM or any unexpected error: treat as alive rather than risking deletion under a live owner.
+    return true;
+  }
+}
+
+function readOwnerPid(dirPath) {
+  const markerPath = join(dirPath, OWNER_MARKER);
+  let markerStat;
+  try {
+    markerStat = lstatSync(markerPath);
+  } catch {
+    return null;
+  }
+  if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.size <= 0 || markerStat.size > 64) {
+    return null;
+  }
+  let raw;
+  try {
+    raw = readFileSync(markerPath, "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const pid = Number(raw);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+export function sweepStaleRunRoots(options = {}) {
+  const nowMs = typeof options.nowMs === "number" ? options.nowMs : Date.now();
+  const maxAgeMs = typeof options.maxAgeMs === "number" ? options.maxAgeMs : SWEEP_AGE_MS;
+  const orphanMaxAgeMs = typeof options.orphanMaxAgeMs === "number" ? options.orphanMaxAgeMs : SWEEP_ORPHAN_AGE_MS;
+  const aliveCheck = typeof options.isAlive === "function" ? options.isAlive : isProcessAlive;
+
+  let parent;
+  try {
+    parent = realpathSync(tmpdir());
+  } catch {
+    return [];
+  }
+  if (!parent || !isAbsolute(parent) || parent === "/" || parent === homedir()) return [];
+
+  let names;
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return [];
+  }
+
+  const selfUid = typeof process.getuid === "function" ? process.getuid() : null;
+  const removed = [];
+
+  for (const name of names) {
+    if (!name.startsWith(RUN_PREFIX)) continue;
+    const candidate = join(parent, name);
+    try {
+      assertSafeRunRootPath(candidate, parent);
+      const entry = lstatSync(candidate, { throwIfNoEntry: false });
+      if (!entry || entry.isSymbolicLink() || !entry.isDirectory()) continue;
+      if (selfUid !== null && entry.uid !== selfUid) continue;
+      if (realpathSync(candidate) !== candidate) continue;
+
+      const ageMs = nowMs - entry.mtimeMs;
+      if (ageMs <= maxAgeMs) continue;
+
+      const ownerPid = readOwnerPid(candidate);
+      if (ownerPid !== null) {
+        if (ownerPid === process.pid || aliveCheck(ownerPid)) continue;
+      } else if (ageMs <= orphanMaxAgeMs) {
+        continue;
+      }
+
+      // Re-verify identity right before removal to narrow any race with replacement.
+      const beforeRemove = lstatSync(candidate, { throwIfNoEntry: false });
+      if (
+        !beforeRemove ||
+        beforeRemove.isSymbolicLink() ||
+        !beforeRemove.isDirectory() ||
+        beforeRemove.dev !== entry.dev ||
+        beforeRemove.ino !== entry.ino ||
+        beforeRemove.uid !== entry.uid
+      ) {
+        continue;
+      }
+      if (realpathSync(candidate) !== candidate) continue;
+
+      rmSync(candidate, { recursive: true, force: true });
+      if (!existsSync(candidate)) removed.push(candidate);
+    } catch {
+      // Best-effort sweep: leave unreadable or concurrently removed folders alone.
+    }
+  }
+  return removed;
 }
 
 function signalChildGroup(child, signal) {
@@ -202,6 +356,8 @@ async function waitForGroupQuiesce(child) {
 }
 
 async function runNodeTest(args) {
+  sweepStaleRunRoots();
+  const keepRoot = shouldKeepRunRoot();
   const tsx = import.meta.resolve("tsx");
   let owned;
   try {
@@ -211,18 +367,63 @@ async function runNodeTest(args) {
     return 1;
   }
   // Everything below runs under one outer finally that owns the run root from the moment
-  // it exists, so a setup failure or a synchronous spawn throw (for example E2BIG, which
-  // libuv reports by throwing rather than through the 'error' event) cannot leak it. The
-  // child may be undefined on those paths; every teardown step tolerates that.
+  // it exists, so a setup failure, an uncaught error, or a synchronous spawn throw (for
+  // example E2BIG, which libuv reports by throwing rather than through the 'error' event)
+  // cannot leak it. The child may be undefined on those paths; every teardown step tolerates that.
   let child;
   let status = 1;
   let spawnError = null;
   let interruptSignal = null;
   let graceTimer;
   let cleaned = false;
+  let fatalHandling = false;
   // Stays true until a group this run created fails to prove quiescence, so a
   // no-child setup or spawn failure still removes its run root below.
   let groupQuiesced = true;
+  let cleanupPromise = null;
+
+  const cleanupOwned = () => {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      if (graceTimer) clearTimeout(graceTimer);
+      // Nothing from this run's group may recreate files after the reaped child. Kill the
+      // remainder, then require (bounded) proof the group quiesced before deletion.
+      signalChildGroup(child, "SIGKILL");
+      if (child && child.exitCode === null && child.signalCode === null) {
+        await new Promise((resolveReap) => {
+          const timer = setTimeout(resolveReap, GROUP_QUIESCE_MS);
+          timer.unref?.();
+          child.once("close", () => {
+            clearTimeout(timer);
+            resolveReap();
+          });
+        });
+      }
+      try {
+        groupQuiesced = await waitForGroupQuiesce(child);
+      } catch {
+        // A probe that throws unexpectedly is not quiescence evidence.
+        groupQuiesced = false;
+      }
+      // Deletion requires owned-group quiescence evidence. Without it the root is
+      // retained and the run fails below (cleaned stays false) instead of deleting
+      // under possible writers.
+      if (!groupQuiesced) {
+        cleaned = false;
+        console.error(
+          `run-test-list: owned process group ${child?.pid} did not quiesce within ${GROUP_QUIESCE_MS}ms; retaining ${owned.root}`,
+        );
+      } else if (keepRoot) {
+        cleaned = true;
+        console.error(`run-test-list: keeping temp dir (${KEEP_TMP_ENV}): ${owned.root}`);
+      } else {
+        cleaned = removeRunRoot(owned);
+      }
+      return cleaned;
+    })();
+    return cleanupPromise;
+  };
+
   const onSignal = (signal) => {
     if (interruptSignal) {
       signalChildGroup(child, "SIGKILL");
@@ -236,6 +437,22 @@ async function runNodeTest(args) {
   const onSigint = () => onSignal("SIGINT");
   const onSigterm = () => onSignal("SIGTERM");
   const onSighup = () => onSignal("SIGHUP");
+  const detachListeners = () => {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+    process.removeListener("SIGHUP", onSighup);
+    process.removeListener("uncaughtException", onFatalError);
+    process.removeListener("unhandledRejection", onFatalError);
+  };
+  const onFatalError = (error) => {
+    if (fatalHandling) return;
+    fatalHandling = true;
+    console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+    detachListeners();
+    void cleanupOwned().finally(() => {
+      process.exit(1);
+    });
+  };
   try {
     const env = { ...process.env, TMPDIR: owned.root };
     if (process.platform === "win32") {
@@ -245,42 +462,35 @@ async function runNodeTest(args) {
     process.on("SIGINT", onSigint);
     process.on("SIGTERM", onSigterm);
     process.on("SIGHUP", onSighup);
-    try {
-      status = await new Promise((resolvePromise) => {
-        child = spawn(process.execPath, ["--import", tsx, "--test", ...args], {
-          stdio: "inherit",
-          detached: process.platform !== "win32",
-          env,
-        });
-        let settled = false;
-        const settle = (value) => {
-          if (!settled) {
-            settled = true;
-            resolvePromise(value);
-          }
-        };
-        child.once("error", (error) => {
-          spawnError = error;
-          settle(1);
-        });
-        // close, not exit: the child is reaped and its stdio is drained.
-        child.once("close", (code) => settle(code ?? 1));
-      });
-    } catch (error) {
-      // A synchronous spawn throw rejects the promise above. It is a failed run, never a
-      // success, and teardown below still runs.
-      spawnError = error instanceof Error ? error : new Error(String(error));
-      status = 1;
-    } finally {
-      if (graceTimer) clearTimeout(graceTimer);
-      // Nothing from this run's group may recreate files after the reaped child. Kill the
-      // remainder, then require (bounded) proof the group quiesced before deletion.
-      signalChildGroup(child, "SIGKILL");
+    process.on("uncaughtException", onFatalError);
+    process.on("unhandledRejection", onFatalError);
+    if (!interruptSignal) {
       try {
-        groupQuiesced = await waitForGroupQuiesce(child);
-      } catch {
-        // A probe that throws unexpectedly is not quiescence evidence.
-        groupQuiesced = false;
+        status = await new Promise((resolvePromise) => {
+          child = spawn(process.execPath, ["--import", tsx, "--test", ...args], {
+            stdio: "inherit",
+            detached: process.platform !== "win32",
+            env,
+          });
+          let settled = false;
+          const settle = (value) => {
+            if (!settled) {
+              settled = true;
+              resolvePromise(value);
+            }
+          };
+          child.once("error", (error) => {
+            spawnError = error;
+            settle(1);
+          });
+          // close, not exit: the child is reaped and its stdio is drained.
+          child.once("close", (code) => settle(code ?? 1));
+        });
+      } catch (error) {
+        // A synchronous spawn throw rejects the promise above. It is a failed run, never a
+        // success, and teardown below still runs.
+        spawnError = error instanceof Error ? error : new Error(String(error));
+        status = 1;
       }
     }
   } catch (error) {
@@ -289,27 +499,14 @@ async function runNodeTest(args) {
     if (!spawnError) spawnError = error instanceof Error ? error : new Error(String(error));
     status = 1;
   } finally {
-    // Deletion requires owned-group quiescence evidence. Without it the root is
-    // retained and the run fails below (cleaned stays false) instead of deleting
-    // under possible writers.
-    if (groupQuiesced) {
-      cleaned = removeRunRoot(owned);
-    } else {
-      cleaned = false;
-      console.error(
-        `run-test-list: owned process group ${child?.pid} did not quiesce within ${GROUP_QUIESCE_MS}ms; retaining ${owned.root}`,
-      );
-    }
-    process.removeListener("SIGINT", onSigint);
-    process.removeListener("SIGTERM", onSigterm);
-    process.removeListener("SIGHUP", onSighup);
+    await cleanupOwned();
+    detachListeners();
   }
+  if (fatalHandling) return 1;
   if (spawnError) console.error(spawnError.message);
   if (!cleaned) return status !== 0 ? status : 1;
   if (interruptSignal) {
-    // Preserve interruption as a signal death, after cleanup has completed.
-    process.kill(process.pid, interruptSignal);
-    return 1;
+    return SIGNAL_EXIT_CODES[interruptSignal] ?? 1;
   }
   return status;
 }
