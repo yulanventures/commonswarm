@@ -9,6 +9,7 @@ import {
 import userEvent from '@testing-library/user-event';
 import {
   AuthRetryableFetchError,
+  RealtimeClient,
   createClient,
   isAuthSessionMissingError,
   navigatorLock,
@@ -1870,7 +1871,7 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     gateC.dispose();
   });
 
-  it('C2: pinned RealtimeClient serializes held leave against immediate same-workspace return, cleans up partial second-attach failures, and delivers successor hints after old teardown settles', async () => {
+  it('C2: per-generation RealtimeClient retires queued outbound frames while CONNECTING, delivers successor hints & token refreshes, handles same-workspace quick return with held leave/close, and cleans up second-attach failures', async () => {
     interface SentFrame {
       joinRef: string | null;
       ref: string | null;
@@ -1880,6 +1881,7 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     }
 
     const sockets: MockPhoenixSocket[] = [];
+    let holdSocketOpen = false;
     let holdSocketClose = false;
     const heldCloses: Array<() => void> = [];
 
@@ -1905,12 +1907,15 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
 
       constructor(public readonly url: string | URL) {
         sockets.push(this);
-        queueMicrotask(() => {
-          if (this.readyState === MockPhoenixSocket.CONNECTING) {
-            this.readyState = MockPhoenixSocket.OPEN;
-            this.onopen?.(new Event('open'));
-          }
-        });
+        if (!holdSocketOpen) {
+          queueMicrotask(() => this.open());
+        }
+      }
+
+      open(): void {
+        if (this.readyState !== MockPhoenixSocket.CONNECTING) return;
+        this.readyState = MockPhoenixSocket.OPEN;
+        this.onopen?.(new Event('open'));
       }
 
       send(data: string | ArrayBuffer): void {
@@ -1925,20 +1930,7 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
         const frame: SentFrame = { joinRef, ref, topic, event, payload };
         this.sent.push(frame);
 
-        if (event === 'phx_join') {
-          queueMicrotask(() => {
-            this.deliverFromServer([
-              joinRef,
-              ref,
-              topic,
-              'phx_reply',
-              { status: 'ok', response: {} },
-            ]);
-          });
-          return;
-        }
-
-        if (event === 'phx_leave') {
+        if (event === 'phx_join' || event === 'phx_leave') {
           queueMicrotask(() => {
             this.deliverFromServer([
               joinRef,
@@ -1973,12 +1965,36 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       }
     }
 
-    const token = makeFakeJwt({ sub: USER_1, session_id: 'sid-c2-real', jti: 'c2-1' });
-    const session = makeFakeSession({
+    const tokenA = makeFakeJwt({ sub: USER_1, session_id: 'sid-c2-a', jti: 'c2-a' });
+    const sessionA = makeFakeSession({
       userId: USER_1,
-      sessionId: 'sid-c2-real',
-      accessToken: token,
+      sessionId: 'sid-c2-a',
+      accessToken: tokenA,
     });
+    const tokenB = makeFakeJwt({ sub: USER_2, session_id: 'sid-c2-b', jti: 'c2-b' });
+    const sessionB = makeFakeSession({
+      userId: USER_2,
+      sessionId: 'sid-c2-b',
+      accessToken: tokenB,
+    });
+    const tokenBRefreshed = makeFakeJwt({
+      sub: USER_2,
+      session_id: 'sid-c2-b',
+      jti: 'c2-b-refreshed',
+    });
+    const sessionBRefreshed = makeFakeSession({
+      userId: USER_2,
+      sessionId: 'sid-c2-b',
+      accessToken: tokenBRefreshed,
+    });
+
+    let activeSession = sessionA;
+    const authListeners = new Set<
+      (
+        event: 'SIGNED_IN' | 'TOKEN_REFRESHED' | 'SIGNED_OUT',
+        session: typeof sessionA | null,
+      ) => void
+    >();
 
     // Real pinned @supabase/supabase-js (2.111.0) + @supabase/realtime-js (2.111.0) client!
     const realClient = createClient(DEPLOY_URL, ANON_KEY, {
@@ -1997,9 +2013,27 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
         heartbeatIntervalMs: 60_000,
       },
     });
-    vi.spyOn(realClient.auth, 'getSession').mockResolvedValue({
-      data: { session },
+    vi.spyOn(realClient.auth, 'getSession').mockImplementation(async () => ({
+      data: { session: activeSession },
       error: null,
+    }));
+    vi.spyOn(realClient.auth, 'onAuthStateChange').mockImplementation((cb) => {
+      const listener = cb as unknown as (
+        event: 'SIGNED_IN' | 'TOKEN_REFRESHED' | 'SIGNED_OUT',
+        session: typeof sessionA | null,
+      ) => void;
+      authListeners.add(listener);
+      return {
+        data: {
+          subscription: {
+            id: 'test-sub',
+            callback: cb,
+            unsubscribe() {
+              authListeners.delete(listener);
+            },
+          },
+        },
+      };
     });
 
     const realBrowserSession = {
@@ -2007,10 +2041,10 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       client: realClient,
       storageKey: 'sb-c2-real-test',
       async currentSession() {
-        return session;
+        return activeSession;
       },
       async verifiedSession() {
-        return session;
+        return activeSession;
       },
       async boundedAuth<T>(op: Promise<T>) {
         return op;
@@ -2031,7 +2065,163 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
     gate.fenceTracker.setActiveWorkspace(WS_1);
 
-    // --- Witness 1: Held leave + held socket close with immediate return to the SAME workspace ---
+    // Track every generation's dedicated RealtimeClient instance via the pinned prototype.
+    const generationClients: RealtimeClient[] = [];
+    const origProtoChannel = RealtimeClient.prototype.channel;
+    const trackClientSpy = vi
+      .spyOn(RealtimeClient.prototype, 'channel')
+      .mockImplementation(function (
+        this: RealtimeClient,
+        name: string,
+        opts?: Parameters<RealtimeClient['channel']>[1],
+      ) {
+        if (!generationClients.includes(this)) {
+          generationClients.push(this);
+        }
+        return origProtoChannel.call(this, name, opts);
+      });
+
+    // --- Witness 1 & 2: Retire while CONNECTING (replacement login), then open all sockets ---
+    holdSocketOpen = true;
+    let loginARefreshes = 0;
+    const loginAManager = createWorkspaceLiveManager({
+      sessionGate: gate,
+      workspaceId: WS_1,
+      onRefresh: () => {
+        loginARefreshes += 1;
+      },
+    });
+    const unsubPurgeA = gate.onLoginPurge(() => {
+      loginAManager.dispose();
+    });
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+      expect(generationClients).toHaveLength(1);
+    });
+    const rtLoginA = generationClients[0]!;
+    const socketLoginA = sockets[0]!;
+    expect(rtLoginA).not.toBe(realClient.realtime);
+    expect(realClient.getChannels()).toHaveLength(0);
+    expect(socketLoginA.readyState).toBe(MockPhoenixSocket.CONNECTING);
+    expect(socketLoginA.sent).toHaveLength(0);
+    // Confirm generation 1 actually queued its 2 private join frames while CONNECTING!
+    expect(rtLoginA.sendBuffer.length).toBeGreaterThanOrEqual(2);
+
+    // Retire generation 1 via a replacement login (login B) BEFORE socketLoginA opens.
+    activeSession = sessionB;
+    for (const listener of [...authListeners]) {
+      listener('SIGNED_IN', sessionB);
+    }
+    unsubPurgeA();
+
+    // Synchronously on retirement: gen 1's sendBuffer is cleared and its connecting socket closed.
+    expect(rtLoginA.sendBuffer).toHaveLength(0);
+    expect(socketLoginA.readyState).toBe(MockPhoenixSocket.CLOSED);
+
+    await waitFor(() => {
+      expect(gate.state).toEqual({ status: 'authenticated' });
+      expect(gate.userId).toBe(USER_2);
+    });
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+
+    // Generation 2 starts for login B in the same workspace W (socket also starts CONNECTING).
+    let loginBRefreshes = 0;
+    const loginBManager = createWorkspaceLiveManager({
+      sessionGate: gate,
+      workspaceId: WS_1,
+      onRefresh: () => {
+        loginBRefreshes += 1;
+      },
+    });
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(2);
+      expect(generationClients).toHaveLength(2);
+    });
+    const rtLoginB = generationClients[1]!;
+    const socketLoginB = sockets[1]!;
+    expect(rtLoginB).not.toBe(rtLoginA);
+    expect(rtLoginB).not.toBe(realClient.realtime);
+    expect(socketLoginB.readyState).toBe(MockPhoenixSocket.CONNECTING);
+
+    // Now let ALL sockets open.
+    holdSocketOpen = false;
+    for (const s of [...sockets]) {
+      s.open();
+    }
+
+    await waitFor(() => {
+      expect(loginBManager.subscribed).toBe(true);
+    });
+
+    // Assert over EVERY frame sent on EVERY socket so far:
+    // ZERO frames carry generation 1's topic or login A's bearer;
+    // generation 2's joins carry ONLY generation 2's topics and login B's bearer!
+    const allWitness1Frames = sockets.flatMap((s) => s.sent);
+    expect(allWitness1Frames.filter((f) => f.topic.includes(USER_1))).toEqual([]);
+    expect(
+      allWitness1Frames.filter((f) => JSON.stringify(f.payload).includes(tokenA)),
+    ).toEqual([]);
+    const witness1Joins = allWitness1Frames.filter((f) => f.event === 'phx_join');
+    expect(witness1Joins.map((f) => f.topic).sort()).toEqual([
+      `realtime:cswarm-member:${WS_1}:${USER_2}`,
+      `realtime:cswarm-signals:${WS_1}`,
+    ]);
+    for (const f of witness1Joins) {
+      expect(f.payload.access_token).toBe(tokenB);
+    }
+
+    // Witness 2: generation 2 receives its own broadcast hint and triggers its refresh.
+    socketLoginB.deliverFromServer([
+      null,
+      null,
+      `realtime:cswarm-member:${WS_1}:${USER_2}`,
+      'broadcast',
+      { type: 'broadcast', event: 'signal', payload: { v: 1 } },
+    ]);
+    await waitFor(() => {
+      expect(loginBRefreshes).toBe(1);
+    });
+    expect(loginARefreshes).toBe(0);
+
+    // In-generation token refresh: rotating login B's bearer updates rtLoginB in place via fenced acquisition.
+    activeSession = sessionBRefreshed;
+    for (const listener of [...authListeners]) {
+      listener('TOKEN_REFRESHED', sessionBRefreshed);
+    }
+    await waitFor(() => {
+      const authFrames = socketLoginB.sent.filter((f) => f.event === 'access_token');
+      expect(authFrames.length).toBeGreaterThanOrEqual(2);
+      for (const f of authFrames) {
+        expect(f.payload.access_token).toBe(tokenBRefreshed);
+      }
+    });
+    expect(
+      sockets.flatMap((s) => s.sent).filter((f) => JSON.stringify(f.payload).includes(tokenA)),
+    ).toEqual([]);
+
+    // Hint still works after in-generation token refresh.
+    socketLoginB.deliverFromServer([
+      null,
+      null,
+      `realtime:cswarm-member:${WS_1}:${USER_2}`,
+      'broadcast',
+      { type: 'broadcast', event: 'signal', payload: { v: 1 } },
+    ]);
+    await waitFor(() => {
+      expect(loginBRefreshes).toBe(2);
+    });
+
+    loginBManager.dispose();
+    await waitFor(() => {
+      expect(rtLoginB.getChannels()).toHaveLength(0);
+      expect(socketLoginB.readyState).toBe(MockPhoenixSocket.CLOSED);
+    });
+
+    // --- Witness 3: Held leave + held socket close with immediate return to the SAME workspace ---
+    const socketsBeforeW3 = sockets.length;
+    const clientsBeforeW3 = generationClients.length;
     let gen1Refreshes = 0;
     const gen1 = createWorkspaceLiveManager({
       sessionGate: gate,
@@ -2043,17 +2233,16 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
 
     await waitFor(() => {
       expect(gen1.subscribed).toBe(true);
-      expect(realClient.getChannels()).toHaveLength(2);
+      expect(generationClients.length).toBe(clientsBeforeW3 + 1);
+      expect(sockets.length).toBe(socketsBeforeW3 + 1);
     });
-    const oldChannels = [...realClient.getChannels()];
-    const socket1 = sockets[0]!;
+    const rt1 = generationClients[clientsBeforeW3]!;
+    const oldChannels = [...rt1.getChannels()];
+    expect(oldChannels).toHaveLength(2);
+    const socket1 = sockets[socketsBeforeW3]!;
     expect(socket1.readyState).toBe(MockPhoenixSocket.OPEN);
 
-    const channelSpy = vi.spyOn(realClient, 'channel');
-
-    // Hold both channels' unsubscribe() before Phoenix leave() triggers onClose->_remove,
-    // keeping the retiring channels registered in realClient.channels, AND hold socket close
-    // in WebSocket.CLOSING so disconnect() also settles asynchronously.
+    // Hold both channels' unsubscribe() AND hold socket1.close() in WebSocket.CLOSING.
     const leaveGates = oldChannels.map((ch) => {
       const gateDeferred = createDeferred<void>();
       const origUnsubscribe = ch.unsubscribe.bind(ch);
@@ -2067,21 +2256,18 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
 
     gen1.dispose();
 
-    // Retiring channels are STILL registered on the pinned client while unsubscribe is held!
-    expect(realClient.getChannels()).toEqual(oldChannels);
-
     // Callbacks are ALREADY retired synchronously: a broadcast on the retiring socket does nothing.
     socket1.deliverFromServer([
       null,
       null,
-      `realtime:cswarm-member:${WS_1}:${USER_1}`,
+      `realtime:cswarm-member:${WS_1}:${USER_2}`,
       'broadcast',
       { type: 'broadcast', event: 'signal', payload: { v: 1 } },
     ]);
     await Promise.resolve();
     expect(gen1Refreshes).toBe(0);
 
-    // Immediately return to the SAME workspace while gen1's leave is STILL held!
+    // Immediately return to the SAME workspace while gen1's leave & close are STILL held!
     let gen2Refreshes = 0;
     const gen2 = createWorkspaceLiveManager({
       sessionGate: gate,
@@ -2091,65 +2277,56 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       },
     });
 
-    // Give gen2's token acquisition microtasks time to queue behind gen1's teardown.
-    for (let i = 0; i < 6; i += 1) {
-      await Promise.resolve();
-    }
-    // Critical invariant 1: gen2 MUST NOT call channel() or reuse gen1's retiring channels while leave is held!
-    expect(channelSpy).not.toHaveBeenCalled();
-    expect(realClient.getChannels()).toEqual(oldChannels);
-    expect(gen2.subscribed).toBe(false);
+    // Gen2 attaches BRAND NEW channels on its own fresh RealtimeClient & socket immediately!
+    await waitFor(() => {
+      expect(gen2.subscribed).toBe(true);
+      expect(generationClients.length).toBe(clientsBeforeW3 + 2);
+      expect(sockets.length).toBe(socketsBeforeW3 + 2);
+    });
 
-    // Release the held channel unsubscribes while socket1.close() is still in CLOSING.
+    const rt2 = generationClients[clientsBeforeW3 + 1]!;
+    const newChannels = [...rt2.getChannels()];
+    expect(rt2).not.toBe(rt1);
+    expect(newChannels).toHaveLength(2);
+    expect(newChannels[0]).not.toBe(oldChannels[0]);
+    expect(newChannels[1]).not.toBe(oldChannels[1]);
+    const socket2 = sockets[socketsBeforeW3 + 1]!;
+    expect(socket2).not.toBe(socket1);
+    expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
+
+    // Release gen1's held channel unsubscribes while socket1.close() stays in CLOSING.
     for (const d of leaveGates) {
       d.resolve();
     }
     await waitFor(() => {
-      expect(realClient.getChannels()).toHaveLength(0);
+      expect(rt1.getChannels()).toHaveLength(0);
       expect(socket1.sent.filter((f) => f.event === 'phx_leave')).toHaveLength(2);
       expect(socket1.readyState).toBe(MockPhoenixSocket.CLOSING);
     });
-    // Critical invariant 2: even after channels unregister, gen2 MUST STILL wait for gen1's
-    // disconnect() to finish before calling channel() / opening a new socket!
-    expect(channelSpy).not.toHaveBeenCalled();
-    expect(gen2.subscribed).toBe(false);
 
-    // Now complete socket1's close handshake so gen1's removeAllChannels() + disconnect() settles.
+    // Complete socket1's close handshake; gen2's socket and channels remain completely untouched!
     holdSocketClose = false;
     for (const finishClose of heldCloses.splice(0)) {
       finishClose();
     }
-
-    // After old cleanup settles, gen2 attaches BRAND NEW channels on a fresh socket and subscribes cleanly!
     await waitFor(() => {
-      expect(gen2.subscribed).toBe(true);
-      expect(realClient.getChannels()).toHaveLength(2);
+      expect(socket1.readyState).toBe(MockPhoenixSocket.CLOSED);
     });
 
-    const newChannels = [...realClient.getChannels()];
-    expect(newChannels[0]).not.toBe(oldChannels[0]);
-    expect(newChannels[1]).not.toBe(oldChannels[1]);
-    expect(socket1.readyState).toBe(MockPhoenixSocket.CLOSED);
-
-    const socket2 = sockets.at(-1)!;
-    expect(socket2).not.toBe(socket1);
-    expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
-
-    // Stale teardown safety: a retired/idle manager calling teardown/dispose after gen2 owns
-    // the client MUST NOT disconnect gen2 or remove gen2's channels.
+    // Stale teardown safety: calling teardown/dispose again on retired gen1 cannot touch gen2.
     gen1.teardown({ disconnectSocket: true });
     gen1.dispose();
     for (let i = 0; i < 4; i += 1) {
       await Promise.resolve();
     }
-    expect(realClient.getChannels()).toEqual(newChannels);
+    expect(rt2.getChannels()).toEqual(newChannels);
     expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
 
-    // Delivering a real broadcast hint on socket2 wakes gen2 (and NEVER gen1), proving old teardown did not disconnect gen2.
+    // Delivering a real broadcast hint on socket2 wakes gen2 (and NEVER gen1).
     socket2.deliverFromServer([
       null,
       null,
-      `realtime:cswarm-member:${WS_1}:${USER_1}`,
+      `realtime:cswarm-member:${WS_1}:${USER_2}`,
       'broadcast',
       { type: 'broadcast', event: 'signal', payload: { v: 1 } },
     ]);
@@ -2159,26 +2336,48 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     expect(gen1Refreshes).toBe(0);
     expect(socket2.readyState).toBe(MockPhoenixSocket.OPEN);
 
-    // Cleanly dispose gen2 and wait for quiesce before Witness 2.
-    gen2.dispose();
+    // Pagehide while socket2 close is held in CLOSING -> pageshow MUST NOT revive retired rt1 or rt2!
+    const unsubPurgeGen2 = gate.onLoginPurge(() => {
+      gen2.dispose();
+    });
+    holdSocketClose = true;
+    const socketsBeforePageTransition = sockets.length;
+    window.dispatchEvent(new Event('pagehide'));
+    unsubPurgeGen2();
+    holdSocketClose = false;
+    for (const finishClose of heldCloses.splice(0)) {
+      finishClose();
+    }
     await waitFor(() => {
-      expect(realClient.getChannels()).toHaveLength(0);
+      expect(rt2.getChannels()).toHaveLength(0);
       expect(socket2.readyState).toBe(MockPhoenixSocket.CLOSED);
     });
-    channelSpy.mockRestore();
+    window.dispatchEvent(new Event('pageshow'));
+    expect(sockets.length).toBe(socketsBeforePageTransition);
 
-    // --- Witness 2: Second-attach failure (both channel() throw and subscribe() throw) cleans up partial channels immediately before retry ---
-    const origChannel = realClient.channel.bind(realClient);
+    await waitFor(() => expect(gate.state).toEqual({ status: 'authenticated' }));
+    gate.fenceTracker.setActiveWorkspace(WS_1);
+    trackClientSpy.mockRestore();
+
+    // --- Witness 4: Second-attach failure (both channel() throw and subscribe() throw) cleans up partial channels immediately before retry ---
+    const w4Clients: RealtimeClient[] = [];
     let attachAttempt = 0;
     const partialSpy = vi
-      .spyOn(realClient, 'channel')
-      .mockImplementation((name, opts) => {
+      .spyOn(RealtimeClient.prototype, 'channel')
+      .mockImplementation(function (
+        this: RealtimeClient,
+        name: string,
+        opts?: Parameters<RealtimeClient['channel']>[1],
+      ) {
+        if (!w4Clients.includes(this)) {
+          w4Clients.push(this);
+        }
         attachAttempt += 1;
         // Attempt 1 (channel 1 succeeds), attempt 2 (channel 2 throws on channel()).
         if (attachAttempt === 2) {
           throw new Error('simulated_second_channel_create_failure');
         }
-        const ch = origChannel(name, opts);
+        const ch = origProtoChannel.call(this, name, opts);
         // Attempt 3 (retry channel 1 succeeds), attempt 4 (retry channel 2 created, then throws on subscribe()).
         if (attachAttempt === 4) {
           vi.spyOn(ch, 'subscribe').mockImplementationOnce(() => {
@@ -2211,33 +2410,38 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       timers: deterministicTimers,
     });
 
-    // Failure A: channel 1 created, channel 2 channel() throws -> channel 1 MUST be removed immediately (zero leaked channels) and retry scheduled!
+    // Failure A: channel 1 created, channel 2 channel() throws -> channel 1 removed immediately, sendBuffer empty, retry scheduled!
     await waitFor(() => {
       expect(backoffTimeouts).toHaveLength(1);
-      expect(realClient.getChannels()).toHaveLength(0);
+      expect(w4Clients).toHaveLength(1);
+      expect(w4Clients[0]!.getChannels()).toHaveLength(0);
+      expect(w4Clients[0]!.sendBuffer).toHaveLength(0);
     });
     expect(gen3.subscribed).toBe(false);
 
-    // Failure B: retry #1 creates channel 1 & channel 2, then channel 2 subscribe() throws -> BOTH channels MUST be removed immediately!
+    // Failure B: retry #1 creates channel 1 & channel 2, then channel 2 subscribe() throws -> BOTH channels removed immediately, sendBuffer empty!
     backoffTimeouts[0]!();
     await waitFor(() => {
       expect(backoffTimeouts).toHaveLength(2);
-      expect(realClient.getChannels()).toHaveLength(0);
+      expect(w4Clients).toHaveLength(2);
+      expect(w4Clients[1]!.getChannels()).toHaveLength(0);
+      expect(w4Clients[1]!.sendBuffer).toHaveLength(0);
     });
     expect(gen3.subscribed).toBe(false);
 
-    // Retry #2: both channels attach cleanly and deliver hints!
+    // Retry #2: attaches cleanly on a fresh RealtimeClient and delivers hints!
     backoffTimeouts[1]!();
     await waitFor(() => {
       expect(gen3.subscribed).toBe(true);
-      expect(realClient.getChannels()).toHaveLength(2);
+      expect(w4Clients).toHaveLength(3);
+      expect(w4Clients[2]!.getChannels()).toHaveLength(2);
     });
 
     const socket3 = sockets.at(-1)!;
     socket3.deliverFromServer([
       null,
       null,
-      `realtime:cswarm-member:${WS_1}:${USER_1}`,
+      `realtime:cswarm-member:${WS_1}:${USER_2}`,
       'broadcast',
       { type: 'broadcast', event: 'signal', payload: { v: 1 } },
     ]);
@@ -2248,9 +2452,10 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     partialSpy.mockRestore();
     gen3.dispose();
     await waitFor(() => {
-      expect(realClient.getChannels()).toHaveLength(0);
+      expect(w4Clients[2]!.getChannels()).toHaveLength(0);
       expect(socket3.readyState).toBe(MockPhoenixSocket.CLOSED);
     });
+    expect(realClient.getChannels()).toHaveLength(0);
     gate.dispose();
   });
 });

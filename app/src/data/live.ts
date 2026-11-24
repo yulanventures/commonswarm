@@ -1,4 +1,8 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import {
+  RealtimeClient,
+  type RealtimeClientOptions,
+  type SupabaseClient,
+} from '@supabase/supabase-js';
 import {
   FEED_POLL_MS,
   FEED_PUSH_BACKOFF_MS,
@@ -16,6 +20,8 @@ export { FEED_POLL_MS, FEED_PUSH_BACKOFF_MS, FEED_RECONCILE_MS };
 
 export interface RealtimeCapableClient extends FeedPushChannelClient {
   getChannels?(): unknown[];
+  endpointURL?(): string;
+  endPoint?: string;
   realtime?: {
     setAuth(token?: string | null): Promise<void> | void;
     disconnect?(): Promise<unknown> | unknown;
@@ -54,7 +60,11 @@ export function realtimeEndpointMatchesApiOrigin(
       ? client.realtime.endpointURL()
       : typeof client.realtime?.endPoint === 'string'
         ? client.realtime.endPoint
-        : null;
+        : typeof client.endpointURL === 'function'
+          ? client.endpointURL()
+          : typeof client.endPoint === 'string'
+            ? client.endPoint
+            : null;
 
   // Test doubles without an endpointURL are checked at channel/setAuth boundary;
   // any real RealtimeClient exposes endpointURL() / endPoint and MUST match wss://<api-host>.
@@ -85,7 +95,7 @@ export interface WorkspaceLiveManagerOptions {
 }
 
 export interface WorkspaceLiveManager {
-  /** Synchronously stop timers, bump generation, drop channels, and optionally disconnect socket. */
+  /** Synchronously stop timers, bump generation, drop channels, and disconnect this generation's transport. */
   teardown(options?: { disconnectSocket?: boolean }): void;
   /** Permanently dispose listeners and subscriptions. */
   dispose(): void;
@@ -121,240 +131,256 @@ function isDocumentVisible(
   return doc.visibilityState !== 'hidden';
 }
 
+function realtimeEndpointForDeployment(apiUrl: string): string | null {
+  let base: URL;
+  try {
+    const trimmed = apiUrl.trim();
+    base = new URL(trimmed.endsWith('/') ? trimmed : `${trimmed}/`);
+  } catch {
+    return null;
+  }
+  if (base.protocol !== 'https:' || !base.host) {
+    return null;
+  }
+  const realtimeUrl = new URL('realtime/v1', base);
+  realtimeUrl.protocol = 'wss:';
+  return realtimeUrl.href;
+}
+
+type TransportCtor = NonNullable<RealtimeClientOptions['transport']>;
+
+function createClosedStubSocket() {
+  return {
+    readyState: 3, // WebSocket.CLOSED
+    binaryType: 'arraybuffer',
+    bufferedAmount: 0,
+    onopen: null,
+    onclose: null,
+    onerror: null,
+    onmessage: null,
+    send() {},
+    close() {},
+  };
+}
+
+/**
+ * Wrap the underlying WebSocket constructor for one generation's `RealtimeClient`.
+ * While live, delegates directly to `BaseTransport`. Once retired, returns a closed
+ * no-op socket so even Phoenix's own window `pageshow` listener (`socket.js:108-113`)
+ * can never open a new socket for an abandoned generation.
+ */
+function createGenerationTransportCtor(
+  BaseTransport: TransportCtor,
+  isRetired: () => boolean,
+): TransportCtor {
+  return function GenerationWebSocket(
+    address: string | URL,
+    subprotocols?: string | string[],
+  ) {
+    if (isRetired()) {
+      return createClosedStubSocket();
+    }
+    return new BaseTransport(address, subprotocols);
+  } as unknown as TransportCtor;
+}
+
 type OwnedChannel = Parameters<FeedPushChannelClient['removeChannel']>[0] & {
   teardown?(): void;
 };
 
+interface GenerationRealtimeTransport extends FeedPushChannelClient {
+  readonly dedicated: boolean;
+  setAuth(token: string): Promise<void> | void;
+  isConnected(): boolean;
+  clearSendBuffer(): void;
+  removeAllChannels?(): Promise<unknown> | unknown;
+  disconnect?(): Promise<unknown> | unknown;
+}
+
 interface OwnedRealtimeSession {
-  readonly owner: symbol;
-  readonly client: RealtimeCapableClient;
+  readonly generation: number;
+  readonly fence: Fence;
+  readonly transport: GenerationRealtimeTransport;
   readonly channels: Set<OwnedChannel>;
+  lastAccessToken: string;
   retired: boolean;
-  cleaned: boolean;
   cleanupPromise: Promise<void> | null;
 }
 
-/**
- * Single per-client lifecycle coordinator that serializes channel/socket cleanup
- * against successor setup on the same realtime client.
- *
- * In the pinned `@supabase/realtime-js` (2.111.0):
- * - `RealtimeClient.channel(topic)` (RealtimeClient.ts:452-465) returns the EXISTING
- *   channel instance while it is still registered in `this.channels`.
- * - `RealtimeClient.removeAllChannels()` (RealtimeClient.ts:384-394) awaits every
- *   channel's `unsubscribe()` and then unconditionally calls `await this.disconnect()`.
- * - `RealtimeClient.connect()` (RealtimeClient.ts:296-300) returns without connecting
- *   while `this.isDisconnecting()` is true.
- *
- * Serializing teardown and setup through one owner per client prevents a successor from
- * reusing a retiring channel or being disconnected when a predecessor's teardown finishes.
- * Tracking `activeOwner` ensures a stale/already-superseded manager can never call
- * `removeAllChannels()` or `disconnect()` on a successor's socket.
- * When idle, the first task starts synchronously so teardown immediately initiates leave /
- * disconnect (e.g. synchronously inside a `pagehide` handler).
- */
-class RealtimeClientCoordinator {
-  private tail: Promise<void> = Promise.resolve();
-  private inFlight = 0;
-  private activeOwner: symbol | null = null;
-
-  claimOwner(owner: symbol): void {
-    this.activeOwner = owner;
-  }
-
-  isOwner(owner: symbol | null): boolean {
-    return owner !== null && this.activeOwner === owner;
-  }
-
-  releaseOwner(owner: symbol | null): void {
-    if (owner !== null && this.activeOwner === owner) {
-      this.activeOwner = null;
-    }
-  }
-
-  enqueue<T>(task: () => Promise<T> | T): Promise<T> {
-    if (this.inFlight === 0) {
-      this.inFlight += 1;
-      let resultPromise: Promise<T>;
-      try {
-        resultPromise = Promise.resolve(task());
-      } catch (err) {
-        resultPromise = Promise.reject(err);
-      }
-      const done = resultPromise
-        .then(
-          () => undefined,
-          () => undefined,
-        )
-        .finally(() => {
-          this.inFlight -= 1;
-        });
-      this.tail = done;
-      return resultPromise;
-    }
-
-    this.inFlight += 1;
-    const resultPromise = this.tail.then(() => task());
-    const done = resultPromise
-      .then(
-        () => undefined,
-        () => undefined,
-      )
-      .finally(() => {
-        this.inFlight -= 1;
-      });
-    this.tail = done;
-    return resultPromise;
-  }
-}
-
-const clientCoordinators = new WeakMap<object, RealtimeClientCoordinator>();
-
-function coordinatorForClient(
-  client: RealtimeCapableClient,
-): RealtimeClientCoordinator {
-  const key = (client.realtime ?? client) as object;
-  let coordinator = clientCoordinators.get(key);
-  if (!coordinator) {
-    coordinator = new RealtimeClientCoordinator();
-    clientCoordinators.set(key, coordinator);
-  }
-  return coordinator;
-}
-
-function getClientChannels(client: RealtimeCapableClient): unknown[] | null {
-  const rt = client.realtime;
-  if (typeof client.getChannels === 'function') {
-    return client.getChannels();
-  }
-  if (typeof rt?.getChannels === 'function') {
-    return rt.getChannels();
-  }
-  return null;
-}
-
-function isClientKnownIdle(client: RealtimeCapableClient): boolean {
-  const rt = client.realtime;
-  const channels = getClientChannels(client);
-  return (
-    channels !== null &&
-    channels.length === 0 &&
-    typeof rt?.connectionState === 'function' &&
-    rt.connectionState() === 'closed' &&
-    !rt.isConnected?.() &&
-    !rt.isConnecting?.()
-  );
-}
-
-async function removeOwnedChannelsOnly(
-  client: RealtimeCapableClient,
-  coordinator: RealtimeClientCoordinator,
-  owner: symbol | null,
-  uniqueChannels: readonly OwnedChannel[],
+function safeInvoke(
+  fn: (() => Promise<unknown> | unknown) | undefined,
 ): Promise<void> {
-  if (uniqueChannels.length === 0) {
-    return;
+  if (!fn) return Promise.resolve();
+  try {
+    return Promise.resolve(fn()).then(
+      () => undefined,
+      () => undefined,
+    );
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+/**
+ * Create a generation-scoped realtime transport.
+ *
+ * When backed by a real Supabase client (`rawClient.realtime instanceof RealtimeClient`),
+ * every generation constructs a brand-new `RealtimeClient` from the configured deployment
+ * endpoint and public anon key (inheriting the transport constructor, heartbeat interval,
+ * and timeout). No `accessToken` storage callback is passed; auth is set exclusively via
+ * `setAuth(token)` from the fenced `SessionGate.acquireAccessToken()`.
+ *
+ * For non-SDK unit test doubles (`fake-session.ts`), adapts the provided mock client.
+ */
+function createGenerationTransport(
+  rawClient: RealtimeCapableClient,
+  apiUrl: string,
+  anonKey: string,
+  isRetired: () => boolean,
+): GenerationRealtimeTransport {
+  if (rawClient.realtime instanceof RealtimeClient) {
+    const realtimeEndpoint = realtimeEndpointForDeployment(apiUrl);
+    if (!realtimeEndpoint) {
+      throw new Error('live_realtime_origin_mismatch');
+    }
+    const baseRealtime = rawClient.realtime;
+    const rtClient = new RealtimeClient(realtimeEndpoint, {
+      params: { apikey: anonKey },
+      transport: createGenerationTransportCtor(baseRealtime.transport, isRetired),
+      heartbeatIntervalMs: baseRealtime.heartbeatIntervalMs,
+      timeout: baseRealtime.timeout,
+    });
+    if (
+      !realtimeEndpointMatchesApiOrigin(
+        rtClient as unknown as RealtimeCapableClient,
+        apiUrl,
+      )
+    ) {
+      void safeInvoke(() => rtClient.disconnect());
+      throw new Error('live_realtime_origin_mismatch');
+    }
+    return {
+      dedicated: true,
+      channel(name, opts) {
+        return rtClient.channel(name, opts);
+      },
+      removeChannel(ch) {
+        return rtClient.removeChannel(
+          ch as Parameters<RealtimeClient['removeChannel']>[0],
+        );
+      },
+      removeAllChannels() {
+        return rtClient.removeAllChannels();
+      },
+      disconnect() {
+        return rtClient.disconnect();
+      },
+      setAuth(token) {
+        return rtClient.setAuth(token);
+      },
+      isConnected() {
+        return rtClient.isConnected();
+      },
+      clearSendBuffer() {
+        if (Array.isArray(rtClient.sendBuffer)) {
+          rtClient.sendBuffer.length = 0;
+        }
+      },
+    };
   }
 
-  await Promise.allSettled(
-    uniqueChannels.map((ch) => {
-      try {
-        return Promise.resolve(client.removeChannel(ch));
-      } catch {
-        return Promise.resolve();
-      }
-    }),
-  );
+  // Test double adapter (unit/C1 tests without a real RealtimeClient).
+  return {
+    dedicated: false,
+    channel(name, opts) {
+      return rawClient.channel(name, opts);
+    },
+    removeChannel(ch) {
+      return rawClient.removeChannel(ch);
+    },
+    setAuth(token) {
+      return rawClient.realtime?.setAuth(token);
+    },
+    isConnected() {
+      return Boolean(rawClient.realtime?.isConnected?.());
+    },
+    clearSendBuffer() {},
+  };
+}
 
-  // In pinned `RealtimeClient.removeChannel` (RealtimeClient.ts:369-377), non-'ok'
-  // unsubscribe skips `channel.teardown()`. Ensure none of our owned channels stay
-  // registered to poison a subsequent `channel(topic)` call.
-  const remaining = getClientChannels(client);
-  if (remaining && uniqueChannels.some((ch) => remaining.includes(ch))) {
-    for (const ch of uniqueChannels) {
-      if (remaining.includes(ch)) {
+/**
+ * Synchronously retire callbacks and abandon a generation's dedicated transport.
+ *
+ * Because each generation owns its own `RealtimeClient`, a retired generation's socket,
+ * channels, and `sendBuffer` can never be touched or flushed by a successor:
+ * - While not yet connected (`CONNECTING`), synchronously clears `sendBuffer`, disconnects
+ *   immediately (closing the connecting socket so `onopen` can never fire), tears down all
+ *   channels, and clears `sendBuffer` again so any `phx_leave` queued by `leave()` is also
+ *   discarded before any microtask runs.
+ * - While already connected (`OPEN`), calls `removeAllChannels()` (which sends `phx_leave`,
+ *   tears down channels, and calls `disconnect()`), then wipes `sendBuffer` and drops refs.
+ */
+function retireAndCleanupSession(session: OwnedRealtimeSession): Promise<void> {
+  session.retired = true;
+  session.transport.clearSendBuffer();
+
+  if (session.cleanupPromise) {
+    return session.cleanupPromise;
+  }
+
+  const ownedChannels = [...session.channels];
+  const { transport } = session;
+
+  if (transport.dedicated) {
+    if (!transport.isConnected()) {
+      const disconnectPromise = safeInvoke(() => transport.disconnect?.());
+      const removePromise = safeInvoke(() => transport.removeAllChannels?.());
+      for (const ch of ownedChannels) {
         try {
           ch.teardown?.();
         } catch {
           // Ignore teardown errors.
         }
       }
+      // `channel.leave()` pushes `phx_leave` onto `sendBuffer` synchronously when disconnected.
+      transport.clearSendBuffer();
+
+      session.cleanupPromise = Promise.allSettled([
+        disconnectPromise,
+        removePromise,
+      ]).then(() => {
+        transport.clearSendBuffer();
+        session.channels.clear();
+        // Advance `connectClock` once closed so Phoenix's `pageshow` listener cannot revive it.
+        return safeInvoke(() => transport.disconnect?.());
+      });
+      return session.cleanupPromise;
     }
-    const stillRegistered = getClientChannels(client);
-    if (
-      coordinator.isOwner(owner) &&
-      stillRegistered &&
-      uniqueChannels.some((ch) => stillRegistered.includes(ch))
-    ) {
-      coordinator.releaseOwner(owner);
-      const rt = client.realtime;
-      try {
-        if (typeof client.removeAllChannels === 'function') {
-          await Promise.resolve(client.removeAllChannels());
-        } else if (typeof rt?.removeAllChannels === 'function') {
-          await Promise.resolve(rt.removeAllChannels());
+
+    const removePromise = safeInvoke(() => transport.removeAllChannels?.());
+    session.cleanupPromise = removePromise.then(() => {
+      transport.clearSendBuffer();
+      for (const ch of ownedChannels) {
+        try {
+          ch.teardown?.();
+        } catch {
+          // Ignore teardown errors.
         }
-      } catch {
-        // Isolate cleanup errors.
       }
-    }
-  }
-}
-
-async function cleanupClientRealtime(
-  client: RealtimeCapableClient,
-  coordinator: RealtimeClientCoordinator,
-  owner: symbol | null,
-  channels: Iterable<OwnedChannel>,
-  disconnectSocket: boolean,
-): Promise<void> {
-  const uniqueChannels = [...new Set(channels)];
-  const rt = client.realtime;
-  const ownsClient = coordinator.isOwner(owner);
-
-  if (disconnectSocket) {
-    if (!ownsClient) {
-      // A successor already owns this client/socket: NEVER call removeAllChannels() or
-      // disconnect(). Only clean up any channels still belonging to this retired session.
-      await removeOwnedChannelsOnly(client, coordinator, owner, uniqueChannels);
-      return;
-    }
-
-    coordinator.releaseOwner(owner);
-
-    if (uniqueChannels.length === 0 && isClientKnownIdle(client)) {
-      return;
-    }
-    try {
-      if (typeof client.removeAllChannels === 'function') {
-        await Promise.resolve(client.removeAllChannels());
-        return;
-      }
-      if (typeof rt?.removeAllChannels === 'function') {
-        await Promise.resolve(rt.removeAllChannels());
-        return;
-      }
-      if (uniqueChannels.length > 0) {
-        await Promise.allSettled(
-          uniqueChannels.map((ch) => {
-            try {
-              return Promise.resolve(client.removeChannel(ch));
-            } catch {
-              return Promise.resolve();
-            }
-          }),
-        );
-      }
-      if (typeof rt?.disconnect === 'function') {
-        await Promise.resolve(rt.disconnect());
-      }
-    } catch {
-      // Isolate teardown errors so queued successor setup can proceed.
-    }
-    return;
+      session.channels.clear();
+      return safeInvoke(() => transport.disconnect?.());
+    });
+    return session.cleanupPromise;
   }
 
-  await removeOwnedChannelsOnly(client, coordinator, owner, uniqueChannels);
+  // Test double: remove only channels created by this generation.
+  const removals = ownedChannels.map((ch) =>
+    safeInvoke(() => transport.removeChannel(ch)),
+  );
+  session.cleanupPromise = Promise.allSettled(removals).then(() => {
+    session.channels.clear();
+  });
+  return session.cleanupPromise;
 }
 
 /**
@@ -363,16 +389,19 @@ async function cleanupClientRealtime(
  *
  * Security & lifecycle invariants:
  * - Subscribes ONLY while authenticated, not hidden by `pagehide`, and tab visible.
- * - Uses the session's own Supabase client after confirming its Realtime endpoint
- *   matches the configured HTTPS API origin over `wss:`.
+ * - Constructs a fresh `RealtimeClient` per generation from the configured HTTPS API
+ *   origin (`wss://<api-host>/realtime/v1`) and public key, authenticated exclusively
+ *   with the bearer returned by `sessionGate.acquireAccessToken()` (never from storage).
  * - Broadcast messages are hints ONLY (zero payload content is read); they trigger
  *   fenced, coalesced refreshes (one in flight, at most one queued).
  * - Falls back to `FEED_POLL_MS` (2s) polling and `FEED_PUSH_BACKOFF_MS` resubscribe
  *   backoff whenever either topic is not `SUBSCRIBED`; reconciles at `FEED_RECONCILE_MS` (30s).
- * - Synchronous callback retirement and single-owner serialized cleanup on login change,
- *   workspace change, access loss, gate closure, `pagehide`, tab hide, partial attach,
- *   or dispose; any late hint for a retired generation is discarded with zero reads, and
- *   no successor reuses a retiring channel or gets disconnected by an old teardown.
+ * - Synchronous callback retirement and transport abandonment on login change, workspace
+ *   change, access loss, gate closure, `pagehide`, tab hide, partial attach, or dispose:
+ *   queued outbound frames on a retiring generation can never be flushed by a successor,
+ *   and an old teardown can never touch a successor's transport.
+ * - In-generation same-login token refreshes update the active generation's client bearer
+ *   through the fenced `sessionGate.acquireAccessToken()` path.
  */
 export function createWorkspaceLiveManager(
   options: WorkspaceLiveManagerOptions,
@@ -390,9 +419,8 @@ export function createWorkspaceLiveManager(
   let disposed = false;
   let activeGeneration = 0;
   let activeSession: OwnedRealtimeSession | null = null;
-  let activeOwner: symbol | null = null;
-  let activeClient: RealtimeCapableClient | null = null;
   let activeFence: Fence | null = null;
+  let tokenRefreshSeq = 0;
 
   const isEligibleToRun = (fence: Fence | null): boolean => {
     if (disposed) return false;
@@ -407,45 +435,39 @@ export function createWorkspaceLiveManager(
     });
   };
 
-  const scheduleSessionCleanup = (
-    client: RealtimeCapableClient | null,
-    session: OwnedRealtimeSession | null,
-    owner: symbol | null,
-    disconnectSocket: boolean,
-  ): Promise<void> => {
-    if (session) {
-      session.retired = true;
-      const coordinator = coordinatorForClient(session.client);
-      if (session.cleaned) {
-        if (!disconnectSocket) {
-          return session.cleanupPromise ?? Promise.resolve();
-        }
-        return coordinator.enqueue(() =>
-          cleanupClientRealtime(session.client, coordinator, session.owner, [], true),
-        );
-      }
-      session.cleaned = true;
-      const cleanup = coordinator.enqueue(() =>
-        cleanupClientRealtime(
-          session.client,
-          coordinator,
-          session.owner,
-          session.channels,
-          disconnectSocket,
-        ),
-      );
-      session.cleanupPromise = cleanup;
-      return cleanup;
+  const refreshActiveSessionAuth = async (): Promise<void> => {
+    const session = activeSession;
+    if (disposed || !session || session.retired) return;
+    if (!isEligibleToRun(session.fence)) return;
+    if (session.generation !== activeGeneration) return;
+
+    const auth = await sessionGate.acquireAccessToken();
+    if (
+      disposed ||
+      !auth ||
+      session.retired ||
+      activeSession !== session ||
+      session.generation !== activeGeneration ||
+      sessionGate.isHidden ||
+      !isDocumentVisible(doc) ||
+      !sessionGate.fenceTracker.isCurrent(session.fence, {
+        loginIdentity: auth.identity,
+        requireActiveWorkspace: true,
+        requireActiveConversation: false,
+      })
+    ) {
+      return;
     }
 
-    if (disconnectSocket && client && owner) {
-      const coordinator = coordinatorForClient(client);
-      return coordinator.enqueue(() =>
-        cleanupClientRealtime(client, coordinator, owner, [], true),
-      );
+    if (auth.accessToken === session.lastAccessToken) {
+      return;
     }
-
-    return Promise.resolve();
+    session.lastAccessToken = auth.accessToken;
+    try {
+      await session.transport.setAuth(auth.accessToken);
+    } catch {
+      // Ignore transient setAuth errors on a live or retiring transport.
+    }
   };
 
   const controller = new FeedPushController({
@@ -469,7 +491,7 @@ export function createWorkspaceLiveManager(
         throw new Error('live_realtime_origin_mismatch');
       }
 
-      // Fence check before acquiring token.
+      const refreshSeqAtAcquire = tokenRefreshSeq;
       const auth = await sessionGate.acquireAccessToken();
 
       const isCapturedStillCurrent = (): boolean =>
@@ -484,130 +506,118 @@ export function createWorkspaceLiveManager(
           requireActiveConversation: false,
         });
 
-      // Fence check after acquiring token, before entering the client coordinator.
       if (!isCapturedStillCurrent() || !auth) {
         throw new Error('live_fence_retired_after_token');
       }
 
-      const coordinator = coordinatorForClient(rawClient);
+      let retiredFlag = false;
+      const generationTransport = createGenerationTransport(
+        rawClient,
+        auth.url,
+        auth.anonKey,
+        () => retiredFlag || disposed || capturedGen !== activeGeneration,
+      );
 
-      return await coordinator.enqueue(async () => {
-        if (!isCapturedStillCurrent()) {
-          throw new Error('live_fence_retired_before_setup');
+      const session: OwnedRealtimeSession = {
+        generation: capturedGen,
+        fence: capturedFence,
+        transport: generationTransport,
+        channels: new Set<OwnedChannel>(),
+        lastAccessToken: auth.accessToken,
+        get retired() {
+          return retiredFlag;
+        },
+        set retired(value: boolean) {
+          retiredFlag = value;
+        },
+        cleanupPromise: null,
+      };
+      activeSession = session;
+
+      try {
+        await generationTransport.setAuth(auth.accessToken);
+      } catch (authError) {
+        if (activeSession === session) {
+          activeSession = null;
         }
+        await retireAndCleanupSession(session);
+        throw authError;
+      }
 
-        if (typeof rawClient.realtime?.setAuth === 'function') {
-          await rawClient.realtime.setAuth(auth.accessToken);
+      if (session.retired || !isCapturedStillCurrent()) {
+        if (activeSession === session) {
+          activeSession = null;
         }
+        await retireAndCleanupSession(session);
+        throw new Error('live_fence_retired_after_set_auth');
+      }
 
-        // Fence check again immediately after setAuth, before attaching channels.
-        if (!isCapturedStillCurrent()) {
-          throw new Error('live_fence_retired_after_set_auth');
-        }
+      // Own every channel from creation so partial second-attach failures clean up immediately.
+      const trackingClient: FeedPushChannelClient = {
+        channel(name, opts) {
+          if (session.retired || !isCapturedStillCurrent()) {
+            throw new Error('live_fence_retired_during_attach');
+          }
+          const ch = generationTransport.channel(name, opts) as OwnedChannel;
+          session.channels.add(ch);
+          return ch;
+        },
+        removeChannel() {
+          // Cleanup is owned by `retireAndCleanupSession`, never by duplicate channel calls.
+          return Promise.resolve();
+        },
+      };
 
-        // Own the session and every channel from the moment each channel is created.
-        const owner = Symbol('workspace-live-owner');
-        const session: OwnedRealtimeSession = {
-          owner,
-          client: rawClient,
-          channels: new Set<OwnedChannel>(),
-          retired: false,
-          cleaned: false,
-          cleanupPromise: null,
-        };
-        coordinator.claimOwner(owner);
-        activeSession = session;
-        activeOwner = owner;
-        activeClient = rawClient;
-
-        const trackingClient: FeedPushChannelClient = {
-          channel(name, opts) {
+      try {
+        attachFeedChannels(
+          trackingClient,
+          wsId,
+          auth.identity.userId,
+          () => {
+            // Hint only: zero payload read; strictly fenced to captured generation & login.
             if (session.retired || !isCapturedStillCurrent()) {
-              throw new Error('live_fence_retired_during_attach');
+              return;
             }
-            const ch = rawClient.channel(name, opts) as OwnedChannel;
-            session.channels.add(ch);
-            return ch;
+            onEvent();
           },
-          removeChannel() {
-            // Cleanup is owned exclusively by the coordinator, never by duplicate channel-level calls.
-            return Promise.resolve();
+          (status) => {
+            if (session.retired || !isCapturedStillCurrent()) {
+              return;
+            }
+            onStatus(status);
           },
-        };
+        );
+      } catch (attachError) {
+        if (activeSession === session) {
+          activeSession = null;
+        }
+        await retireAndCleanupSession(session);
+        throw attachError;
+      }
 
-        try {
-          attachFeedChannels(
-            trackingClient,
-            wsId,
-            auth.identity.userId,
-            () => {
-              // Hint only: zero payload read; strictly fenced to captured generation & login.
-              if (session.retired || !isCapturedStillCurrent()) {
-                return;
-              }
-              onEvent();
-            },
-            (status) => {
-              if (session.retired || !isCapturedStillCurrent()) {
-                return;
-              }
-              onStatus(status);
-            },
-          );
-        } catch (attachError) {
-          // Clean up any already-created channels immediately within this serialized turn
-          // so a partial attach (e.g. failure of the second attach) cannot outlive a retry.
-          session.retired = true;
+      // Re-verify synchronously in case teardown ran re-entrantly during subscribe().
+      if (session.retired || !isCapturedStillCurrent()) {
+        if (activeSession === session) {
+          activeSession = null;
+        }
+        await retireAndCleanupSession(session);
+        throw new Error('live_fence_retired_during_attach');
+      }
+
+      if (tokenRefreshSeq !== refreshSeqAtAcquire) {
+        void refreshActiveSessionAuth();
+      }
+
+      const wrappedSub: FeedPushSubscription = {
+        unsubscribe() {
           if (activeSession === session) {
             activeSession = null;
           }
-          if (!session.cleaned) {
-            session.cleaned = true;
-            const cleanup = cleanupClientRealtime(
-              rawClient,
-              coordinator,
-              session.owner,
-              session.channels,
-              false,
-            );
-            session.cleanupPromise = cleanup;
-            await cleanup;
-          }
-          throw attachError;
-        }
+          return retireAndCleanupSession(session);
+        },
+      };
 
-        // Re-verify synchronously in case teardown ran re-entrantly during subscribe().
-        if (session.retired || !isCapturedStillCurrent()) {
-          session.retired = true;
-          if (activeSession === session) {
-            activeSession = null;
-          }
-          if (!session.cleaned) {
-            session.cleaned = true;
-            const cleanup = cleanupClientRealtime(
-              rawClient,
-              coordinator,
-              session.owner,
-              session.channels,
-              false,
-            );
-            session.cleanupPromise = cleanup;
-            await cleanup;
-          }
-          throw new Error('live_fence_retired_during_attach');
-        }
-
-        const wrappedSub: FeedPushSubscription = {
-          unsubscribe() {
-            if (activeSession === session) {
-              activeSession = null;
-            }
-            return scheduleSessionCleanup(rawClient, session, session.owner, false);
-          },
-        };
-
-        return wrappedSub;
-      });
+      return wrappedSub;
     },
     refresh: async () => {
       const capturedGen = activeGeneration;
@@ -618,26 +628,16 @@ export function createWorkspaceLiveManager(
     },
   });
 
-  const teardown = (opts: { disconnectSocket?: boolean } = {}): void => {
-    const disconnectSocket = Boolean(opts.disconnectSocket);
+  const teardown = (): void => {
     activeGeneration += 1;
     activeFence = null;
     const sessionToDrop = activeSession;
-    const ownerToDrop = sessionToDrop?.owner ?? activeOwner;
-    const clientToDrop = sessionToDrop?.client ?? activeClient;
     activeSession = null;
-    if (disconnectSocket) {
-      activeOwner = null;
-      activeClient = null;
-    }
 
     controller.stop();
-    void scheduleSessionCleanup(
-      clientToDrop,
-      sessionToDrop,
-      ownerToDrop,
-      disconnectSocket,
-    ).catch(() => undefined);
+    if (sessionToDrop) {
+      void retireAndCleanupSession(sessionToDrop).catch(() => undefined);
+    }
   };
 
   const startIfEligible = (): void => {
@@ -678,11 +678,16 @@ export function createWorkspaceLiveManager(
   const onVisibilityChange = (): void => {
     if (disposed) return;
     if (!isDocumentVisible(doc) || sessionGate.isHidden) {
-      teardown({ disconnectSocket: true });
+      teardown();
       return;
     }
     startIfEligible();
   };
+
+  const unsubscribeTokenRefresh = sessionGate.onTokenRefresh?.(() => {
+    tokenRefreshSeq += 1;
+    void refreshActiveSessionAuth();
+  });
 
   doc?.addEventListener('visibilitychange', onVisibilityChange);
   startIfEligible();
@@ -692,8 +697,9 @@ export function createWorkspaceLiveManager(
     dispose() {
       if (disposed) return;
       disposed = true;
+      unsubscribeTokenRefresh?.();
       doc?.removeEventListener('visibilitychange', onVisibilityChange);
-      teardown({ disconnectSocket: true });
+      teardown();
     },
     get subscribed() {
       return controller.subscribed;
