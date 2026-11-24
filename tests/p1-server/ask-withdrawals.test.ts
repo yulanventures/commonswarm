@@ -420,6 +420,22 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
 
     // 3. Addressee1 dismisses multiAskId -> my_open_asks for AgentA is byte-identical (modulo generated_at)
     //    before and after dismissal, and never mentions dismissals.
+    // The edge writes a person's profile name on their first command, which changes the name the
+    // sender's list shows. Let addressee1 act once before the baseline (dismiss, then restore, which
+    // leaves the ask open) so the two reads below differ only by the dismissal.
+    const warmDismiss = await sendCommand(addressee1.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: multiAskId,
+    });
+    assert.equal(warmDismiss.status, 200, respDiag("warmDismiss", warmDismiss));
+    const warmRestore = await sendCommand(addressee1.jwt, wsId, {
+      kind: "restore_waiting_item",
+      item_kind: "ask",
+      item_id: multiAskId,
+    });
+    assert.equal(warmRestore.status, 200, respDiag("warmRestore", warmRestore));
+
     const openForABefore = await sendRead(agentAToken, { resource: "my_open_asks", workspace_id: wsId });
     assert.equal(openForABefore.status, 200, respDiag("openForABefore", openForABefore));
 
@@ -443,7 +459,15 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
     const asksA = openForA.body.asks as Array<Row>;
     assert.equal(asksA.length, 1, respDiag("openForA", openForA));
     assert.equal(asksA[0]!.signal_id, multiAskId, respDiag("openForA", openForA));
-    assert.deepEqual(asksA[0]!.addressees, ["AddrOne", "AddrTwo"], respDiag("openForA", openForA));
+    const addresseeNames = await sql<{ display_name: string }[]>`
+      SELECT display_name FROM swarm.users
+      WHERE user_id IN (${addressee1.id}::uuid, ${addressee2.id}::uuid)
+    `;
+    assert.deepEqual(
+      [...(asksA[0]!.addressees as string[])].sort(),
+      addresseeNames.map((row) => row.display_name).sort(),
+      respDiag("openForA", openForA),
+    );
     assert.deepEqual(
       Object.keys(asksA[0]!).sort(),
       ["addressees", "body_preview", "created_at", "signal_id", "until", "where"],
