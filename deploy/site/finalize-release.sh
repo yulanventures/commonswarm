@@ -8,8 +8,9 @@ exec >> "$B/hostrun.log" 2>&1
 assert() { label=$1; shift; "$@" || { printf 'FAIL step=%s assertion=%s\n' "$STEP" "$label"; return 1; }; }
 hash() { sha256sum "$1" | cut -d' ' -f1; }
 flip() { ln -s "$1" "$S/current.@@RELEASE@@" && mv -Tf "$S/current.@@RELEASE@@" "$S/current"; }
-probe() { curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A CommonSwarmReleaseCheck/1.0 -H 'Cache-Control: no-cache' -D "$B/probe.headers" -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$1"; }
+probe() { : > "$B/probe.headers"; curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A CommonSwarmReleaseCheck/1.0 -H 'Cache-Control: no-cache' -D "$B/probe.headers" -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$1"; }
 has_header() { tr -d '\r' < "$B/probe.headers" | grep -Eiq "$1"; }
+has_next_csp() { python3 "$B/refresh-site.py" --check-next-csp "$B/probe.headers"; }
 rollback() {
   STEP=rollback; local old old_target unchanged=''; old=$(cat "$B/old.link") || return 1
   case $old in /*) assert old-directory test -d "$old";; *) assert old-directory test -d "$S/$old";; esac || return 1
@@ -39,7 +40,7 @@ if [[ '@@INCLUDE_NEXT@@' == 1 ]]; then
   for next_route in /next /next/ /next/index.html; do
     STEP=preflip-next-ingress; status=$(probe "$next_route"); printf 'CHECK step=%s path=%s http=%s\n' "$STEP" "$next_route" "$status"
     assert preflip-next-status test "$status" = 404 -o "$status" = 200
-    assert preflip-next-csp has_header "^content-security-policy:.*frame-ancestors[[:space:]]+'none'"
+    assert preflip-next-csp has_next_csp
   done
 fi
 STEP=preflip; assert exact-old-link test "$(readlink "$S/current")" = "$(cat "$B/old.link")"; FLIPPED=1
@@ -52,14 +53,14 @@ done
 if [[ '@@INCLUDE_NEXT@@' == 1 ]]; then
   STEP=http-next; status=$(probe /next); printf 'CHECK step=%s http=%s\n' "$STEP" "$status"
   assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = '@@NEXT_SHA@@'
-  assert next-csp has_header "^content-security-policy:.*frame-ancestors[[:space:]]+'none'"
+  assert next-csp has_next_csp
   assert next-nosniff has_header '^x-content-type-options:[[:space:]]*nosniff[[:space:]]*$'
   assert next-referrer has_header '^referrer-policy:[[:space:]]*no-referrer[[:space:]]*$'
   assert next-cache has_header '^cache-control:[[:space:]]*no-cache[[:space:]]*$'
   for asset in @@NEXT_ASSETS@@; do
     STEP=http-next-asset; status=$(probe "$asset"); printf 'CHECK step=%s path=%s http=%s\n' "$STEP" "$asset" "$status"
     assert httpstatus test "$status" = 200; assert next-asset-hash test "$(hash "$B/probe.html")" = "$(hash "$N$asset")"
-    assert next-asset-csp has_header "^content-security-policy:.*frame-ancestors[[:space:]]+'none'"
+    assert next-asset-csp has_next_csp
   done
 fi
 STEP=verify; assert current-is-new test "$(readlink -f "$S/current")" = "$N"; FLIPPED=0; printf 'PASS deploy revision=@@REVISION@@ H0=@@H0@@ NEXT=@@INCLUDE_NEXT@@\n'

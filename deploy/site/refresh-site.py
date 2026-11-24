@@ -86,8 +86,51 @@ def prepare(live, target):
         raise ValueError('HTML freshness clock invalid')
 
 
+EXPECTED_NEXT_CSP = b"frame-ancestors 'none'"
+
+
+def check_next_csp(headers_path):
+    """Require a single exact Content-Security-Policy header on the final HTTP response block."""
+    raw = Path(headers_path).read_bytes()
+    lines = [line[:-1] if line.endswith(b'\r') else line for line in raw.split(b'\n')]
+    status_indices = [
+        idx for idx, line in enumerate(lines)
+        if line.startswith(b'HTTP/') and len(line) > 5 and 48 <= line[5] <= 57
+    ]
+    if not status_indices:
+        return 'invalid-http-headers'
+    final_lines = lines[status_indices[-1] + 1:]
+    csp_values = []
+    last_header = None
+    for line in final_lines:
+        if line == b'':
+            break
+        if line[:1] in (b' ', b'\t'):
+            if last_header == b'content-security-policy':
+                return 'invalid-http-headers'
+            continue
+        name, sep, value = line.partition(b':')
+        if not sep or not name:
+            return 'invalid-http-headers'
+        last_header = name.lower()
+        if last_header == b'content-security-policy':
+            csp_values.append(value)
+    if len(csp_values) == 0:
+        return 'missing-csp'
+    if len(csp_values) > 1:
+        return 'multiple-csp'
+    if csp_values[0].strip(b' \t') != EXPECTED_NEXT_CSP:
+        return 'csp-mismatch'
+    return None
+
+
 if __name__ == '__main__':
     try:
-        prepare(*sys.argv[1:])
+        if len(sys.argv) == 3 and sys.argv[1] == '--check-next-csp':
+            reason = check_next_csp(sys.argv[2])
+            if reason is not None:
+                sys.exit(reason)
+        else:
+            prepare(*sys.argv[1:])
     except Exception as error:
         sys.exit('Refusing site refresh: ' + str(error))

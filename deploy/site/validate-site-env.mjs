@@ -46,10 +46,17 @@ function members(bytes) {
   }
   throw Error('tar terminator missing');
 }
-function parseAttrs(raw) {
+function parseAttrs(raw, tag = '', rejectDuplicates = false) {
   const attrs = new Map();
-  for (const a of raw.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
-    attrs.set(a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? '');
+  const pattern = rejectDuplicates
+    ? /([^\t\n\f\r =/>]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r "'=<>`]+)))?/g
+    : /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  for (const a of raw.matchAll(pattern)) {
+    const name = a[1].toLowerCase();
+    if (rejectDuplicates) {
+      check(!attrs.has(name), `next/index.html <${tag}> contains duplicate attribute: ${name}`);
+    }
+    attrs.set(name, a[2] ?? a[3] ?? a[4] ?? '');
   }
   return attrs;
 }
@@ -59,16 +66,18 @@ function validateNextHtml(html, entries, publicConfig) {
   const heads = [...noComments.matchAll(/<head\b[^>]*>([\s\S]*?)<\/head\s*>/gi)];
   check(heads.length === 1, 'next/index.html requires a single <head>');
   const headInner = heads[0][1].replace(/<(script|style|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, m => m.slice(0, m.indexOf('>') + 1));
-  const headTags = [...headInner.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)].map(m => ({
-    tag: m[1].toLowerCase(),
-    attrs: parseAttrs(m[2]),
-  }));
+  const headTags = [...headInner.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)].map(m => {
+    const tag = m[1].toLowerCase();
+    return { tag, attrs: parseAttrs(m[2], tag, true) };
+  });
   check(headTags.length >= 2, 'next/index.html <head> missing charset or Content-Security-Policy');
   check(headTags[0].tag === 'meta' && headTags[0].attrs.has('charset') && headTags[0].attrs.get('charset').trim().length > 0,
     'next/index.html <head> must start with <meta charset>');
   check(headTags[1].tag === 'meta' && headTags[1].attrs.get('http-equiv')?.toLowerCase() === 'content-security-policy',
     'next/index.html Content-Security-Policy meta must be the first element in <head> after charset');
-  const csp = (headTags[1].attrs.get('content') ?? '').trim();
+  const rawCsp = headTags[1].attrs.get('content') ?? '';
+  check(rawCsp.length > 0, 'next/index.html CSP content must not be empty');
+  check(!/[^\x20-\x7e]/.test(rawCsp), 'next/index.html CSP contains non-ASCII or control character');
   const apiOrigin = new URL(publicConfig.PUBLIC_SUPABASE_URL);
   // Keep in sync with PRODUCTION_CSP in app/vite.config.ts (enforced by tests/p1-cli/site-artifact.test.ts).
   const expectedCspDirectives = new Map([
@@ -83,16 +92,21 @@ function validateNextHtml(html, entries, publicConfig) {
     ['form-action', "'none'"],
     ['frame-src', "'none'"],
   ]);
-  check(!/unsafe-inline|unsafe-eval/i.test(csp), 'next/index.html CSP must not allow unsafe-inline or unsafe-eval');
+  check(!/unsafe-inline|unsafe-eval/i.test(rawCsp), 'next/index.html CSP must not allow unsafe-inline or unsafe-eval');
+  // Parse per CSP3 "parse a serialized CSP" using ASCII whitespace only.
+  const stripAsciiWs = s => s.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
   const directives = new Map();
-  for (const rawDirective of csp.split(';')) {
-    const trimmed = rawDirective.trim();
-    if (!trimmed) continue;
-    const [rawName, ...rest] = trimmed.split(/\s+/);
+  for (const rawDirective of rawCsp.split(';')) {
+    const token = stripAsciiWs(rawDirective);
+    if (!token) continue;
+    const wsIndex = token.search(/[\t\n\f\r ]/);
+    const rawName = wsIndex === -1 ? token : token.slice(0, wsIndex);
+    const rawValue = wsIndex === -1 ? '' : stripAsciiWs(token.slice(wsIndex));
     const name = rawName.toLowerCase();
     check(!directives.has(name), `next/index.html CSP contains duplicate directive: ${name}`);
     check(expectedCspDirectives.has(name), `next/index.html CSP contains unexpected directive: ${name}`);
-    directives.set(name, rest.join(' '));
+    const value = rawValue ? rawValue.split(/[\t\n\f\r ]+/).join(' ') : '';
+    directives.set(name, value);
   }
   for (const [name, expected] of expectedCspDirectives) {
     check(directives.has(name), `next/index.html CSP missing required directive: ${name}`);
@@ -123,7 +137,7 @@ function validateNextHtml(html, entries, publicConfig) {
   };
   for (const m of docMarkup.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)) {
     const tag = m[1].toLowerCase();
-    const attrs = parseAttrs(m[2]);
+    const attrs = parseAttrs(m[2], tag, true);
     if (tag === 'meta') {
       const httpEquiv = attrs.get('http-equiv')?.toLowerCase();
       if (httpEquiv === 'content-security-policy') cspCount += 1;

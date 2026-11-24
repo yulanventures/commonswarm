@@ -75,15 +75,4 @@ describe('Runtime configuration reader', () => {
     setConfigMeta('not-a-url', 'anon-public-key');
     expect(readRuntimeConfig().status).toBe('invalid');
   });
-
-  it('vite build config places CSP with frame-src none immediately after charset', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { resolve } = await import('node:path');
-    const viteConfig = readFileSync(
-      resolve(process.cwd(), 'vite.config.ts'),
-      'utf8',
-    );
-    expect(viteConfig).toContain("frame-src 'none'");
-    expect(viteConfig).toContain('charsetTag');
-  });
 });

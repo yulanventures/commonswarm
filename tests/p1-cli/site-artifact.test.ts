@@ -52,10 +52,14 @@ function tarMember(name: string, data = Buffer.alloc(0), type = '0', link = '') 
 const tarEnd = Buffer.alloc(1024);
 const sourcePaths = ['site/package-lock.json', 'app/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh', 'deploy/site/refresh-site.py'];
 const nextCsp = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://api.commonswarm.com wss://api.commonswarm.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'";
-function syntheticNextHtml(overrides?: { url?: string; anonKey?: string; csp?: string | null; cspAfterTitle?: boolean; extraHead?: string }) {
+function syntheticNextHtml(overrides?: { url?: string; anonKey?: string; csp?: string | null; rawCspMeta?: string; cspAfterTitle?: boolean; extraHead?: string }) {
   const url = overrides?.url ?? config.PUBLIC_SUPABASE_URL;
   const anonKey = overrides?.anonKey ?? config.PUBLIC_SUPABASE_ANON_KEY;
-  const cspMeta = overrides?.csp === null ? '' : `<meta http-equiv="Content-Security-Policy" content="${overrides?.csp ?? nextCsp}" />`;
+  const cspMeta = overrides?.rawCspMeta !== undefined
+    ? overrides.rawCspMeta
+    : overrides?.csp === null
+      ? ''
+      : `<meta http-equiv="Content-Security-Policy" content="${overrides?.csp ?? nextCsp}" />`;
   const head = overrides?.cspAfterTitle
     ? `<meta charset="UTF-8" /><title>CommonSwarm</title>${cspMeta}`
     : `<meta charset="UTF-8" />${cspMeta}<title>CommonSwarm</title>`;
@@ -262,7 +266,9 @@ test(`${lane}: /next preview defaults off with pre-PR receipt, rejects invalid v
   const viteCspMatch = viteConfigSource.match(/const\s+PRODUCTION_CSP\s*=\s*\n?\s*"([^"]+)"/);
   assert.ok(viteCspMatch, 'app/vite.config.ts must declare PRODUCTION_CSP as a static string');
   const viteCsp = viteCspMatch[1]!;
-  assert.match(viteConfigSource, /<meta http-equiv="Content-Security-Policy" content="\$\{PRODUCTION_CSP\}" \/>/);
+  assert.match(viteCsp, /\bframe-src\s+'none'/);
+  assert.match(viteConfigSource, /const\s+charsetTag\s*=\s*\/\(<meta\\s\+charset=/);
+  assert.match(viteConfigSource, /out\.replace\(\s*charsetTag,\s*`\$1\\n\s*<meta http-equiv="Content-Security-Policy" content="\$\{PRODUCTION_CSP\}" \/>`/);
   assert.equal(viteCsp, nextCsp, 'test fixture nextCsp must match app/vite.config.ts PRODUCTION_CSP');
 
   const receiptCases: Array<{ name: string; siteTar: Buffer; env?: Record<string, string>; expectError?: RegExp }> = [
@@ -278,6 +284,14 @@ test(`${lane}: /next preview defaults off with pre-PR receipt, rejects invalid v
     { name: 'next-service-role', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ anonKey: token('service_role') }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /service_role/ },
     { name: 'next-csp-missing', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: null }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /Content-Security-Policy meta must be the first element/ },
     { name: 'next-csp-not-first', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ cspAfterTitle: true }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /Content-Security-Policy meta must be the first element/ },
+    { name: 'next-csp-duplicate-content-attr', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ rawCspMeta: `<meta http-equiv="Content-Security-Policy" content="default-src *" content="${viteCsp}" />` }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /<meta> contains duplicate attribute: content/ },
+    { name: 'next-csp-duplicate-content-attr-case', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ rawCspMeta: `<meta http-equiv="Content-Security-Policy" Content="default-src *" content="${viteCsp}" />` }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /<meta> contains duplicate attribute: content/ },
+    { name: 'next-csp-duplicate-http-equiv-attr', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ rawCspMeta: `<meta http-equiv="X-Other" http-equiv="Content-Security-Policy" content="${viteCsp}" />` }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /<meta> contains duplicate attribute: http-equiv/ },
+    { name: 'next-csp-duplicate-http-equiv-reversed', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ rawCspMeta: `<meta http-equiv="Content-Security-Policy" http-equiv="X-Other" content="${viteCsp}" />` }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /<meta> contains duplicate attribute: http-equiv/ },
+    { name: 'next-csp-nbsp-attr-separator', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ rawCspMeta: `<meta http-equiv="Content-Security-Policy" content="default-src *"\u00a0content="${viteCsp}" />` }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP directive default-src mismatch/ },
+    { name: 'next-csp-non-ascii-nbsp', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: viteCsp.replace("script-src 'self'", "script-src\u00a0'self'") }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP contains non-ASCII or control character/ },
+    { name: 'next-csp-non-ascii-em-space', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: viteCsp.replace("frame-src 'none'", "frame-src\u2003'none'") }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP contains non-ASCII or control character/ },
+    { name: 'next-csp-control-char', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: viteCsp.replace("script-src 'self'", "script-src\t'self'") }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP contains non-ASCII or control character/ },
     { name: 'next-csp-missing-frame-src', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: viteCsp.replace("; frame-src 'none'", '') }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP missing required directive: frame-src/ },
     { name: 'next-csp-missing-object-src', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: viteCsp.replace("; object-src 'none'", '') }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP missing required directive: object-src/ },
     { name: 'next-csp-relaxed-script-src', siteTar: syntheticSite({ includeNext: true, nextHtml: syntheticNextHtml({ csp: viteCsp.replace("script-src 'self'", "script-src 'self' https://example.com") }) }), env: { COMMONSWARM_INCLUDE_NEXT: '1' }, expectError: /CSP directive script-src mismatch/ },
@@ -323,47 +337,84 @@ test(`${lane}: /next preview defaults off with pre-PR receipt, rejects invalid v
   }
 });
 
-test('probe-next-ingress.sh requires frame-ancestors none on /next, /next/, and /next/index.html', async () => {
+test('probe-next-ingress.sh and finalize-release.sh share one exact effective CSP check matching Caddy', async () => {
   const probeScript = join(repo, 'deploy/site/probe-next-ingress.sh');
-  let mode: 'ok-404' | 'ok-200' | 'missing-root' | 'missing-slash' | 'missing-index' | 'wrong-csp' | 'bad-status' = 'ok-404';
+  const caddySource = await readFile(join(repo, 'deploy/site/commonswarm-site.caddy'), 'utf8');
+  const refreshSource = await readFile(join(repo, 'deploy/site/refresh-site.py'), 'utf8');
+  const probeSource = await readFile(probeScript, 'utf8');
+  const finalizeSource = await readFile(join(repo, 'deploy/site/finalize-release.sh'), 'utf8');
+  const caddyNextCsp = caddySource.match(/@next path \/next \/next\/\*\n\s*header @next \{\n\s*Content-Security-Policy "([^"]+)"/);
+  assert.ok(caddyNextCsp, 'commonswarm-site.caddy @next block must declare Content-Security-Policy');
+  const refreshNextCsp = refreshSource.match(/EXPECTED_NEXT_CSP\s*=\s*b"([^"]+)"/);
+  assert.ok(refreshNextCsp, 'refresh-site.py must declare EXPECTED_NEXT_CSP');
+  assert.equal(refreshNextCsp[1], caddyNextCsp[1], 'refresh-site.py EXPECTED_NEXT_CSP must match commonswarm-site.caddy');
+  assert.match(probeSource, /refresh-site\.py" --check-next-csp/);
+  assert.match(finalizeSource, /refresh-site\.py" --check-next-csp/);
+  assert.doesNotMatch(probeSource, /grep .*frame-ancestors/);
+  assert.doesNotMatch(finalizeSource, /grep .*frame-ancestors/);
+
+  let statusMode: 200 | 404 | 302 | 503 = 404;
+  let targetPath: string | null = null;
+  let overrideCsp: string[] | null = null;
   const requested: string[] = [];
   const server = createServer((req, res) => {
     const urlPath = req.url ?? '/';
     requested.push(urlPath);
-    const status = mode === 'ok-200' ? 200 : mode === 'bad-status' ? 503 : 404;
-    const omit =
-      (mode === 'missing-root' && urlPath === '/next') ||
-      (mode === 'missing-slash' && urlPath === '/next/') ||
-      (mode === 'missing-index' && urlPath === '/next/index.html');
-    const headers: Record<string, string> = { 'content-type': 'text/html; charset=utf-8' };
-    if (!omit) {
-      headers['content-security-policy'] = mode === 'wrong-csp' ? "default-src 'self'" : "frame-ancestors 'none'";
-    }
-    res.writeHead(status, headers);
-    res.end(status === 200 ? '<!doctype html><title>next</title>' : '<!doctype html><title>Page not found</title>');
+    const cspValues = targetPath === null || targetPath === urlPath
+      ? (overrideCsp ?? ["frame-ancestors 'none'"])
+      : ["frame-ancestors 'none'"];
+    const headers: Record<string, string | string[]> = { 'content-type': 'text/html; charset=utf-8' };
+    if (statusMode === 302) headers.location = '/next/';
+    if (cspValues.length === 1) headers['content-security-policy'] = cspValues[0]!;
+    else if (cspValues.length > 1) headers['content-security-policy'] = cspValues;
+    res.writeHead(statusMode, headers);
+    res.end(statusMode === 200 ? '<!doctype html><title>next</title>' : '<!doctype html><title>Page not found</title>');
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const address = server.address();
   assert.ok(address && typeof address === 'object');
   const baseUrl = `http://127.0.0.1:${address.port}`;
   try {
-    for (const passingMode of ['ok-404', 'ok-200'] as const) {
-      mode = passingMode;
+    for (const [status, csp] of [
+      [404, ["frame-ancestors 'none'"]],
+      [200, ["frame-ancestors 'none'"]],
+      [404, ["  frame-ancestors 'none' \t"]],
+    ] as const) {
+      statusMode = status;
+      targetPath = null;
+      overrideCsp = [...csp];
       requested.length = 0;
       const out = await exec('bash', [probeScript, baseUrl]);
       assert.match(out.stdout, /PASS probe-next-ingress/);
       assert.deepEqual(requested, ['/next', '/next/', '/next/index.html']);
     }
-    for (const [failingMode, expectedErr] of [
-      ['missing-root', /FAIL path=\/next .*missing-frame-ancestors-none/],
-      ['missing-slash', /FAIL path=\/next\/ .*missing-frame-ancestors-none/],
-      ['missing-index', /FAIL path=\/next\/index\.html .*missing-frame-ancestors-none/],
-      ['wrong-csp', /missing-frame-ancestors-none/],
-      ['bad-status', /unexpected-status/],
-    ] as const) {
-      mode = failingMode;
+    const failingPolicies: Array<{ name: string; csp: string[]; reason: RegExp }> = [
+      { name: 'missing', csp: [], reason: /reason=missing-csp/ },
+      { name: 'duplicate-directive', csp: ["frame-ancestors https://example.com; frame-ancestors 'none'"], reason: /reason=csp-mismatch/ },
+      { name: 'two-headers-conflicting', csp: ['frame-ancestors https://example.com', "frame-ancestors 'none'"], reason: /reason=multiple-csp/ },
+      { name: 'two-headers-identical', csp: ["frame-ancestors 'none'", "frame-ancestors 'none'"], reason: /reason=multiple-csp/ },
+      { name: 'longer-policy', csp: ["default-src 'self'; frame-ancestors 'none'"], reason: /reason=csp-mismatch/ },
+      { name: 'wrong-csp', csp: ["default-src 'self'"], reason: /reason=csp-mismatch/ },
+    ];
+    statusMode = 404;
+    for (const row of failingPolicies) {
+      for (const path of ['/next', '/next/', '/next/index.html']) {
+        targetPath = path;
+        overrideCsp = row.csp;
+        await assert.rejects(exec('bash', [probeScript, baseUrl]), (error: unknown) => {
+          const stderr = (error as { stderr: string }).stderr;
+          assert.match(stderr, new RegExp(`FAIL path=${path.replace(/\./g, '\\.')} status=404 `), `${row.name} on ${path}`);
+          assert.match(stderr, row.reason, `${row.name} on ${path}`);
+          return true;
+        });
+      }
+    }
+    for (const badStatus of [302, 503] as const) {
+      statusMode = badStatus;
+      targetPath = null;
+      overrideCsp = ["frame-ancestors 'none'"];
       await assert.rejects(exec('bash', [probeScript, baseUrl]), (error: unknown) => {
-        assert.match((error as { stderr: string }).stderr, expectedErr);
+        assert.match((error as { stderr: string }).stderr, /unexpected-status/);
         return true;
       });
     }
@@ -375,10 +426,12 @@ test('probe-next-ingress.sh requires frame-ancestors none on /next, /next/, and 
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
   const nextVariants = new Set([
-    'next-success', 'next-status', 'next-body', 'next-header', 'next-asset-status',
+    'next-success', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive',
+    'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status',
     'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index',
+    'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy',
   ]);
-  for (const variant of ['success', 'next-success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-body', 'next-header', 'next-asset-status', 'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
+  for (const variant of ['success', 'next-success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status', 'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index', 'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
     const useNext = nextVariants.has(variant);
     const packet = await prepare(`run-${variant}`, undefined, useNext ? await artifactDirWithNext() : undefined);
     const site = join(root, `site-${variant}`), old = join(site, 'releases/old');
@@ -408,15 +461,33 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       if (isNew && variant === 'app-body' && urlPath === '/app') { res.end('wrong HTML'); return; }
       if (isNew && variant === 'next-body' && urlPath === '/next') { res.end('wrong HTML'); return; }
       const route = urlPath === '/app' ? 'app/index.html' : (urlPath === '/next' || urlPath === '/next/') ? 'next/index.html' : urlPath === '/' ? 'index.html' : urlPath.replace(/^\//, '');
-      const omitPreflipCsp = !isNew && (
-        (variant === 'next-preflip-missing-root' && urlPath === '/next') ||
-        (variant === 'next-preflip-missing-slash' && urlPath === '/next/') ||
-        (variant === 'next-preflip-missing-index' && urlPath === '/next/index.html')
-      );
-      const omitPostflipCsp = isNew && variant === 'next-header';
-      const nextHeaders: Record<string, string> = useNext && (urlPath === '/next' || urlPath.startsWith('/next/'))
+      const nextCspOverride = (): string[] | undefined => {
+        if (!isNew) {
+          if (
+            (variant === 'next-preflip-missing-root' && urlPath === '/next') ||
+            (variant === 'next-preflip-missing-slash' && urlPath === '/next/') ||
+            (variant === 'next-preflip-missing-index' && urlPath === '/next/index.html')
+          ) return [];
+          if (variant === 'next-preflip-duplicate-directive' && urlPath === '/next/') return ["frame-ancestors https://example.com; frame-ancestors 'none'"];
+          if (variant === 'next-preflip-two-headers' && urlPath === '/next/index.html') return ['frame-ancestors https://example.com', "frame-ancestors 'none'"];
+          if (variant === 'next-preflip-longer-policy' && urlPath === '/next') return ["default-src 'self'; frame-ancestors 'none'"];
+        } else {
+          if (variant === 'next-header') return [];
+          if (variant === 'next-header-duplicate-directive') return ["frame-ancestors https://example.com; frame-ancestors 'none'"];
+          if (variant === 'next-header-two-headers') return ['frame-ancestors https://example.com', "frame-ancestors 'none'"];
+          if (variant === 'next-header-longer-policy') return ["default-src 'self'; frame-ancestors 'none'"];
+        }
+        return undefined;
+      };
+      const cspOverride = nextCspOverride();
+      const cspHeader = cspOverride === undefined
+        ? { 'content-security-policy': "frame-ancestors 'none'" }
+        : cspOverride.length === 0
+          ? {}
+          : { 'content-security-policy': cspOverride.length === 1 ? cspOverride[0]! : cspOverride };
+      const nextHeaders: Record<string, string | string[]> = useNext && (urlPath === '/next' || urlPath.startsWith('/next/'))
         ? {
-            ...(omitPreflipCsp || omitPostflipCsp ? {} : { 'content-security-policy': "frame-ancestors 'none'" }),
+            ...cspHeader,
             'x-content-type-options': 'nosniff',
             'referrer-policy': 'no-referrer',
             ...(isNew && urlPath === '/next' ? { 'cache-control': 'no-cache' } : {}),
@@ -501,13 +572,13 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         const output = await readFile(join(packet, 'hostrun.log'), 'utf8');
         if (['root-status', 'app-status', 'next-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
         if (['root-body', 'app-body', 'next-body'].includes(variant)) assert.match(output, /assertion=httphash/);
-        if (variant === 'next-header') assert.match(output, /assertion=next-csp/);
-        if (variant.startsWith('next-preflip-missing-')) {
+        if (variant === 'next-header' || variant.startsWith('next-header-')) assert.match(output, /assertion=next-csp/);
+        if (variant.startsWith('next-preflip-')) {
           assert.match(output, /assertion=preflip-next-csp/);
           assert.doesNotMatch(output, /PASS rollback/);
           assert.equal(newProbes.size, 0, 'pre-flip ingress failure must refuse before switching');
         }
-        if (['root-status', 'app-status', 'next-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-header', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
+        if (['root-status', 'app-status', 'next-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
         if (variant === 'asset-drift') assert.match(output, /Refusing site refresh: asset byte collision/);
         if (variant === 'current-drift') assert.match(output, /assertion=exact-old-link/);
         if (variant === 'artifact-pin') assert.match(output, /assertion=artifactSHA/);
@@ -518,7 +589,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
       if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
-      if (['next-success', 'next-status', 'next-body', 'next-header', 'next-asset-status'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app', '/next', '/next/', '/next/index.html']);
+      if (['next-success', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app', '/next', '/next/', '/next/index.html']);
       assert.equal((await stat(join(packet, 'hostrun.log'))).mode & 0o777, 0o600);
       assert.ok((await readdir(join(site, 'releases'))).includes('reserve'));
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');
