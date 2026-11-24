@@ -260,6 +260,7 @@ import {
   ASK_WITHDRAWAL_NOT_FOUND_BODY,
   askWithdrawalReplayFields,
   isAskWithdrawalCommandKind,
+  loadAskReplacementPlacement,
   parseAskWithdrawalCommand,
   reauthorizeAskWithdrawalRelease,
   storedAskWithdrawalReplayTarget,
@@ -13696,17 +13697,11 @@ async function signalBatchChannelIdsForAuthorizedRefs(
   ];
   if (validIds.length === 0) return undefined;
   const rows = await tx<{ channel_id: string }[]>`
-    SELECT DISTINCT coalesce(c.channel_id, s.channel_id) AS channel_id
-    FROM swarm.signals AS s
-    LEFT JOIN swarm.conversation_signals AS cs
-      ON cs.workspace_id = s.workspace_id
-     AND cs.signal_id = s.id
-    LEFT JOIN swarm.conversations AS c
-      ON c.workspace_id = s.workspace_id
-     AND c.conversation_id = cs.conversation_id
-    WHERE s.workspace_id = ${workspaceId}::uuid
-      AND s.id = ANY(${validIds}::uuid[])
-      AND coalesce(c.channel_id, s.channel_id) IS NOT NULL
+    SELECT DISTINCT channel_id
+    FROM swarm.signals
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND id = ANY(${validIds}::uuid[])
+      AND channel_id IS NOT NULL
   `;
   return rows.length > 0 ? rows.map((row) => row.channel_id) : undefined;
 }
@@ -14676,58 +14671,18 @@ async function reauthorizeAskReplacementDestination(
       };
     }
   }
-  const [placed] = await tx<{
-    conversation_id: string | null;
-    conv_kind: string | null;
-    conv_archived_at: Date | null;
-    eff_channel_id: string | null;
-    eff_channel_slug: string | null;
-    eff_channel_archived_at: Date | null;
-    placement_ok: boolean;
-  }[]>`
-    SELECT
-      c.conversation_id,
-      c.kind AS conv_kind,
-      c.archived_at AS conv_archived_at,
-      coalesce(c.channel_id, s.channel_id) AS eff_channel_id,
-      ch.slug AS eff_channel_slug,
-      ch.archived_at AS eff_channel_archived_at,
-      swarm.ask_sender_can_access_placement(
-        s.workspace_id,
-        s.id,
-        ${actor.kind},
-        ${actor.id}::uuid
-      ) AS placement_ok
-    FROM swarm.signals AS s
-    LEFT JOIN swarm.conversation_signals AS cs
-      ON cs.workspace_id = s.workspace_id
-     AND cs.signal_id = s.id
-    LEFT JOIN swarm.conversations AS c
-      ON c.workspace_id = s.workspace_id
-     AND c.conversation_id = cs.conversation_id
-    LEFT JOIN swarm.channels AS ch
-      ON ch.workspace_id = s.workspace_id
-     AND ch.channel_id = coalesce(c.channel_id, s.channel_id)
-    WHERE s.workspace_id = ${route.workspaceId}::uuid
-      AND s.id = ${opts.newSignalId}::uuid
-      AND s.kind = 'ask'
-    LIMIT 1
-  `;
+  const placed = await loadAskReplacementPlacement(
+    tx,
+    route.workspaceId,
+    actor.kind,
+    actor.id,
+    opts.newSignalId,
+  );
   if (placed === undefined) {
     return { status: 404, body: { ...ASK_WITHDRAWAL_NOT_FOUND_BODY } };
   }
-  if (placed.conversation_id !== null && (placed.conv_kind === "dm" || placed.conv_kind === "group_dm")) {
-    const directRefusal = await reauthorizedConversationReplay(
-      tx,
-      route.workspaceId,
-      actor,
-      placed.conversation_id,
-      false,
-    );
-    if (directRefusal !== null) return directRefusal;
-  }
-  if (placed.eff_channel_id !== null) {
-    const canCh = await actorCanAccessChannel(tx, route.workspaceId, placed.eff_channel_id, actor.kind, actor.id);
+  if (placed.channel_id !== null) {
+    const canCh = await actorCanAccessChannel(tx, route.workspaceId, placed.channel_id, actor.kind, actor.id);
     if (!canCh) {
       if (opts.suppliedConversationId !== undefined) {
         return {
@@ -14735,7 +14690,7 @@ async function reauthorizeAskReplacementDestination(
           body: { error: "conversation_not_found", message: "There is no conversation with that id in this workspace." },
         };
       }
-      const slug = opts.suppliedChannel ?? placed.eff_channel_slug ?? placed.eff_channel_id;
+      const slug = opts.suppliedChannel ?? placed.channel_slug ?? placed.channel_id;
       return {
         status: 404,
         body: {
@@ -14744,8 +14699,8 @@ async function reauthorizeAskReplacementDestination(
         },
       };
     }
-    if (placed.eff_channel_archived_at !== null || placed.conv_archived_at !== null) {
-      const slug = opts.suppliedChannel ?? placed.eff_channel_slug ?? "That channel";
+    if (placed.channel_archived_at !== null) {
+      const slug = opts.suppliedChannel ?? placed.channel_slug ?? "That channel";
       return {
         status: 409,
         body: {

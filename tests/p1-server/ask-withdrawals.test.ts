@@ -79,6 +79,9 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn> | undefined;
 let functionLogs = "";
+const EDGE_LOG_RING_LIMIT = 80;
+const edgeLogRing: string[] = [];
+let edgeLogPartial = "";
 let envDir: string | undefined;
 const activeConnections = new Set<postgres.Sql>();
 
@@ -101,10 +104,45 @@ function openBoundedConnection(applicationName: string, forLockHolder = false): 
   return conn;
 }
 
+const UUID_TOKEN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IDENTIFIER_TOKEN_RE = /^[a-z][a-z0-9_-]*$/;
+
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\b(Bearer|DPoP)\s+\S+/gi, "$1 ***")
+    .replace(/\bswm_[A-Za-z0-9_-]+/g, "***")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "***")
+    .replace(/\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g, "***")
+    .replace(
+      /\b(authorization|apikey|api[_-]?key|service_role_key|anon_key|access_token|refresh_token|token|secret|password)(\s*[:=]\s*["']?)[^\s"',}]+/gi,
+      "$1$2***",
+    )
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, (match) =>
+      UUID_TOKEN_RE.test(match) || IDENTIFIER_TOKEN_RE.test(match) ? match : "***",
+    );
+}
+
+function appendEdgeLogChunk(text: string): void {
+  const combined = edgeLogPartial + text;
+  const parts = combined.split(/\r?\n/);
+  edgeLogPartial = parts.pop() ?? "";
+  for (const line of parts) {
+    if (line.length === 0) continue;
+    edgeLogRing.push(line);
+  }
+  if (edgeLogRing.length > EDGE_LOG_RING_LIMIT) {
+    edgeLogRing.splice(0, edgeLogRing.length - EDGE_LOG_RING_LIMIT);
+  }
+}
+
+function recentRedactedEdgeLogs(): string[] {
+  const lines = edgeLogPartial.length > 0 ? [...edgeLogRing, edgeLogPartial] : [...edgeLogRing];
+  return lines.slice(-EDGE_LOG_RING_LIMIT).map(redactSensitiveText);
+}
+
 function redactQueryPrefix(query: string | null): string {
   if (!query) return "";
-  return query
-    .replace(/\b(?:swm_agt_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
+  return redactSensitiveText(query)
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
@@ -415,7 +453,14 @@ function localEnvironment(): Local {
 }
 
 function respDiag(label: string, resp: { status: number; body: Row }): string {
-  return `${label}: status=${resp.status} body=${JSON.stringify(resp.body)}`;
+  const base = `${label}: status=${resp.status} body=${JSON.stringify(resp.body)}`;
+  if (resp.status >= 500) {
+    const recent = recentRedactedEdgeLogs();
+    return `${base}\n--- edge output (last ${recent.length} lines, redacted) ---\n${
+      recent.length > 0 ? recent.join("\n") : "(no edge output captured)"
+    }`;
+  }
+  return base;
 }
 
 function postedSignalId(label: string, resp: { status: number; body: Row }): string {
@@ -676,9 +721,13 @@ before(async () => {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const cliState = observeFunctionCli(functionProcess);
+  edgeLogRing.length = 0;
+  edgeLogPartial = "";
   let startupSeen = false;
   const observe = (chunk: Buffer) => {
-    functionLogs = (functionLogs + chunk.toString("utf8")).slice(-30_000);
+    const text = chunk.toString("utf8");
+    functionLogs = (functionLogs + text).slice(-30_000);
+    appendEdgeLogChunk(text);
     startupSeen ||= functionLogs.includes("Serving functions on");
   };
   functionProcess.stdout?.on("data", observe);

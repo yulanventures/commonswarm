@@ -202,6 +202,57 @@ export async function reauthorizeAskWithdrawalRelease(
   };
 }
 
+export interface AskReplacementPlacementRow {
+  channel_id: string | null;
+  channel_slug: string | null;
+  channel_archived_at: Date | null;
+  placement_ok: boolean;
+}
+
+/**
+ * Load a replacement ask's channel metadata and placement authorization using only tables readable by
+ * `swarm_command` (`swarm.signals`, `swarm.channels`) plus the SECURITY DEFINER predicate
+ * `swarm.ask_sender_can_access_placement` (which inspects `swarm.conversation_signals` and
+ * `swarm.conversations` as `swarm_admin`, preserving `swarm_command`'s zero direct SELECT on
+ * conversation tables).
+ */
+export async function loadAskReplacementPlacement(
+  tx: Sql,
+  workspaceId: string,
+  actorKind: "user" | "agent",
+  actorId: string,
+  newSignalId: string,
+): Promise<AskReplacementPlacementRow | undefined> {
+  if (
+    !UUID_RE.test(workspaceId) ||
+    !UUID_RE.test(actorId) ||
+    !UUID_RE.test(newSignalId)
+  ) {
+    return undefined;
+  }
+  const [placed] = await tx<AskReplacementPlacementRow[]>`
+    SELECT
+      s.channel_id,
+      ch.slug AS channel_slug,
+      ch.archived_at AS channel_archived_at,
+      swarm.ask_sender_can_access_placement(
+        s.workspace_id,
+        s.id,
+        ${actorKind},
+        ${actorId}::uuid
+      ) AS placement_ok
+    FROM swarm.signals AS s
+    LEFT JOIN swarm.channels AS ch
+      ON ch.workspace_id = s.workspace_id
+     AND ch.channel_id = s.channel_id
+    WHERE s.workspace_id = ${workspaceId}::uuid
+      AND s.id = ${newSignalId}::uuid
+      AND s.kind = 'ask'
+    LIMIT 1
+  `;
+  return placed;
+}
+
 export interface AskWithdrawalReplayTarget {
   kind: "withdraw_ask" | "replacement";
   oldSignalId: string;

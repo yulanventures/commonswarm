@@ -15,6 +15,7 @@ import {
   ASK_WITHDRAWAL_NOT_FOUND_BODY,
   askWithdrawalReplayFields,
   isAskWithdrawalCommandKind,
+  loadAskReplacementPlacement,
   parseAskWithdrawalCommand,
   reauthorizeAskWithdrawalRelease,
   storedAskWithdrawalReplayTarget,
@@ -194,6 +195,55 @@ test("reauthorizeAskWithdrawalRelease forwards explicit fresh vs replay deadline
   const invalid = await reauthorizeAskWithdrawalRelease(fakeTx, WS_ID, "agent", AGENT_ID, "not-a-uuid", null, true);
   assert.deepEqual(invalid, { status: 404, body: ASK_WITHDRAWAL_NOT_FOUND_BODY });
   assert.equal(calls.length, beforeInvalid);
+});
+
+const COMMAND_ROLE_RESTRICTED_TABLE_RE =
+  /\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM)\s+swarm\.(?:conversations|conversation_signals|conversation_members|conversation_reads|ask_withdrawals)\b/i;
+
+test("loadAskReplacementPlacement respects swarm_command table boundary and fails closed on invalid ids", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const row = {
+    channel_id: null,
+    channel_slug: null,
+    channel_archived_at: null,
+    placement_ok: true,
+  };
+  const fakeTx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join("?");
+    if (COMMAND_ROLE_RESTRICTED_TABLE_RE.test(sql)) {
+      const err = new Error("permission denied for table conversation_signals") as Error & { code?: string };
+      err.code = "42501";
+      return Promise.reject(err);
+    }
+    calls.push({ sql, values });
+    return Promise.resolve([row]);
+  }) as unknown as Parameters<typeof loadAskReplacementPlacement>[0];
+
+  const placed = await loadAskReplacementPlacement(fakeTx, WS_ID, "agent", AGENT_ID, NEW_ASK_ID);
+  assert.deepEqual(placed, row);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /swarm\.ask_sender_can_access_placement/);
+  assert.doesNotMatch(calls[0]!.sql, COMMAND_ROLE_RESTRICTED_TABLE_RE);
+  assert.equal(calls[0]!.values.some((v) => v === undefined), false);
+  assert.deepEqual(calls[0]!.values, ["agent", AGENT_ID, WS_ID, NEW_ASK_ID]);
+
+  const beforeInvalid = calls.length;
+  assert.equal(await loadAskReplacementPlacement(fakeTx, WS_ID, "agent", AGENT_ID, "not-a-uuid"), undefined);
+  assert.equal(calls.length, beforeInvalid);
+});
+
+test("command edge never directly queries swarm_command-restricted conversation or withdrawal tables", () => {
+  for (const rel of [
+    "../supabase/functions/command/index.ts",
+    "../supabase/functions/command/ask-withdrawals.ts",
+  ]) {
+    const source = readFileSync(new URL(rel, import.meta.url), "utf8");
+    assert.doesNotMatch(
+      source,
+      COMMAND_ROLE_RESTRICTED_TABLE_RE,
+      `${rel} must not directly query conversation or ask_withdrawals tables under swarm_command`,
+    );
+  }
 });
 
 test("local and hosted MCP tool tables expose withdraw, asks_open, and ask.supersedes with strict validation", () => {
