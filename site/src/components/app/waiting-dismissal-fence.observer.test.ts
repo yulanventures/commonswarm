@@ -76,6 +76,10 @@ function installWaitingDismissalFenceFixture() {
 
   const isQueueReadCase = scenario.startsWith("queue-read-");
   const isArchivedCase = scenario.startsWith("archived-restore-") || scenario === "control-archived-restore";
+  type HeldResponse = { status: number; body: Record<string, unknown> } | undefined;
+  const heldDismisses: Array<{ itemId: string; resolve: (outcome?: HeldResponse) => void }> = [];
+  const heldRestores: Array<{ itemId: string; resolve: (outcome?: HeldResponse) => void }> = [];
+  const heldChoices: Array<{ signalId: string; resolve: (outcome?: HeldResponse) => void }> = [];
 
   const f = w.fenceFixture = {
     scenario,
@@ -99,6 +103,7 @@ function installWaitingDismissalFenceFixture() {
     genQuestion: "General authorized question?",
     genQuestion2: "Second general authorized question?",
     dismissedIds: isArchivedCase ? [dmAskId, genAskId, genAsk2Id] : [] as string[],
+    answeredChoiceIds: [] as string[],
     dropGroupSM: false,
     dropSecretChannel: false,
     history404GroupSM: false,
@@ -114,17 +119,46 @@ function installWaitingDismissalFenceFixture() {
     logoutCalls: 0,
     failDismiss401Once: false,
     failRestore401Once: false,
+    holdNextDismissCommand: false,
+    holdNextRestoreCommand: false,
+    holdNextChoiceCommand: false,
+    heldDismisses,
+    heldRestores,
+    heldChoices,
     dismissCommands: [] as Array<{ command_id: string; item_id: string; bearer: string }>,
     restoreCommands: [] as Array<{ command_id: string; item_id: string; bearer: string }>,
+    choiceCommands: [] as Array<{ command_id: string; signal_id: string; bearer: string }>,
     holdNextQueue: false,
     queueHeld: false,
     queueReads: 0,
     queueReadsAfterPrivLoss: 0,
     queueReadsAfterDmLoss: 0,
     refreshedBearer: (n: number, sessionId = login1SessionId) => `Bearer ${makeJwt(owner, sessionId, `refreshed-${n}`)}`,
+    bearerHasSession: (bearer: string, sessionId: string) => {
+      const token = bearer.replace(/^Bearer\s+/i, "");
+      const payload = token.split(".")[1] ?? "";
+      try {
+        const parsed = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as { session_id?: unknown };
+        return parsed.session_id === sessionId;
+      } catch {
+        return false;
+      }
+    },
     releaseTokenHold: () => { releaseTokenHold?.(); releaseTokenHold = null; },
     releaseQueueHold: () => { releaseQueueHold?.(); releaseQueueHold = null; },
     releaseHistory404Hold: () => { releaseHistory404Hold?.(); releaseHistory404Hold = null; },
+    releaseHeldDismiss: (index: number, outcome?: HeldResponse) => {
+      const entry = heldDismisses[index];
+      if (entry) entry.resolve(outcome);
+    },
+    releaseHeldRestore: (index: number, outcome?: HeldResponse) => {
+      const entry = heldRestores[index];
+      if (entry) entry.resolve(outcome);
+    },
+    releaseHeldChoice: (index: number, outcome?: HeldResponse) => {
+      const entry = heldChoices[index];
+      if (entry) entry.resolve(outcome);
+    },
     expireStoredToken: (sessionId = login1SessionId) => {
       localStorage.setItem("sb-api-auth-token", JSON.stringify({
         access_token: makeJwt(owner, sessionId, "expired"),
@@ -220,7 +254,7 @@ function installWaitingDismissalFenceFixture() {
         : []),
     ];
     return all
-      .filter((row) => !f.dismissedIds.includes(row.signal_id))
+      .filter((row) => !f.dismissedIds.includes(row.signal_id) && !f.answeredChoiceIds.includes(row.signal_id))
       .map((row) => ({
         signal_id: row.signal_id,
         from: row.from,
@@ -547,6 +581,15 @@ function installWaitingDismissalFenceFixture() {
         f.log.push("dismiss-401");
         return Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 });
       }
+      if (f.holdNextDismissCommand) {
+        f.holdNextDismissCommand = false;
+        f.log.push("dismiss-held:" + itemId);
+        const outcome = await new Promise<HeldResponse>((resolve) => {
+          heldDismisses.push({ itemId, resolve });
+        });
+        f.log.push("dismiss-released:" + itemId);
+        if (outcome) return Response.json(outcome.body, { status: outcome.status });
+      }
       if (!f.dismissedIds.includes(itemId)) f.dismissedIds.push(itemId);
       f.log.push("dismiss-ok:" + itemId);
       return Response.json({
@@ -572,6 +615,15 @@ function installWaitingDismissalFenceFixture() {
         f.log.push("restore-401");
         return Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 });
       }
+      if (f.holdNextRestoreCommand) {
+        f.holdNextRestoreCommand = false;
+        f.log.push("restore-held:" + itemId);
+        const outcome = await new Promise<HeldResponse>((resolve) => {
+          heldRestores.push({ itemId, resolve });
+        });
+        f.log.push("restore-released:" + itemId);
+        if (outcome) return Response.json(outcome.body, { status: outcome.status });
+      }
       f.dismissedIds = f.dismissedIds.filter((id: string) => id !== itemId);
       f.log.push("restore-ok:" + itemId);
       return Response.json({
@@ -582,6 +634,40 @@ function installWaitingDismissalFenceFixture() {
         item_id: itemId,
         restored: true,
         restored_at: new Date().toISOString(),
+      });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
+      const signalId = String(body.command.signal_id ?? "");
+      const entry = {
+        command_id: String(body.command_id ?? ""),
+        signal_id: signalId,
+        bearer: request.headers.get("authorization") ?? "",
+      };
+      f.choiceCommands.push(entry);
+      if (f.holdNextChoiceCommand) {
+        f.holdNextChoiceCommand = false;
+        f.log.push("choice-held:" + signalId);
+        const outcome = await new Promise<HeldResponse>((resolve) => {
+          heldChoices.push({ signalId, resolve });
+        });
+        f.log.push("choice-released:" + signalId);
+        if (outcome) return Response.json(outcome.body, { status: outcome.status });
+      }
+      if (!f.answeredChoiceIds.includes(signalId)) f.answeredChoiceIds.push(signalId);
+      f.log.push("choice-ok:" + signalId);
+      const optIds = Array.isArray(body.command.option_ids)
+        ? body.command.option_ids
+        : typeof body.command.option_id === "string"
+          ? [body.command.option_id]
+          : ["yes"];
+      return Response.json({
+        status: "accepted",
+        ok: true,
+        choice_answer: {
+          option_id: optIds[0] ?? "yes",
+          option_ids: optIds,
+          other_text: typeof body.command.other_text === "string" ? body.command.other_text : null,
+        },
       });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "channel_preference_set") {
@@ -626,6 +712,9 @@ async function observeWaitingDismissalFence() {
       holdNextHistory404: f.holdNextHistory404,
       queueHeld: f.queueHeld,
       holdNextQueue: f.holdNextQueue,
+      heldDismisses: f.heldDismisses.length,
+      heldRestores: f.heldRestores.length,
+      heldChoices: f.heldChoices.length,
     }) +
     ", counters=" + JSON.stringify({
       tokenRefreshCount: f.tokenRefreshCount,
@@ -639,9 +728,12 @@ async function observeWaitingDismissalFence() {
       railHasGroupDm: Boolean(groupSMLink()),
       loadOlderShown: shown(loadOlderFeed()),
       loadOlderDisabled: loadOlderFeed()?.disabled ?? null,
+      surveySendText: panel()?.querySelector("[data-waiting-survey-send]")?.textContent ?? null,
+      surveySendDisabled: panel()?.querySelector("[data-waiting-survey-send]")?.getAttribute("aria-disabled") ?? null,
     }) +
     ", dismissCmds=" + JSON.stringify(f.dismissCommands) +
     ", restoreCmds=" + JSON.stringify(f.restoreCommands) +
+    ", choiceCmds=" + JSON.stringify(f.choiceCommands) +
     ", log=" + f.log.join(" ") +
     ", steps=" + steps.join(" | ");
   const wait = async (predicate: () => unknown, label: string) => {
@@ -692,6 +784,19 @@ async function observeWaitingDismissalFence() {
   };
   const settleTicks = async () => {
     for (let i = 0; i < 25; i++) await tick();
+  };
+  // Triggers a same-person replacement login (login1 -> login2, NO SIGNED_OUT) while an HTTP command
+  // response is held. Because the held command already completed getSession(), the auth lock is free
+  // and starBtn() triggers an immediate refresh -> TOKEN_REFRESHED(login2) -> synchronous Waiting retirement + reboot.
+  const swapToLogin2 = async () => {
+    const refreshesBefore = f.tokenRefreshCount;
+    f.nextRefreshSessionId = f.login2SessionId;
+    f.expireStoredToken(f.login1SessionId);
+    check(Boolean(starBtn()), "header star button missing for same-person login swap");
+    starBtn()!.click();
+    await wait(() => f.tokenRefreshCount > refreshesBefore && !shown(panel()),
+      "same-person replacement login retired Waiting panel synchronously");
+    await wait(() => shown(control()), "replacement login 2 booted with Waiting control");
   };
 
   try {
@@ -1171,6 +1276,181 @@ async function observeWaitingDismissalFence() {
       return;
     }
 
+    // 8a. Overlap after same-person login swap: Dismiss A held -> swap to login 2 -> fresh Dismiss B on SAME item ->
+    //     release A -> B's pending Dismissed row remains untouched and login 2 dispatched exactly 1 dismiss command.
+    if (f.scenario === "dismiss-overlap-after-login-swap") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "ask rendered under login 1");
+      f.holdNextDismissCommand = true;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.heldDismisses.length === 1 && f.dismissCommands.length === 1 && shown(dismissedRow(f.genAskId)),
+        "Dismiss A held in flight under login 1");
+      check(f.bearerHasSession(f.dismissCommands[0]!.bearer, f.login1SessionId), "Dismiss A used login 1");
+
+      await swapToLogin2();
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "same ask rendered under login 2");
+      f.holdNextDismissCommand = true;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.heldDismisses.length === 2 && f.dismissCommands.length === 2 && shown(dismissedRow(f.genAskId)),
+        "Dismiss B held in flight under login 2");
+      check(f.bearerHasSession(f.dismissCommands[1]!.bearer, f.login2SessionId), "Dismiss B used login 2");
+
+      // Release held Dismiss A (error settlement) -> must NOT delete B's pending row, paint error, or reload.
+      f.releaseHeldDismiss(0, { status: 500, body: { error: "server_error", message: "Stale dismiss error" } });
+      await settleTicks();
+      const login2Dismisses = f.dismissCommands.filter((c: { bearer: string }) => f.bearerHasSession(c.bearer, f.login2SessionId));
+      check(shown(dismissedRow(f.genAskId)), "Dismiss B's pending Dismissed row must remain after A settles");
+      check(!card(f.genAskId), "Dismiss A must not repaint the card");
+      check(!panel()?.querySelector('[role="alert"]'), "Dismiss A must not paint a stale error");
+      check(login2Dismisses.length === 1, "exactly one dismiss command dispatched for login 2: " + JSON.stringify(f.dismissCommands));
+
+      f.releaseHeldDismiss(1);
+      await wait(() => shown(dismissedRow(f.genAskId)) && !card(f.genAskId), "Dismiss B settled cleanly");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 8b. Overlap after same-person login swap: Undo A held -> swap to login 2 -> fresh Dismiss + Undo B on SAME item ->
+    //     release A -> B's "Undoing…" row remains pending and login 2 dispatched exactly 1 restore command.
+    if (f.scenario === "undo-overlap-after-login-swap") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "ask rendered under login 1");
+      const readsBeforeD1 = f.queueReads;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBeforeD1 && shown(dismissedRow(f.genAskId)), "ask dismissed under login 1");
+      f.holdNextRestoreCommand = true;
+      dismissedRow(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.heldRestores.length === 1 && f.restoreCommands.length === 1 &&
+        dismissedRow(f.genAskId)?.querySelector(`[data-waiting-undo="ask:${f.genAskId}"]`)?.textContent === "Undoing…",
+        "Undo A held in flight under login 1");
+      check(f.bearerHasSession(f.restoreCommands[0]!.bearer, f.login1SessionId), "Undo A used login 1");
+
+      // Make genAskId open again on the synthetic server for login 2 so login 2 can start a fresh Dismiss + Undo B on the exact same key.
+      f.dismissedIds = f.dismissedIds.filter((id: string) => id !== f.genAskId);
+      await swapToLogin2();
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "same ask rendered under login 2");
+      const readsBeforeD2 = f.queueReads;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.dismissCommands.length === 2 && f.queueReads > readsBeforeD2 && shown(dismissedRow(f.genAskId)), "ask dismissed under login 2");
+      f.holdNextRestoreCommand = true;
+      dismissedRow(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.heldRestores.length === 2 && f.restoreCommands.length === 2 &&
+        dismissedRow(f.genAskId)?.querySelector(`[data-waiting-undo="ask:${f.genAskId}"]`)?.textContent === "Undoing…",
+        "Undo B held in flight under login 2");
+      check(f.bearerHasSession(f.restoreCommands[1]!.bearer, f.login2SessionId), "Undo B used login 2");
+
+      f.releaseHeldRestore(0, { status: 500, body: { error: "server_error", message: "Stale undo error" } });
+      await settleTicks();
+      const undoBtnNow = dismissedRow(f.genAskId)?.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.genAskId}"]`);
+      const login2Restores = f.restoreCommands.filter((c: { bearer: string }) => f.bearerHasSession(c.bearer, f.login2SessionId));
+      check(shown(dismissedRow(f.genAskId)) && undoBtnNow?.textContent === "Undoing…" && undoBtnNow?.getAttribute("aria-disabled") === "true",
+        "Undo B's pending Undoing… row must remain after A settles");
+      check(!panel()?.querySelector('[role="alert"]'), "Undo A must not paint a stale error");
+      check(login2Restores.length === 1, "exactly one restore command dispatched for login 2: " + JSON.stringify(f.restoreCommands));
+
+      f.releaseHeldRestore(1);
+      await wait(() => shown(card(f.genAskId)) && !dismissedRow(f.genAskId), "Undo B settled cleanly and reloaded card");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 8c. Overlap after same-person login swap: Archived Restore A held -> swap to login 2 -> fresh Archived Restore B on SAME item ->
+    //     release A -> B's "Restoring…" button stays pending and login 2 dispatched exactly 1 restore command.
+    if (f.scenario === "archived-restore-overlap-after-login-swap") {
+      await openPanelWorkspaceScope(true);
+      await wait(() => shown(archivedCard(f.genAskId)), "archived item rendered under login 1");
+      f.holdNextRestoreCommand = true;
+      archivedCard(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.heldRestores.length === 1 && f.restoreCommands.length === 1 &&
+        archivedCard(f.genAskId)?.querySelector(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)?.textContent === "Restoring…",
+        "Archived Restore A held in flight under login 1");
+      check(f.bearerHasSession(f.restoreCommands[0]!.bearer, f.login1SessionId), "Archived Restore A used login 1");
+
+      await swapToLogin2();
+      await openPanelWorkspaceScope(true);
+      await wait(() => shown(archivedCard(f.genAskId)), "same archived item rendered under login 2");
+      f.holdNextRestoreCommand = true;
+      archivedCard(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.heldRestores.length === 2 && f.restoreCommands.length === 2 &&
+        archivedCard(f.genAskId)?.querySelector(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)?.textContent === "Restoring…",
+        "Archived Restore B held in flight under login 2");
+      check(f.bearerHasSession(f.restoreCommands[1]!.bearer, f.login2SessionId), "Archived Restore B used login 2");
+
+      f.releaseHeldRestore(0, { status: 500, body: { error: "server_error", message: "Stale archived restore error" } });
+      await settleTicks();
+      const restoreBtnNow = archivedCard(f.genAskId)?.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.genAskId}"]`);
+      const login2Restores = f.restoreCommands.filter((c: { bearer: string }) => f.bearerHasSession(c.bearer, f.login2SessionId));
+      check(shown(archivedCard(f.genAskId)) && restoreBtnNow?.textContent === "Restoring…" && restoreBtnNow?.getAttribute("aria-disabled") === "true",
+        "Archived Restore B's Restoring… state must remain after A settles");
+      check(!panel()?.querySelector('[role="alert"]'), "Archived Restore A must not paint a stale error");
+      check(login2Restores.length === 1, "exactly one restore command dispatched for login 2: " + JSON.stringify(f.restoreCommands));
+
+      f.releaseHeldRestore(1);
+      await wait(() => !archivedCard(f.genAskId), "Archived Restore B settled cleanly");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 8d. Overlap after same-person login swap: Survey batch A held -> swap to login 2 -> fresh Survey batch B started ->
+    //     release A -> B's "Sending…" state and disabled controls stay intact and login 2 dispatched exactly 1 command so far.
+    if (f.scenario === "survey-overlap-after-login-swap") {
+      const stageTwoAnswerSurvey = async (label: string) => {
+        await openPanelWorkspaceScope(false);
+        await wait(() => shown(card(f.dmAskId)) && shown(card(f.genAskId)) && shown(panel()?.querySelector("[data-waiting-review-start]")),
+          `${label}: 2 asks and Review questions button ready`);
+        panel()!.querySelector<HTMLButtonElement>("[data-waiting-review-start]")!.click();
+        await wait(() => shown(panel()?.querySelector('[data-waiting-survey="step"]')) && shown(panel()?.querySelector('[data-survey-option="yes"]')),
+          `${label}: survey step 1 open`);
+        panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
+        panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+        await wait(() => (panel()?.querySelector("[data-waiting-survey-progress]")?.textContent ?? "").includes("Question 2 of 2") &&
+          shown(panel()?.querySelector('[data-survey-option="yes"]')), `${label}: survey step 2 open`);
+        panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
+        panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+        await wait(() => shown(panel()?.querySelector('[data-waiting-survey="review"]')) && shown(panel()?.querySelector("[data-waiting-survey-send]")),
+          `${label}: survey review ready`);
+      };
+
+      await stageTwoAnswerSurvey("login 1");
+      f.holdNextChoiceCommand = true;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!.click();
+      await wait(() => f.heldChoices.length === 1 && f.choiceCommands.length === 1 &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Sending…",
+        "Survey batch A held in flight under login 1");
+      check(f.bearerHasSession(f.choiceCommands[0]!.bearer, f.login1SessionId), "Survey A used login 1");
+
+      await swapToLogin2();
+      await stageTwoAnswerSurvey("login 2");
+      f.holdNextChoiceCommand = true;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!.click();
+      await wait(() => f.heldChoices.length === 2 && f.choiceCommands.length === 2 &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Sending…",
+        "Survey batch B held in flight under login 2");
+      check(f.bearerHasSession(f.choiceCommands[1]!.bearer, f.login2SessionId), "Survey B used login 2");
+
+      // Release held Survey A (error settlement) -> must NOT clear B's sending flag, unlock B's controls, or send A's item 2.
+      f.releaseHeldChoice(0, { status: 500, body: { error: "server_error", message: "Stale survey error" } });
+      await settleTicks();
+      const sendBtn = panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-send]");
+      const backBtn = panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-back]");
+      const login2Choices = f.choiceCommands.filter((c: { bearer: string }) => f.bearerHasSession(c.bearer, f.login2SessionId));
+      check(sendBtn?.textContent === "Sending…" && sendBtn?.getAttribute("aria-disabled") === "true",
+        "Survey B's Sending… button must remain locked after Survey A settles");
+      check(backBtn?.getAttribute("aria-disabled") === "true",
+        "Survey B's Back control must remain disabled after Survey A settles");
+      check(!panel()?.querySelector('[role="alert"]'), "Survey A must not paint a stale error on Survey B");
+      check(f.choiceCommands.length === 2 && login2Choices.length === 1,
+        "Survey A must not advance and login 2 must have dispatched exactly 1 command while held: " + JSON.stringify(f.choiceCommands));
+
+      f.releaseHeldChoice(1);
+      await wait(() => !panel()?.querySelector("[data-waiting-survey]") && f.choiceCommands.length === 3,
+        "Survey B finished both answers cleanly");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
     throw new Error("unknown scenario: " + f.scenario);
   } catch (error) {
     document.documentElement.dataset.fenceObservation = JSON.stringify({
@@ -1279,6 +1559,16 @@ test("Waiting dismissal C3 (mounted Dashboard): same-person replacement login (w
     "archived-restore-login-swap-token-hold",
     "archived-restore-login-swap-401-hold",
     "archived-restore-empty-session-token-hold",
+  ]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting dismissal C3 (mounted Dashboard): retired Dismiss, Undo, Archived Restore, and Survey settlements never touch overlapping fresh attempts under a replacement login", { timeout: 180_000 }, async () => {
+  const outcomes = await runFenceScenarios([
+    "dismiss-overlap-after-login-swap",
+    "undo-overlap-after-login-swap",
+    "archived-restore-overlap-after-login-swap",
+    "survey-overlap-after-login-swap",
   ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

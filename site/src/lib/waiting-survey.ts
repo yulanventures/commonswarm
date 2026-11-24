@@ -516,6 +516,120 @@ export function renderWaitingSurvey(
   commit(wrap);
 }
 
+export interface WaitingSurveyState {
+  active: boolean;
+  mode: "step" | "review";
+  index: number;
+  itemIds: string[];
+  placeKey: string;
+  sending: boolean;
+  sendingAttemptId: number | null;
+}
+
+export function createWaitingSurveyState(): WaitingSurveyState {
+  return {
+    active: false,
+    mode: "step",
+    index: 0,
+    itemIds: [],
+    placeKey: "",
+    sending: false,
+    sendingAttemptId: null,
+  };
+}
+
+export type WaitingSurveySendResult =
+  | { ok: true; optionIds: string[]; otherText: string | null }
+  | { ok: false; status: number; error: string | null; message: string };
+
+export interface WaitingSurveyBatchPorts {
+  getState: () => WaitingSurveyState;
+  nextAttemptId: () => number;
+  isAlive: () => boolean;
+  hasActiveSession: () => boolean;
+  sendEntry: (
+    item: WaitingAskItem,
+    submission: ChoiceSubmission,
+    isAttemptAlive: () => boolean,
+  ) => Promise<WaitingSurveySendResult>;
+  onEntrySucceeded: (
+    item: WaitingAskItem,
+    result: Extract<WaitingSurveySendResult, { ok: true }>,
+  ) => void;
+  onEntryFailed: (item: WaitingAskItem, message: string) => void;
+  onRender: () => void;
+  onComplete: (summary: { sentCount: number; failedCount: number; succeededIds: ReadonlySet<string> }) => void;
+  failureMessage: string;
+}
+
+/**
+ * Runs one survey send batch pinned to its own monotonic attempt id.
+ * Every settlement checks that the current survey state still carries this exact attempt id
+ * before touching sending flags, drafts, errors, or rendering. A non-owner does nothing at all;
+ * a still-owned cancelled batch clears its sending indicator with no stale error and no data repaint.
+ */
+export async function runWaitingSurveyBatch(
+  entries: ReadonlyArray<{ item: WaitingAskItem; submission: ChoiceSubmission }>,
+  ports: WaitingSurveyBatchPorts,
+): Promise<void> {
+  const initialState = ports.getState();
+  if (!ports.hasActiveSession() || !ports.isAlive() || initialState.sending || entries.length === 0) return;
+  const attemptId = ports.nextAttemptId();
+  initialState.sending = true;
+  initialState.sendingAttemptId = attemptId;
+  const ownsBatch = (): boolean => {
+    const current = ports.getState();
+    return current === initialState && current.sending && current.sendingAttemptId === attemptId;
+  };
+  const isAttemptAlive = (): boolean => ports.isAlive() && ownsBatch();
+  ports.onRender();
+
+  let sentCount = 0;
+  let failedCount = 0;
+  const succeededIds = new Set<string>();
+  let retired = false;
+
+  for (const { item, submission } of entries) {
+    if (!ownsBatch()) return;
+    if (!ports.hasActiveSession() || !ports.isAlive()) {
+      retired = true;
+      break;
+    }
+    let result: WaitingSurveySendResult;
+    try {
+      result = await ports.sendEntry(item, submission, isAttemptAlive);
+    } catch {
+      result = { ok: false, status: 0, error: null, message: ports.failureMessage };
+    }
+    if (!ownsBatch()) return;
+    if (!ports.isAlive() || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+      retired = true;
+      break;
+    }
+    if (result.ok) {
+      sentCount += 1;
+      succeededIds.add(item.id);
+      ports.onEntrySucceeded(item, result);
+    } else {
+      failedCount += 1;
+      ports.onEntryFailed(item, result.message);
+    }
+  }
+
+  if (!ownsBatch()) return;
+  if (retired || !ports.isAlive()) {
+    initialState.sending = false;
+    initialState.sendingAttemptId = null;
+    if (ports.isAlive()) ports.onRender();
+    return;
+  }
+
+  initialState.sending = false;
+  initialState.sendingAttemptId = null;
+  initialState.itemIds = initialState.itemIds.filter(id => !succeededIds.has(id));
+  ports.onComplete({ sentCount, failedCount, succeededIds });
+}
+
 export type WaitingSurveyFocusTarget = "step" | "other-input" | "review" | "failed-review" | "exit";
 
 /** Keeps keyboard focus inside the Waiting on you panel across survey steps, review, failures,

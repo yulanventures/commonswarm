@@ -1412,8 +1412,9 @@ export async function postCommand(
           return retiredResult();
         }
         const c = client();
-        if (!c || attempt !== 0) throw new AuthRecoveryRequired();
         if (guarded) {
+          if (!c) return retiredResult();
+          if (attempt !== 0) throw new AuthRecoveryRequired();
           let recovered: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
           try {
             recovered = await boundedAuth(c.auth.getSession());
@@ -1446,6 +1447,7 @@ export async function postCommand(
           }
           continue;
         }
+        if (!c || attempt !== 0) throw new AuthRecoveryRequired();
         const recovered = await boundedAuth(c.auth.getSession());
         if (isCancelled()) {
           return retiredResult();

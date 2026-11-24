@@ -605,10 +605,11 @@ test("unguarded postCommand preserves exact existing behavior across all cases",
   }
 });
 
-test("waiting-dismissal controller settles silently on operation_retired even without a prior SIGNED_OUT", async () => {
+test("waiting-dismissal controller clears pending indicator on still-owned operation_retired and does nothing on already-retired settlement", async () => {
   const retired = { ok: false as const, status: 0, error: "operation_retired", message: "Action cancelled." };
   let renders = 0;
   let reloads = 0;
+  let invalidations = 0;
   let errors = 0;
   const ctrl = createWaitingDismissalController({
     sendDismiss: async () => retired,
@@ -616,7 +617,7 @@ test("waiting-dismissal controller settles silently on operation_retired even wi
     isAlive: () => true,
     removeCardFromClient: () => {},
     reloadWaiting: () => { reloads += 1; },
-    invalidateArchived: () => {},
+    invalidateArchived: () => { invalidations += 1; },
     setCardError: () => { errors += 1; },
     setStatusError: () => { errors += 1; },
     setArchivedError: () => { errors += 1; },
@@ -624,18 +625,19 @@ test("waiting-dismissal controller settles silently on operation_retired even wi
     render: () => { renders += 1; },
   });
 
-  // Dismiss returns operation_retired -> initial optimistic render runs once, settlement does NOT repaint or set error or reload.
+  // Still-owned Dismiss returns operation_retired -> clears own pending row visually, zero error/reload/invalidation.
   await ctrl.dismiss({
     slotKind: "ask", itemKind: "ask", itemId: "ask-1", cardId: "ask-1",
     workspaceId: WORKSPACE, channelId: null, conversationId: null, placementKind: "general",
     position: 0, placeKey: `${WORKSPACE}:general`, scope: "workspace",
   });
-  assert.equal(renders, 1, "only optimistic render before dispatch; zero settlement repaint");
+  assert.equal(renders, 2, "optimistic render + pending-indicator clear render");
   assert.equal(reloads, 0);
+  assert.equal(invalidations, 0);
   assert.equal(errors, 0);
   assert.equal(ctrl.has("ask:ask-1"), false);
 
-  // Archived Restore returns operation_retired -> only initial restoring render runs, zero settlement repaint/error/reload.
+  // Still-owned Archived Restore returns operation_retired -> clears own Restoring… indicator, zero error/reload/invalidation.
   renders = 0;
   await ctrl.restoreArchived({
     itemKey: "ask:ask-2", kind: "ask", id: "ask-2", todoId: null, askKind: "choice",
@@ -644,8 +646,9 @@ test("waiting-dismissal controller settles silently on operation_retired even wi
     when: "now", answeredByName: null, placement: "general", channelId: null,
     conversationId: null, channelLabel: "#general", href: null,
   });
-  assert.equal(renders, 1, "only initial restoring render; zero settlement repaint");
+  assert.equal(renders, 2, "initial restoring render + pending-indicator clear render");
   assert.equal(reloads, 0);
+  assert.equal(invalidations, 0);
   assert.equal(errors, 0);
   assert.equal(ctrl.isArchivedRestoring("ask:ask-2"), false);
 });
@@ -725,6 +728,143 @@ test("LiveDashboard waitingActionGuard and queueAuthReload retire Waiting action
   assert.equal(queuedBoots, 1);
 });
 
+test("LiveDashboard sendWaitingPanelChoice and sendWaitingPlainAsk enforce attempt ownership on overlap and clear pending indicator on still-owned operation_retired", async () => {
+  const astro = await readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const script = [...astro.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
+    .map(m => m[1]!)
+    .sort((a, b) => b.length - a.length)[0]!;
+  const sf = ts.createSourceFile("LiveDashboard.ts", script, ts.ScriptTarget.Latest, true);
+  const want = new Set(["sendWaitingPanelChoice", "sendWaitingPlainAsk"]);
+  const chunks: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name) && want.has(decl.name.text)) {
+          chunks.push(node.getText(sf));
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  assert.equal(chunks.length, 2, "extracted sendWaitingPanelChoice and sendWaitingPlainAsk");
+  const transpiled = ts.transpileModule(chunks.join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+
+  const choiceResolvers: Array<(v: unknown) => void> = [];
+  const plainResolvers: Array<(v: unknown) => void> = [];
+  let choiceDispatches = 0;
+  let plainDispatches = 0;
+  let renders = 0;
+  let refreshes = 0;
+  let seq = 0;
+
+  const ctx = createContext({
+    Map,
+    Set,
+    Array,
+    CHOICE_ANSWER_FAILED: "Could not send.",
+    isMultiAccountEnabled: () => false,
+    homeViewerId: () => OWNER,
+    one: () => null,
+    uuid: () => `cmd-${++seq}`,
+    newWaitingAttemptId: () => ++seq,
+    choiceDraftKey: (ws: string, id: string) => `${ws}:${id}`,
+    readableError: () => "Error",
+    renderWaitingPanelView: () => { renders += 1; },
+    showWaitingSent: () => {},
+    showWaitingStatus: () => {},
+    renderHomeRail: () => {},
+    renderFeed: () => {},
+    syncWaitingButtons: () => {},
+    invalidateWaitingArchived: () => {},
+    scheduleWaitingRefresh: () => { refreshes += 1; },
+    answerChoice: () => {
+      choiceDispatches += 1;
+      return new Promise((resolve) => { choiceResolvers.push(resolve); });
+    },
+    answerPlainAsk: () => {
+      plainDispatches += 1;
+      return new Promise((resolve) => { plainResolvers.push(resolve); });
+    },
+  });
+
+  runInContext(`
+    let sampleMode = false;
+    let renderedAuthUserId = ${JSON.stringify(OWNER)};
+    let waitingAuthGeneration = 0;
+    let activeWorkspaceId = ${JSON.stringify(WORKSPACE)};
+    let session = { user: { id: ${JSON.stringify(OWNER)} }, access_token: "tok-1" };
+    const workspaces = [{ id: ${JSON.stringify(WORKSPACE)} }];
+    const waitingPanelTickets = new Map();
+    const waitingPanelErrors = new Map();
+    const waitingPanelLastSubmissions = new Map();
+    const waitingPanelAsks = new Map([[${JSON.stringify(WORKSPACE)}, [{ id: "ask-1" }]]]);
+    const waitingPlainTickets = new Map();
+    const waitingPlainErrors = new Map();
+    const waitingPlainDrafts = new Map();
+    const waitingPlainLastSubmissions = new Map();
+    const waitingPanelPlainAsks = new Map([[${JSON.stringify(WORKSPACE)}, [{ id: "plain-1" }]]]);
+    const choiceDrafts = new Map();
+    const choiceRows = new Map();
+    const homeOverviewCounts = new Map([[${JSON.stringify(WORKSPACE)}, 2]]);
+    const waitingPanelMod = null;
+    const waitingSurface = null;
+    const waitingActionGuard = (viewer, authGen) => () =>
+      !sampleMode && renderedAuthUserId === viewer && waitingAuthGeneration === authGen;
+  `, ctx);
+  runInContext(transpiled, ctx);
+
+  // 1. Choice ask overlap: A starts -> login replaces (tickets cleared, authGen bumped) -> B starts for same ask-1 ->
+  //    A settles with error/retired -> B's ticket remains pending, zero error, zero extra render/refresh.
+  const choiceItem = `{ id: "ask-1", workspaceId: ${JSON.stringify(WORKSPACE)}, choices: { multi: false } }`;
+  const choiceSub = `{ optionIds: ["yes"], otherText: null }`;
+  const pChoiceA = runInContext(`sendWaitingPanelChoice(${choiceItem}, ${choiceSub})`, ctx) as Promise<void>;
+  assert.equal(choiceDispatches, 1);
+  runInContext("waitingAuthGeneration += 1; waitingPanelTickets.clear();", ctx);
+  const pChoiceB = runInContext(`sendWaitingPanelChoice(${choiceItem}, ${choiceSub})`, ctx) as Promise<void>;
+  assert.equal(choiceDispatches, 2);
+  const rendersBeforeChoiceA = renders;
+  choiceResolvers[0]!({ ok: false, status: 500, error: "server_error", message: "Stale choice error" });
+  await pChoiceA;
+  assert.equal(runInContext('waitingPanelTickets.has("ask-1")', ctx), true, "B's choice ticket must remain pending");
+  assert.equal(runInContext('waitingPanelErrors.has("ask-1")', ctx), false, "A must not set stale choice error");
+  assert.equal(renders, rendersBeforeChoiceA, "A must not repaint over B");
+  assert.equal(refreshes, 0);
+
+  // Still-owned cancelled choice attempt B settles with operation_retired -> clears own ticket & renders pending clear, no error/refresh.
+  choiceResolvers[1]!({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await pChoiceB;
+  assert.equal(runInContext('waitingPanelTickets.has("ask-1")', ctx), false, "still-owned cancelled choice clears its ticket");
+  assert.equal(runInContext('waitingPanelErrors.has("ask-1")', ctx), false, "still-owned cancelled choice sets no error");
+  assert.equal(renders, rendersBeforeChoiceA + 1, "still-owned cancelled choice clears its pending indicator");
+  assert.equal(refreshes, 0, "still-owned cancelled choice triggers no data refresh");
+
+  // 2. Plain ask overlap + still-owned cancelled plain ask.
+  const plainItem = `{ id: "plain-1", workspaceId: ${JSON.stringify(WORKSPACE)} }`;
+  const pPlainA = runInContext(`sendWaitingPlainAsk(${plainItem}, "Reply A", "answer")`, ctx) as Promise<void>;
+  assert.equal(plainDispatches, 1);
+  runInContext("waitingAuthGeneration += 1; waitingPlainTickets.clear();", ctx);
+  const pPlainB = runInContext(`sendWaitingPlainAsk(${plainItem}, "Reply B", "answer")`, ctx) as Promise<void>;
+  assert.equal(plainDispatches, 2);
+  const rendersBeforePlainA = renders;
+  plainResolvers[0]!({ ok: false, status: 500, error: "server_error", message: "Stale plain error" });
+  await pPlainA;
+  assert.equal(runInContext('waitingPlainTickets.has("plain-1")', ctx), true, "B's plain ticket must remain pending");
+  assert.equal(runInContext('waitingPlainErrors.has("plain-1")', ctx), false, "A must not set stale plain error");
+  assert.equal(renders, rendersBeforePlainA, "A must not repaint over B");
+  assert.equal(refreshes, 0);
+
+  plainResolvers[1]!({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await pPlainB;
+  assert.equal(runInContext('waitingPlainTickets.has("plain-1")', ctx), false, "still-owned cancelled plain ask clears its ticket");
+  assert.equal(runInContext('waitingPlainErrors.has("plain-1")', ctx), false, "still-owned cancelled plain ask sets no error");
+  assert.equal(renders, rendersBeforePlainA + 1, "still-owned cancelled plain ask clears its pending indicator");
+  assert.equal(refreshes, 0, "still-owned cancelled plain ask triggers no data refresh");
+});
+
 test("direct (non-VM) guarded postCommand uses existing cachedSession.client without creating one prematurely", async () => {
   const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 1 });
   const login1Rotated = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 2 });
@@ -797,6 +937,39 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
     assert.equal(swappedRes.status, 0);
     assert.equal(swappedRes.body.error, "operation_retired");
     assert.equal(sentBearers.length, 2, "must not dispatch when direct client returns a different login");
+
+    // 4. Empty session from shared-session acquisition retires without falling back to the supplied token.
+    fakeSession = null as never;
+    const emptyRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-empty",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 3);
+    assert.equal(emptyRes.status, 0);
+    assert.equal(emptyRes.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 2, "must never fall back to supplied token when shared session returns null");
+
+    // 5. Acquisition error or throw retires without falling back to the supplied token.
+    initializedClient.auth.getSession = (async () => {
+      getSessionCalls += 1;
+      return { data: { session: null }, error: new Error("storage_failed") as never };
+    }) as typeof initializedClient.auth.getSession;
+    const errRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-err",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 4);
+    assert.equal(errRes.status, 0);
+    assert.equal(errRes.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 2, "must never fall back to supplied token when shared session errors");
   } finally {
     if (initializedClient && origGetSession) {
       initializedClient.auth.getSession = origGetSession;
