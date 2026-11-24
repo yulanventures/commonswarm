@@ -74,6 +74,12 @@ export interface CommandHttpResponse extends StoredResponse {
   resumed_at?: string;
   channel?: ChannelRow;
   generation?: number;
+  signal_id?: string;
+  withdrawn?: boolean;
+  created?: boolean;
+  withdrawn_at?: string;
+  replaced_by_signal_id?: string;
+  superseded_signal_id?: string;
 }
 
 export interface CommandResult {
@@ -321,6 +327,7 @@ export interface PostSignalCommand {
   to_agent_principal_id: string | null;
   in_reply_to: string | null;
   parent_signal_id?: string;
+  supersedes?: string;
   reply_status?: import("./reply-status.js").ReplyStatus;
   about: string | null;
   attachments?: Array<{ file_id: string; version_n: number }>;
@@ -468,6 +475,12 @@ export interface ReraiseAskCommand {
   signal_id: string;
 }
 
+/** Sender withdraws an open ask it sent. No reason text is accepted. */
+export interface WithdrawAskCommand {
+  kind: "withdraw_ask";
+  signal_id: string;
+}
+
 export interface ResolveSystemAlertCommand {
   kind: "resolve_system_alert";
   alert_id: string;
@@ -486,10 +499,11 @@ export interface AskChoiceCommand {
   options: import("./choices.js").ChoiceOption[];
   multi?: boolean;
   channel?: string;
+  supersedes?: string;
 }
 
 /** Every command sendSignal sends. */
-export type SignalWriteCommand = PostSignalCommand | ReraiseAskCommand | AskChoiceCommand;
+export type SignalWriteCommand = PostSignalCommand | ReraiseAskCommand | WithdrawAskCommand | AskChoiceCommand;
 
 export interface PostSignalRequest {
   workspaceId: string;
@@ -1376,13 +1390,16 @@ export class ThinCommandClient {
     const commandId = request.commandId ?? newCommandId();
     const command: SignalWriteCommand = request.command.kind === "reraise_ask"
       ? { kind: "reraise_ask", signal_id: request.command.signal_id }
+      : request.command.kind === "withdraw_ask"
+      ? { kind: "withdraw_ask", signal_id: request.command.signal_id }
       : request.command.kind === "ask_choice"
       ? { kind: "ask_choice", body: request.command.body, to_user_id: request.command.to_user_id,
         about: request.command.about,
         options: request.command.options.map(({ id, label, description, recommended }) => ({ id, label,
           ...(description === undefined ? {} : { description }), ...(recommended === true ? { recommended } : {}) })),
         ...(request.command.multi === true ? { multi: true } : {}),
-        ...(request.command.channel === undefined ? {} : { channel: request.command.channel }) }
+        ...(request.command.channel === undefined ? {} : { channel: request.command.channel }),
+        ...(request.command.supersedes === undefined ? {} : { supersedes: request.command.supersedes }) }
       : {
       kind: "post_signal",
       signal_kind: request.command.signal_kind,
@@ -1393,6 +1410,9 @@ export class ThinCommandClient {
       ...(request.command.parent_signal_id === undefined
         ? {}
         : { parent_signal_id: request.command.parent_signal_id }),
+      ...(request.command.supersedes === undefined
+        ? {}
+        : { supersedes: request.command.supersedes }),
       ...(request.command.reply_status === undefined
         ? {}
         : { reply_status: request.command.reply_status }),
@@ -1551,7 +1571,11 @@ export class ThinCommandClient {
             );
           }
           const body = responseBody(raw);
-          if (body.status !== "accepted" || body.signal === undefined) {
+          if (command.kind === "withdraw_ask") {
+            if (body.status !== "accepted" || body.withdrawn !== true || typeof body.signal_id !== "string") {
+              throw new Error("withdraw_ask endpoint accepted without a withdrawal receipt");
+            }
+          } else if (body.status !== "accepted" || body.signal === undefined) {
             throw new Error("signal endpoint accepted without a signal receipt");
           }
           if (body.min_client_version !== undefined) {

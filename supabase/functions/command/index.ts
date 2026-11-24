@@ -254,6 +254,14 @@ import {
   type WaitingDismissalCommand,
   waitingDismissalReplayFields,
 } from "./waiting-dismissals.ts";
+import {
+  applyWithdrawAsk,
+  ASK_WITHDRAWAL_COMMAND_KINDS,
+  askWithdrawalReplayFields,
+  isAskWithdrawalCommandKind,
+  parseAskWithdrawalCommand,
+  type WithdrawAskCommand,
+} from "./ask-withdrawals.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
@@ -415,6 +423,7 @@ interface SignalCommand {
   to_agent_principal_id?: string | null;
   in_reply_to?: string | null;
   parent_signal_id?: string;
+  supersedes?: string;
   reply_status?: ReplyStatus;
   about: string | null;
   attachments?: SignalAttachmentRef[];
@@ -495,6 +504,7 @@ interface AskChoiceCommand {
   options: ChoiceOption[];
   multi: boolean;
   channel?: string;
+  supersedes?: string;
 }
 interface AnswerChoiceCommand {
   kind: "answer_choice";
@@ -650,6 +660,7 @@ type ValidatedCommand =
   | ConversationCommand
   | ReviewCheckCommand
   | WaitingDismissalCommand
+  | WithdrawAskCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -937,12 +948,18 @@ interface StoredResponse {
   signal_ids?: string[];
   observed_signal_ids?: string[];
   refused?: Array<{ signal_id: string; error: string }>;
-  /** Waiting on you dismissals: item kind, id, state, and timestamp. */
+  /** Waiting on you dismissals: item kind, id, state, instance, and timestamp. */
   item_kind?: string;
   item_id?: string;
   dismissed?: boolean;
+  dismissal?: string;
   dismissed_at?: string;
   restored_at?: string;
+  /** Sender ask withdrawals & replace (supersedes). */
+  withdrawn?: boolean;
+  withdrawn_at?: string;
+  replaced_by_signal_id?: string;
+  superseded_signal_id?: string;
 }
 
 interface EventEnvelope {
@@ -1456,6 +1473,7 @@ const COMMAND_KINDS = [
   ...CONVERSATION_COMMAND_KINDS,
   ...REVIEW_CHECK_COMMAND_KINDS,
   ...WAITING_DISMISSAL_COMMAND_KINDS,
+  ...ASK_WITHDRAWAL_COMMAND_KINDS,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2392,6 +2410,10 @@ function validateCommand(
     return parseWaitingDismissalCommand(cmd);
   }
 
+  if (isAskWithdrawalCommandKind(cmd.kind)) {
+    return parseAskWithdrawalCommand(cmd);
+  }
+
   if (cmd.kind === SIGNALS_SEEN_KIND) {
     const valid = exactKeys(cmd, ["kind", "signal_ids"]) &&
       Array.isArray(cmd.signal_ids) &&
@@ -2922,8 +2944,8 @@ function validateCommand(
   }
 
   if (cmd.kind === "ask_choice") {
-    // v1 sends exactly kind, body, to_user_id, about and options; v2 adds multi and channel.
-    const keys = ["kind", "body", "to_user_id", "about", "options", "multi", "channel"];
+    // v1 sends exactly kind, body, to_user_id, about and options; v2 adds multi, channel, and supersedes.
+    const keys = ["kind", "body", "to_user_id", "about", "options", "multi", "channel", "supersedes"];
     if (Object.keys(cmd).some((key) => !keys.includes(key))) {
       return { ok: false, status: 400, reason: commandFieldsMessage("ask_choice", keys.slice(1)) };
     }
@@ -2983,9 +3005,15 @@ function validateCommand(
         channel = normalizeChannelSlug(cmd.channel as string);
       }
     }
+    if (Object.hasOwn(cmd, "supersedes")) {
+      if (typeof cmd.supersedes !== "string" || !UUID_RE.test(cmd.supersedes)) {
+        return { ok: false, status: 400, reason: "supersedes must be the UUID of an open ask you sent" };
+      }
+    }
     return { ok: true, command: { kind: "ask_choice", body,
       to_user_id: typeof cmd.to_user_id === "string" ? cmd.to_user_id.toLowerCase() : null, about,
-      options: ordered, multi: cmd.multi === true, ...(channel === undefined ? {} : { channel }) } };
+      options: ordered, multi: cmd.multi === true, ...(channel === undefined ? {} : { channel }),
+      ...(typeof cmd.supersedes === "string" ? { supersedes: cmd.supersedes.toLowerCase() } : {}) } };
   }
 
   if (cmd.kind === "answer_choice") {
@@ -3121,6 +3149,13 @@ function validateCommand(
     const parentKeys = hasParentSignalId && cmd.signal_kind === "ask"
       ? ["parent_signal_id"]
       : [];
+    const hasSupersedes = Object.hasOwn(cmd, "supersedes");
+    const supersedes = hasSupersedes ? cmd.supersedes : undefined;
+    /* supersedes is optional only for asks: it replaces one earlier open ask of the same sender
+     * in the same transaction. Other signal kinds refuse it via the key allow-list. */
+    const supersedesKeys = hasSupersedes && cmd.signal_kind === "ask"
+      ? ["supersedes"]
+      : [];
     const hasReplyStatus = Object.hasOwn(cmd, "reply_status");
     const replyStatus = hasReplyStatus ? cmd.reply_status : undefined;
     if (hasReplyStatus && threadRoot !== null) {
@@ -3178,6 +3213,7 @@ function validateCommand(
       ...(expectedChannelId === undefined ? [] : ["expected_channel_id"]),
       ...(hasConversation ? ["conversation_id"] : []),
       ...parentKeys,
+      ...supersedesKeys,
       ...(hasReplyStatus ? ["reply_status"] : []),
     ]);
     const baseValid = keysOk &&
@@ -3244,6 +3280,9 @@ function validateCommand(
           typeof parentSignalId === "string" && UUID_RE.test(parentSignalId))) &&
       // An ask chain is a private exchange between agents, so it carries no mention.
       (!hasParentSignalId || mentions.length === 0) &&
+      (!hasSupersedes ||
+        (cmd.signal_kind === "ask" &&
+          typeof supersedes === "string" && UUID_RE.test(supersedes))) &&
       /* thread_root_id's uuid shape is checked INSIDE chatSignalShapeProblem,
        * not here. Keeping a copy on the edge meant a bad uuid was refused with
        * the generic reason before the chat sentence could run, which is exactly
@@ -3275,6 +3314,9 @@ function validateCommand(
           ...(hasReplyStatus ? { reply_status: replyStatus as ReplyStatus } : {}),
           ...(hasParentSignalId
             ? { parent_signal_id: (parentSignalId as string).toLowerCase() }
+            : {}),
+          ...(hasSupersedes
+            ? { supersedes: (supersedes as string).toLowerCase() }
             : {}),
           about: sanitizedAbout,
           ...(attachments === undefined ? {} : { attachments: attachments! }),
@@ -4407,6 +4449,8 @@ function storedResponse(value: unknown): StoredResponse {
     ...reviewCheckReplayFields(response),
     // Waiting on you per-person dismissals: preserve dismissal/restore replay fields.
     ...waitingDismissalReplayFields(response),
+    // Sender ask withdrawals & replace (supersedes): preserve withdrawal/replace replay fields.
+    ...askWithdrawalReplayFields(response),
   };
 }
 
@@ -12877,6 +12921,7 @@ async function resolveSignalWriteTarget(
       AND s.id = ${inReplyTo}::uuid
       AND s.kind IN ('ask', 'note')
       AND s.until > statement_timestamp()
+      AND NOT swarm.ask_is_withdrawn(s.workspace_id, s.id)
     LIMIT 1
   `;
   const reference = referenceRows[0];
@@ -13757,6 +13802,12 @@ async function replayAuditChannelIds(
   if (typeof choiceAnswer?.signal_id === "string" && UUID_RE.test(choiceAnswer.signal_id)) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [choiceAnswer.signal_id]));
   }
+  if (typeof stored?.withdrawn === "boolean" && typeof stored?.signal_id === "string" && UUID_RE.test(stored.signal_id)) {
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.signal_id]));
+  }
+  if (typeof stored?.superseded_signal_id === "string" && UUID_RE.test(stored.superseded_signal_id)) {
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.superseded_signal_id]));
+  }
   /* A stored reaction names the message it was on, and its success proves the reactor could read
    * that message then. Tag every later use of the command id with that message's channel, whatever
    * the replay's kind or payload, so a reactor removed from a private channel since cannot write an
@@ -13918,6 +13969,7 @@ async function reraiseAsk(
     channel_id: string | null;
     thread_root_id: string | null;
     live: boolean;
+    withdrawn: boolean;
     answered: boolean;
     too_soon: boolean;
     next_allowed_at: Date | null;
@@ -13925,6 +13977,7 @@ async function reraiseAsk(
     SELECT s.id, s.to_user_id, s.to_agent_principal_id, s.body, s.about, s.until,
       s.channel_id, s.thread_root_id,
       s.until > statement_timestamp() AS live,
+      swarm.ask_is_withdrawn(s.workspace_id, s.id) AS withdrawn,
       swarm.ask_answered(s.workspace_id, s.id) AS answered,
       coalesce(x.last_raised_at > statement_timestamp() - interval '24 hours', false) AS too_soon,
       x.last_raised_at + interval '24 hours' AS next_allowed_at
@@ -13952,6 +14005,11 @@ async function reraiseAsk(
     return { status: 404, body: { error: "not_found", message: "No ask of yours with that id." } };
   }
   auditChannelIds = ask.channel_id !== null ? [ask.channel_id] : undefined;
+  if (ask.withdrawn) {
+    await audit("domain", "reraise_ask_withdrawn");
+    return decided({ status: 409, body: { error: "ask_withdrawn",
+      message: "That ask was withdrawn, so it can't be re-raised." } });
+  }
   if (!ask.live) {
     await audit("domain", "reraise_ask_expired");
     return decided({ status: 409, body: { error: "ask_expired",
@@ -14663,7 +14721,29 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
     VALUES (${posted.signal.id}::uuid, ${route.workspaceId}::uuid,
       ${tx.json(command.options as unknown as postgres.JSONValue)}::jsonb, ${command.multi})
   `;
-  const response: StoredResponse = { ok: true, event_ids: [], signal: posted.signal, choice_options: command.options };
+  if (command.supersedes !== undefined) {
+    const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+    const supersedeOutcome = await applyWithdrawAsk(
+      tx, route.workspaceId, actorKind, canonicalPrincipal(auth.actor), command.supersedes, posted.signal.id,
+    );
+    if (!supersedeOutcome.ok) {
+      throw new LocalCommandRefused(
+        { status: supersedeOutcome.status, body: { error: supersedeOutcome.error, message: supersedeOutcome.message } },
+        {
+          auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: supersedeOutcome.status === 404 || supersedeOutcome.status === 403 ? "authz" : "domain",
+          reason: supersedeOutcome.reason, detail: ctx.ignoredIdentity, hash: ctx.hash, channelIds: auditChannelIds,
+        },
+      );
+    }
+    if (supersedeOutcome.channel_id !== null) {
+      auditChannelIds = unionChannelIds(auditChannelIds, [supersedeOutcome.channel_id]);
+    }
+  }
+  const response: StoredResponse = {
+    ok: true, event_ids: [], signal: posted.signal, choice_options: command.options,
+    ...(command.supersedes !== undefined ? { superseded_signal_id: command.supersedes } : {}),
+  };
   await choiceLedgerSettle(tx, route, auth, ctx, response);
   await audit("accepted", null);
   await chargeSpend(tx, "signal_post");
@@ -14710,11 +14790,12 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
   const [ask] = await tx<{
     id: string; from_kind: "user" | "agent"; from_principal: string; to_user_id: string | null;
     to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
-    until: Date; live: boolean; answered: boolean; options: ChoiceOption[]; multi: boolean;
+    until: Date; live: boolean; withdrawn: boolean; answered: boolean; options: ChoiceOption[]; multi: boolean;
     channel_visibility: ChannelVisibility | null; channel_archived_at: Date | null;
   }[]>`
     SELECT s.id, s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id,
       s.thread_root_id, s.until, s.until > statement_timestamp() AS live,
+      swarm.ask_is_withdrawn(s.workspace_id, s.id) AS withdrawn,
       swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options, c.multi,
       ch.visibility AS channel_visibility, ch.archived_at AS channel_archived_at
     FROM swarm.ask_choices c
@@ -14769,7 +14850,7 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
         other_text: mine.other_text, reply_signal_id: mine.reply_signal_id },
       events: [], min_client_version: ctx.minClientVersion } });
   }
-  if (!ask.live) {
+  if (!ask.live || ask.withdrawn) {
     await audit("domain", "ask_expired");
     return ctx.decided({ status: 409, body: { error: "ask_expired", message: "This ask has expired." } });
   }
@@ -14958,11 +15039,14 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
   // Roster R1b: the hosted reraise tool sends exactly one reraise_ask, and no other tool can.
   if (tool === "reraise") return command?.kind === "reraise_ask" && exactKeys(command, ["kind", "signal_id"]);
   if (command?.kind === "reraise_ask") return false;
+  // Sender ask withdrawal: the hosted withdraw tool sends exactly one withdraw_ask, and no other tool can.
+  if (tool === "withdraw") return command?.kind === "withdraw_ask" && exactKeys(command, ["kind", "signal_id"]);
+  if (command?.kind === "withdraw_ask") return false;
   /* Choice asks: the hosted ask tool sends an ask with choices as one ask_choice, with only the
    * fields that command takes. answer_choice is a person's click and no hosted tool sends it. */
   if (tool === "ask" && command?.kind === "ask_choice") {
     return Object.keys(command).every((key) =>
-      ["kind", "body", "to_user_id", "about", "options", "multi", "channel"].includes(key));
+      ["kind", "body", "to_user_id", "about", "options", "multi", "channel", "supersedes"].includes(key));
   }
   if (command?.kind === "ask_choice" || command?.kind === "answer_choice") return false;
   /* The hosted react tool sends exactly one add_reaction or remove_reaction with signal_id and emoji,
@@ -17334,7 +17418,8 @@ async function handleTransaction(
         /* A choice ask posts one ask, so it needs post_signal like any ask. answer_choice is a
          * person's command and never reaches an agent credential path with a scope. */
         !auth.agent.scopes.includes(
-          validation.command.kind === "reraise_ask" || validation.command.kind === "resolve_system_alert" ||
+          validation.command.kind === "reraise_ask" || validation.command.kind === "withdraw_ask" ||
+            validation.command.kind === "resolve_system_alert" ||
             validation.command.kind === "memory_save" ||
             validation.command.kind === "memory_forget" || validation.command.kind === "ask_choice" ||
             /* A reaction is visible content on a message, like a post. */
@@ -18101,6 +18186,61 @@ async function handleTransaction(
         });
       }
       return { status: 200, body: { status: "accepted", ...response } };
+    }
+
+    if (isAskWithdrawalCommandKind(command.kind)) {
+      const withdrawCmd = command as WithdrawAskCommand;
+      const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+      const actorId = canonicalPrincipal(auth.actor);
+      const outcome = await applyWithdrawAsk(
+        tx, route.workspaceId, actorKind, actorId, withdrawCmd.signal_id,
+      );
+      if (!outcome.ok) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
+          reason: outcome.reason, detail: ignoredIdentity, hash,
+        });
+        const refusal: HttpResult = {
+          status: outcome.status,
+          body: { error: outcome.error, message: outcome.message },
+        };
+        return outcome.status === 404 ? refusal : decided(refusal);
+      }
+      const response: StoredResponse = { ok: true, event_ids: [], ...outcome.response };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash,
+        channelIds: outcome.channel_id !== null ? [outcome.channel_id] : undefined,
+      });
+      return {
+        status: 200,
+        body: {
+          status: "accepted",
+          ...response,
+          events: [],
+          min_client_version: minClientVersion,
+        },
+      };
     }
 
     if ((CHANNEL_COMMAND_KINDS as readonly string[]).includes(command.kind)) {
@@ -18903,6 +19043,42 @@ async function handleTransaction(
         };
       }
       const signal = postOutcome.signal;
+      let finalPostAuditChannelIds: readonly string[] | undefined = postAuditChannelIds;
+      if (command.supersedes !== undefined) {
+        const actorKind = auth.credentialKind === "user" ? "user" : "agent";
+        const supersedeOutcome = await applyWithdrawAsk(
+          tx,
+          route.workspaceId,
+          actorKind,
+          canonicalPrincipal(auth.actor),
+          command.supersedes,
+          signal.id,
+        );
+        if (!supersedeOutcome.ok) {
+          throw new LocalCommandRefused(
+            {
+              status: supersedeOutcome.status,
+              body: { error: supersedeOutcome.error, message: supersedeOutcome.message },
+            },
+            {
+              auth,
+              commandKind: kind,
+              workspaceId: route.workspaceId,
+              streamId: route.streamId,
+              outcome: supersedeOutcome.status === 404 || supersedeOutcome.status === 403
+                ? "authz"
+                : "domain",
+              reason: supersedeOutcome.reason,
+              detail: ignoredIdentity,
+              hash,
+              channelIds: postAuditChannelIds,
+            },
+          );
+        }
+        if (supersedeOutcome.channel_id !== null) {
+          finalPostAuditChannelIds = unionChannelIds(postAuditChannelIds, [supersedeOutcome.channel_id]);
+        }
+      }
       /* An agent that answers a message has seen it: observe its own unclaimed delivery of the
        * message it replied to, in this transaction. Best effort and outside the stored response,
        * so the reply's result, its request hash and its replay are unchanged; a replay returns the
@@ -18922,6 +19098,7 @@ async function handleTransaction(
         ok: true,
         event_ids: [],
         signal,
+        ...(command.supersedes !== undefined ? { superseded_signal_id: command.supersedes } : {}),
       };
       const inserted = await tx<{ command_id: string }[]>`
         INSERT INTO swarm.idempotency_keys (
@@ -18957,7 +19134,7 @@ async function handleTransaction(
         outcome: "accepted",
         detail: ignoredIdentity,
         hash,
-        channelIds: postAuditChannelIds,
+        channelIds: finalPostAuditChannelIds,
       });
       await chargeSpend(tx, "signal_post");
       return {

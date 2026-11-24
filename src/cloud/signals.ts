@@ -1763,6 +1763,115 @@ export async function readAgentRoster(
   };
 }
 
+export interface MyOpenAsk {
+  signal_id: string;
+  created_at: string;
+  until: string;
+  addressees: string[];
+  where: string;
+  body_preview: string;
+  dismissed_by_any: boolean;
+  dismissed_count: number;
+}
+
+export interface MyOpenAsksPage {
+  workspace_id: string;
+  generated_at: string;
+  total: number;
+  truncated: boolean;
+  asks: MyOpenAsk[];
+}
+
+function parseMyOpenAsk(value: unknown): MyOpenAsk {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new SignalMalformedError("my_open_asks returned a malformed ask row");
+  }
+  const row = value as Record<string, unknown>;
+  if (
+    !Array.isArray(row.addressees) ||
+    !row.addressees.every((name) => typeof name === "string") ||
+    typeof row.where !== "string" ||
+    typeof row.body_preview !== "string" ||
+    typeof row.dismissed_by_any !== "boolean" ||
+    typeof row.dismissed_count !== "number" ||
+    !Number.isSafeInteger(row.dismissed_count) ||
+    row.dismissed_count < 0
+  ) {
+    throw new SignalMalformedError("my_open_asks returned a malformed ask row");
+  }
+  return {
+    signal_id: checkedUuid(row.signal_id, "my_open_asks signal_id"),
+    created_at: checkedTimestamp(row.created_at, "my_open_asks created_at"),
+    until: checkedTimestamp(row.until, "my_open_asks until"),
+    addressees: row.addressees as string[],
+    where: row.where,
+    body_preview: row.body_preview,
+    dismissed_by_any: row.dismissed_by_any,
+    dismissed_count: row.dismissed_count,
+  };
+}
+
+/** List only the authenticated caller's own open asks in a workspace (agent or human bearer). */
+export async function readMyOpenAsks(
+  target: CloudTarget,
+  token: string,
+  workspaceId: string,
+  params: { limit?: number; afterCreatedAt?: string; afterId?: string } = {},
+  fetcherOrOptions: typeof fetch | SignalReadOptions = fetch,
+): Promise<MyOpenAsksPage> {
+  const options = normalizeReadOptions(fetcherOrOptions);
+  const requestBody: Record<string, unknown> = {
+    resource: "my_open_asks",
+    workspace_id: workspaceId,
+    ...(params.limit === undefined ? {} : { limit: params.limit }),
+    ...(params.afterCreatedAt !== undefined && params.afterId !== undefined
+      ? { after_created_at: params.afterCreatedAt, after_id: params.afterId }
+      : {}),
+  };
+  let result: { response: Response; body: unknown } | null;
+  try {
+    result = await fetchSignalReadRetrying(options.fetcher, readEndpoint(target), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        apikey: target.anonKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    }, perReadTimeoutMs(options));
+  } catch (error) {
+    if (error instanceof SignalReadTimeoutError) {
+      if (options.deadlineMs !== undefined) throw error;
+      throw new SignalTransportError("open asks read could not reach the cloud service");
+    }
+    throw error;
+  }
+  if (result === null) throw new SignalTransportError("open asks read could not reach the cloud service");
+  const { response, body } = result;
+  if (!response.ok) throwSignalHttp(response, body, "open asks read failed");
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new SignalMalformedError("open asks read returned malformed JSON");
+  }
+  const payload = body as Record<string, unknown>;
+  if (
+    !Array.isArray(payload.asks) ||
+    typeof payload.total !== "number" ||
+    !Number.isSafeInteger(payload.total) ||
+    payload.total < 0 ||
+    typeof payload.truncated !== "boolean"
+  ) {
+    throw new SignalMalformedError("open asks read returned malformed JSON");
+  }
+  return {
+    workspace_id: checkedUuid(payload.workspace_id, "my_open_asks workspace_id"),
+    generated_at: checkedTimestamp(payload.generated_at, "my_open_asks generated_at"),
+    total: payload.total,
+    truncated: payload.truncated,
+    asks: payload.asks.map(parseMyOpenAsk),
+  };
+}
+
 export async function readAgentSignalDirectory(
   target: CloudTarget,
   token: string,

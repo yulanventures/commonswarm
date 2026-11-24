@@ -704,6 +704,31 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     const reraise = result.body.reraise as { count?: unknown; next_allowed_at?: unknown } | undefined;
     return { ...commandOutput(result), reraise_count: reraise?.count ?? null, next_allowed_at: reraise?.next_allowed_at ?? null };
   }
+  if (call.name === "withdraw") {
+    const result = await handleHostedCommand({
+      command_id: String(args.request_id),
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: { kind: "withdraw_ask", signal_id: String(args.signal_id).toLowerCase() },
+    }, capability);
+    const out = commandOutput(result);
+    return {
+      signal_id: out.signal_id ?? String(args.signal_id).toLowerCase(),
+      withdrawn: out.withdrawn === true,
+      ...(typeof out.withdrawn_at === "string" ? { withdrawn_at: out.withdrawn_at } : {}),
+      ...(typeof out.replaced_by_signal_id === "string" ? { replaced_by_signal_id: out.replaced_by_signal_id } : {}),
+    };
+  }
+  if (call.name === "asks_open") {
+    return readOutput(await handleHostedRead({
+      resource: "my_open_asks",
+      workspace_id: binding.workspaceId,
+      ...(args.limit === undefined ? {} : { limit: Number(args.limit) }),
+      ...(args.after_created_at === undefined ? {} : { after_created_at: String(args.after_created_at) }),
+      ...(args.after_id === undefined ? {} : { after_id: String(args.after_id).toLowerCase() }),
+    }, capability));
+  }
   if (call.name === "react") {
     const command = reactionCommand(args);
     return reactionOutput(await handleHostedCommand({

@@ -28,6 +28,7 @@ export type WaitingDismissalCommand =
     kind: "restore_waiting_item";
     item_kind: WaitingDismissalItemKind;
     item_id: string;
+    dismissal?: string;
   };
 
 export type WaitingDismissalParse =
@@ -69,11 +70,17 @@ export function parseWaitingDismissalCommand(cmd: Record<string, unknown>): Wait
   if (!isWaitingDismissalCommandKind(cmd.kind)) {
     return { ok: false, status: 400, reason: "Unknown waiting dismissal command." };
   }
-  if (!exactKeys(cmd, ["kind", "item_kind", "item_id"])) {
+  const hasDismissal = cmd.kind === "restore_waiting_item" && Object.hasOwn(cmd, "dismissal");
+  const expectedKeys = hasDismissal
+    ? ["kind", "item_kind", "item_id", "dismissal"]
+    : ["kind", "item_kind", "item_id"];
+  if (!exactKeys(cmd, expectedKeys)) {
     return {
       ok: false,
       status: 400,
-      reason: `${cmd.kind} takes item_kind and item_id.`,
+      reason: cmd.kind === "restore_waiting_item"
+        ? "restore_waiting_item takes item_kind, item_id, and optional dismissal."
+        : "dismiss_waiting_item takes item_kind and item_id.",
     };
   }
   if (
@@ -89,10 +96,24 @@ export function parseWaitingDismissalCommand(cmd: Record<string, unknown>): Wait
   if (!isUuid(cmd.item_id)) {
     return { ok: false, status: 400, reason: "item_id must be a UUID." };
   }
+  if (hasDismissal && !isUuid(cmd.dismissal)) {
+    return { ok: false, status: 400, reason: "dismissal must be a UUID." };
+  }
+  if (cmd.kind === "restore_waiting_item") {
+    return {
+      ok: true,
+      command: {
+        kind: "restore_waiting_item",
+        item_kind: cmd.item_kind as WaitingDismissalItemKind,
+        item_id: cmd.item_id.toLowerCase(),
+        ...(hasDismissal ? { dismissal: (cmd.dismissal as string).toLowerCase() } : {}),
+      },
+    };
+  }
   return {
     ok: true,
     command: {
-      kind: cmd.kind,
+      kind: "dismiss_waiting_item",
       item_kind: cmd.item_kind as WaitingDismissalItemKind,
       item_id: cmd.item_id.toLowerCase(),
     },
@@ -119,7 +140,8 @@ export async function applyWaitingDismissalCommand(
         ${workspaceId}::uuid,
         ${userId}::uuid,
         ${command.item_kind},
-        ${command.item_id}::uuid
+        ${command.item_id}::uuid,
+        ${command.dismissal ?? null}::uuid
       ) AS result
     `;
 
@@ -134,6 +156,8 @@ export async function applyWaitingDismissalCommand(
           item_kind: command.item_kind,
           item_id: command.item_id,
           dismissed: Boolean(result.dismissed),
+          ...(typeof result.created === "boolean" ? { created: result.created } : {}),
+          ...(typeof result.dismissal === "string" ? { dismissal: result.dismissal.toLowerCase() } : {}),
           ...(typeof result.dismissed_at === "string" ? { dismissed_at: result.dismissed_at } : {}),
         },
       };
@@ -215,6 +239,8 @@ export function waitingDismissalReplayFields(response: Record<string, unknown>):
     item_kind: response.item_kind,
     item_id: response.item_id,
     ...(typeof response.dismissed === "boolean" ? { dismissed: response.dismissed } : {}),
+    ...(typeof response.created === "boolean" ? { created: response.created } : {}),
+    ...(typeof response.dismissal === "string" ? { dismissal: response.dismissal } : {}),
     ...(typeof response.dismissed_at === "string" ? { dismissed_at: response.dismissed_at } : {}),
     ...(typeof response.restored === "boolean" ? { restored: response.restored } : {}),
     ...(typeof response.restored_at === "string" ? { restored_at: response.restored_at } : {}),

@@ -101,10 +101,10 @@ export const CORE_TOOL_TABLE = [
   {
     name: "ask", effect: "write", title: "Ask workspace participants",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Ask workspace participants: privately with recipients, or in a channel with mentions (@Name in the body counts as a mention). Optionally attach files from file_put or file_ls. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may, and attachments and mentions are not allowed. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
+    description: "Ask workspace participants: privately with recipients, or in a channel with mentions (@Name in the body counts as a mention). Optionally attach files from file_put or file_ls, or pass supersedes (the signal_id of an earlier open ask this seat sent) to replace it atomically. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may, and attachments and mentions are not allowed. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     // No anyOf: recipients, mentions, an @Name in the body, or options/choices name the audience (validateHostedToolArguments).
-    inputSchema: objectSchema({ seat: handle, recipients, mentions, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, recipients, mentions, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, supersedes: uuid, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "note", effect: "write", title: "Share a workspace note",
@@ -133,6 +133,20 @@ export const CORE_TOOL_TABLE = [
     description: "React to a message this seat can read with one emoji, or a shortcode such as :+1:. Set remove to true to take the reaction off. Retry with the same request_id.",
     annotations: { title: "React to a message", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, signal_id: uuid, emoji: text(1, SIGNAL_REACTION_MAX_BYTES), remove: { type: "boolean" }, request_id: requestId }, ["seat", "signal_id", "emoji", "request_id"]),
+  },
+  {
+    name: "withdraw", effect: "write", title: "Withdraw an open ask",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "Withdraw an open ask this seat sent so it leaves every addressee's Waiting on you list. Only the ask's own sender can withdraw it while it is open. Withdrawing twice is idempotent. Retry with the same request_id.",
+    annotations: { title: "Withdraw an open ask", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, signal_id: uuid, request_id: requestId }, ["seat", "signal_id", "request_id"]),
+  },
+  {
+    name: "asks_open", effect: "read", title: "List this seat's open asks",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "List open asks this seat sent in the workspace (signal_id, created_at, addressees, where, first 120 chars of body, and whether any addressee has dismissed it). Page with after_created_at and after_id.",
+    annotations: { title: "List this seat's open asks", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, limit: integer(1, 100), after_created_at: isoTimestamp, after_id: uuid }, ["seat"]),
   },
   {
     name: "working_on", effect: "write", title: "Share current work",
@@ -452,11 +466,13 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
   // An ask names recipients, mentions or choices (validateHostedToolArguments).
-  ask: { allowed: ["seat", "recipients", "mentions", "body", "attachments", "channel", "options", "choices", "multi", "request_id"], required: ["seat", "body", "request_id"] },
+  ask: { allowed: ["seat", "recipients", "mentions", "body", "attachments", "channel", "options", "choices", "multi", "supersedes", "request_id"], required: ["seat", "body", "request_id"] },
   note: { allowed: ["seat", "recipients", "mentions", "body", "attachments", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   reply: { allowed: ["seat", "signal_id", "body", "mentions", "private", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
   reraise: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
   react: { allowed: ["seat", "signal_id", "emoji", "remove", "request_id"], required: ["seat", "signal_id", "emoji", "request_id"] },
+  withdraw: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
+  asks_open: { allowed: ["seat", "limit", "after_created_at", "after_id"], required: ["seat"] },
   working_on: { allowed: ["seat", "body", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   members: { allowed: ["seat"], required: ["seat"] },
   roster: { allowed: ["seat"], required: ["seat"] },
@@ -531,6 +547,8 @@ const EXPECTED: Record<string, string> = {
   emoji: "provide one emoji, or a shortcode such as :+1:, :eyes: or :white_check_mark:",
   remove: "provide true to take the reaction off, or omit it to add one",
   reaction_signal_id: "provide the signal UUID from check or channel_read that you want to react to",
+  withdraw_signal_id: "provide the signal UUID of an open ask this seat sent",
+  supersedes: "provide the signal UUID of an earlier open ask this seat sent that this new ask replaces",
   options: `provide ${CHOICE_MIN} to ${CHOICE_MAX} objects with label (1 to ${CHOICE_LABEL_MAX} characters, each different), optional description (1 to ${CHOICE_DESCRIPTION_MAX}), optional id (a-z, 0-9, _ or -) and recommended true on at most one`,
   choices: `provide ${CHOICE_MIN} to ${CHOICE_MAX} different labels of 1 to ${CHOICE_LABEL_MAX} characters, or use options`,
   multi: "provide true to let the person pick several, or omit it for one",
@@ -607,7 +625,11 @@ export function validateHostedToolArguments(
     throw new HostedToolInputError(`Unknown tool argument. Use only: ${shape.allowed.join(", ")}.`);
   }
   const expected = (key: string): string | undefined =>
-    name === "react" && key === "signal_id" ? EXPECTED.reaction_signal_id : EXPECTED[key];
+    name === "react" && key === "signal_id"
+      ? EXPECTED.reaction_signal_id
+      : name === "withdraw" && key === "signal_id"
+      ? EXPECTED.withdraw_signal_id
+      : EXPECTED[key];
   for (const key of shape.required) {
     if (!Object.hasOwn(args, key)) throw new HostedToolInputError(`Missing ${key}: ${expected(key)}.`);
   }
@@ -710,9 +732,24 @@ export function validateHostedToolArguments(
     if (!validRequestId(args.request_id)) invalid("request_id");
     return args;
   }
-  if (name === "reraise") {
+  if (name === "reraise" || name === "withdraw") {
     if (!validUuid(args.signal_id)) invalid("signal_id");
     if (!validRequestId(args.request_id)) invalid("request_id");
+    return args;
+  }
+  if (name === "asks_open") {
+    if (args.limit !== undefined && !wholeNumber(args.limit, 1, 100)) {
+      throw new HostedToolInputError("Invalid limit: provide a whole number from 1 to 100.");
+    }
+    const hasAfter = args.after_created_at !== undefined || args.after_id !== undefined;
+    if (hasAfter) {
+      if (typeof args.after_created_at !== "string" || args.after_created_at.length > 64 || !Number.isFinite(Date.parse(args.after_created_at))) {
+        invalid("after_created_at");
+      }
+      if (!validUuid(args.after_id)) {
+        throw new HostedToolInputError(`Invalid after_id: ${EXPECTED.after_id_cursor}.`);
+      }
+    }
     return args;
   }
   if (name === "react") {
@@ -750,6 +787,7 @@ export function validateHostedToolArguments(
   }
   if (!validBody(args.body)) invalid("body");
   if (!validRequestId(args.request_id)) invalid("request_id");
+  if (name === "ask" && args.supersedes !== undefined && !validUuid(args.supersedes)) invalid("supersedes");
   if (name === "ask" && (args.options !== undefined || args.choices !== undefined || args.multi !== undefined)) {
     hostedChoiceOptions(args);
     // ask_choice carries no mentions on the command edge; an @Name in a choice ask's body stays text.

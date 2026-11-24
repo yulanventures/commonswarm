@@ -63,6 +63,7 @@ const MESSAGES = {
   channel_not_found: "There's no channel with that name in this workspace. Call channel_ls to see its channels.",
   not_found: "No ask sent by this seat has that signal_id. Use the signal_id returned when the ask was sent.",
   ask_expired: "That ask has expired, so it can't be re-raised. Send a new ask if it still matters.",
+  ask_withdrawn: "That ask was withdrawn, so it can't be re-raised.",
   ask_answered: "That ask already has an answer, so there's nothing to re-raise. Call check to read replies to it.",
   reraise_too_soon: "This ask was re-raised in the last 24 hours. Try again after that.",
   reraise_unsupported: "Only an ask sent to someone can be re-raised; this one went to the whole workspace.",
@@ -143,6 +144,10 @@ export function hostedToolError(error: unknown, tool: HostedToolName): {
     // The command intentionally combines missing/expired/unaddressed signals
     // and authorization denials. Do not turn this into an existence oracle.
     ? "The signal is unavailable for this seat, or reply access is missing. Check signal_id in check output and reply from the addressed seat; ask a workspace admin if access is missing."
+    : code === "not_found" && tool === "withdraw"
+    ? "No open ask sent by this seat has that signal_id. Use asks_open to list open asks this seat can withdraw."
+    : code === "not_found" && tool === "ask"
+    ? "The ask named in supersedes is not an open ask sent by this seat, so nothing was sent. Use asks_open to list open asks this seat can replace."
     : code === "not_found" && tool === "memory_get"
     ? "No active memory in this workspace has that memory_id. Use one from memory_search."
     : code === "not_found" && tool === "memory_forget"
@@ -167,6 +172,9 @@ export function commandOutput(result: CommandResult): Record<string, unknown> {
       in_reply_to: row.in_reply_to ?? null,
       // An ask with choices returns the options as stored, ids and order included.
       ...(Array.isArray(result.body.choice_options) ? { choices: result.body.choice_options } : {}),
+      ...(typeof result.body.superseded_signal_id === "string"
+        ? { superseded_signal_id: result.body.superseded_signal_id }
+        : {}),
     };
   }
   if (typeof result.body.handle === "string") {

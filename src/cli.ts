@@ -368,7 +368,9 @@ import {
   SINCE_OFFSET_GUIDANCE,
   readAgentRoster,
   readAgentSignalDirectory,
+  readMyOpenAsks,
   readReplyTarget,
+  type MyOpenAsksPage,
   mentionRosterFromDirectory,
   readSignals,
   renderSignalStatus,
@@ -765,7 +767,7 @@ export const KNOWN_FLAGS = new Set([
   "help", "input-file", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
   "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out", "policy-file", "source", "suite",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
-  "parent", "thread",
+  "parent", "supersedes", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "wake-transport", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
   "wake-profile", "wake-host-session-id",
@@ -4083,6 +4085,16 @@ async function runPostSignal(
     ? parseWaitSeconds(args.required("wait"))
     : undefined;
   let parentSignalId: string | undefined;
+  let supersedesSignalId: string | undefined;
+  if (kind === "ask") {
+    const explicitSupersedes = args.optional("supersedes");
+    if (explicitSupersedes !== undefined) {
+      if (!UUID_RE.test(explicitSupersedes)) {
+        throw new UsageError("--supersedes requires the full signal UUID of an open ask you sent");
+      }
+      supersedesSignalId = explicitSupersedes.toLowerCase();
+    }
+  }
   if (kind === "ask" && choices === null) {
     const explicitParent = args.optional("parent");
     if (explicitParent !== undefined) {
@@ -4166,12 +4178,14 @@ async function runPostSignal(
     options: choices,
     ...(choiceAsk?.multi === true ? { multi: true } : {}),
     ...(channel === undefined || channel === GENERAL_CHANNEL_SLUG ? {} : { channel }),
+    ...(supersedesSignalId === undefined ? {} : { supersedes: supersedesSignalId }),
   } : {
     kind: "post_signal",
     signal_kind: kind,
     body,
     ...postSignalTargets(recipient),
     ...(parentSignalId === undefined ? {} : { parent_signal_id: parentSignalId }),
+    ...(supersedesSignalId === undefined ? {} : { supersedes: supersedesSignalId }),
     about: args.optional("about") === undefined
       ? null
       : signalText(args.required("about"), "about"),
@@ -4188,8 +4202,9 @@ async function runPostSignal(
     result = await postSignalCommand(cloud, credential, command);
   } catch (error) {
     if (kind === "ask") {
-      // A choice ask's refusals (flag off, rate, recipient) are definite: pass the server's sentence through.
+      // A choice ask's refusals (flag off, rate, recipient) or a supersedes 404 are definite: pass through.
       if (choices !== null && error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) throw error;
+      if (supersedesSignalId !== undefined && error instanceof CommandHttpError && error.status === 404 && error.code === "not_found") throw error;
       if (error instanceof CommandHttpError && isAskChainRefusalCode(error.code)) {
         throw new CommandHttpError(error.status, printableAskRefusalMessage(error.message), error.code);
       }
@@ -4270,6 +4285,7 @@ async function runPostSignal(
       message:
         "Signal shared. It is immutable, tenancy-scoped, and will quietly expire at its horizon.",
       signal,
+      ...(supersedesSignalId === undefined ? {} : { superseded_signal_id: supersedesSignalId }),
       ...(choices === null ? {} : { choices, ...(choiceAsk?.multi === true ? { multi: true } : {}) }),
       ...(mentions.length === 0 ? {} : { mentions }),
       ...(formatAdvisory !== null ? { [FORMAT_ADVISORY_FIELD]: formatAdvisory } : {}),
@@ -4328,6 +4344,8 @@ async function runPostSignal(
   }
   process.stdout.write(
     `Signal shared. It is immutable and ${audience}.${
+      supersedesSignalId === undefined ? "" : ` Replaced ${supersedesSignalId}.`
+    }${
       mentionedNames.length === 0 ? "" : ` Mentioned: ${mentionedNames.join(", ")}.`
     }\n${renderSignals([signal], {
       inbox: false,
@@ -4350,7 +4368,7 @@ export const POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS = [
   "about", "channel", "until", "json", ...SESSION_CONTEXT_FLAGS,
 ] as const;
 export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = [...POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS, "to", "mention", "attach"] as const;
-export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "parent", "wait", "choice", "option", "recommended", "multi"] as const;
+export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "parent", "supersedes", "wait", "choice", "option", "recommended", "multi"] as const;
 
 export function postSignalAllowedFlags(kind: SignalKind = "note"): readonly string[] {
   return kind === "working-on" ? POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS
@@ -4906,6 +4924,139 @@ async function runReraise(args: Arguments): Promise<void> {
     return;
   }
   process.stdout.write(`Re-raised. You can re-raise it again after ${reraise?.next_allowed_at ?? "24 hours"}.\n`);
+}
+
+export const RUN_ASK_WITHDRAW_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export const RUN_ASK_OPEN_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "limit",
+  "after-created-at",
+  "after-id",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+function formatAskAge(createdAtIso: string, nowMs: number): string {
+  const createdMs = Date.parse(createdAtIso);
+  if (!Number.isFinite(createdMs)) return "?";
+  const diffSec = Math.max(0, Math.floor((nowMs - createdMs) / 1000));
+  if (diffSec < 60) return "<1m";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h`;
+  return `${Math.floor(diffHr / 24)}d`;
+}
+
+export function formatOpenAsksTable(page: MyOpenAsksPage, nowMs: number = Date.now()): string {
+  if (page.asks.length === 0) return "No open asks.\n";
+  const lines = page.asks.map((ask) => {
+    const age = formatAskAge(ask.created_at, nowMs);
+    const to = ask.addressees.length > 0
+      ? ask.addressees.map((name) => sanitizeDisplayLabel(name, name)).join(", ")
+      : "everyone";
+    const where = sanitizeDisplayLabel(ask.where, ask.where);
+    const firstLine = sanitizeDisplayLabel(
+      (ask.body_preview.split(/\r?\n/u)[0] ?? "").replace(/\s+/gu, " ").trim(),
+      "",
+    );
+    const dismissed = ask.dismissed_count > 0 ? `  [dismissed by ${ask.dismissed_count}]` : "";
+    return `${ask.signal_id}  ${age}  to:${to}  ${where}  ${firstLine}${dismissed}`;
+  });
+  if (page.truncated && page.asks.length > 0) {
+    const last = page.asks[page.asks.length - 1]!;
+    lines.push(
+      `Showing ${page.asks.length} of ${page.total} open asks. Pass --after-created-at ${last.created_at} --after-id ${last.signal_id} for more.`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Sender withdraws an open ask it sent (no reason text). */
+async function runAskWithdraw(args: Arguments): Promise<void> {
+  args.assertShape(RUN_ASK_WITHDRAW_ACCEPTED_FLAGS, 3);
+  const signalId = args.positionals[2];
+  if (signalId === undefined || !UUID_RE.test(signalId)) {
+    throw new UsageError("ask withdraw requires the UUID of an ask you sent");
+  }
+  const cloud = await target(args);
+  const credential = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const result = await postSignalCommand(cloud, credential, {
+    kind: "withdraw_ask",
+    signal_id: signalId.toLowerCase(),
+  });
+  const res = result.response;
+  const resolvedId = typeof res.signal_id === "string" ? res.signal_id : signalId.toLowerCase();
+  if (args.has("json")) {
+    printJson({
+      signal_id: resolvedId,
+      withdrawn: res.withdrawn === true,
+      ...(typeof res.created === "boolean" ? { created: res.created } : {}),
+      ...(typeof res.withdrawn_at === "string" ? { withdrawn_at: res.withdrawn_at } : {}),
+      ...(typeof res.replaced_by_signal_id === "string"
+        ? { replaced_by_signal_id: res.replaced_by_signal_id }
+        : {}),
+    });
+    return;
+  }
+  process.stdout.write(
+    res.created === false
+      ? `Ask ${resolvedId} was already withdrawn.\n`
+      : `Withdrawn ask ${resolvedId}.\n`,
+  );
+}
+
+/** Sender lists its own open asks in the workspace. */
+async function runAskOpen(args: Arguments): Promise<void> {
+  args.assertShape(RUN_ASK_OPEN_ACCEPTED_FLAGS, 2);
+  let limit: number | undefined;
+  const rawLimit = args.optional("limit");
+  if (rawLimit !== undefined) {
+    const parsed = Number(rawLimit);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) {
+      throw new UsageError("--limit must be an integer between 1 and 100");
+    }
+    limit = parsed;
+  }
+  const afterCreatedAt = args.optional("after-created-at");
+  const afterId = args.optional("after-id");
+  if ((afterCreatedAt === undefined) !== (afterId === undefined)) {
+    throw new UsageError("--after-created-at and --after-id must be given together");
+  }
+  if (afterCreatedAt !== undefined && Number.isNaN(Date.parse(afterCreatedAt))) {
+    throw new UsageError("--after-created-at must be an ISO-8601 timestamp");
+  }
+  if (afterId !== undefined && !UUID_RE.test(afterId)) {
+    throw new UsageError("--after-id must be a UUID");
+  }
+  const cloud = await target(args);
+  const credential = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const page = await readMyOpenAsks(
+    cloud,
+    credential.bearer,
+    credential.selectedWorkspace,
+    {
+      ...(limit === undefined ? {} : { limit }),
+      ...(afterCreatedAt !== undefined && afterId !== undefined
+        ? { afterCreatedAt, afterId: afterId.toLowerCase() }
+        : {}),
+    },
+    credential.fetcher,
+  );
+  if (args.has("json")) {
+    printJson({ ...page });
+    return;
+  }
+  process.stdout.write(formatOpenAsksTable(page));
 }
 
 export const RUN_REACT_ACCEPTED_FLAGS = [
@@ -12606,7 +12757,41 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach", "mention"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent> | --mention <member|agent> ...] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "parent", "wait"], cliOnlyFlags: ["attach", "choice", "option", "recommended", "multi", "mention"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent> | --mention <member|agent> ...] [--parent <signal-id>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`, `cswarm ask ${signalBody} [--to <member>] [--channel <name>] --option "<label>[::description]" --option "<label>[::description]" [--option ...] [--recommended <n|id>] [--multi] [--about <ref>] [--wait <seconds>] [--json]  # 2..6 options (--choice <label> also works); a person answers with a click or Other text`], workspaceErrorJson: true }),
+  ask: commandEntry({
+    tool: "ask", mcp: true,
+    ...selectedVariants({
+      post: commandVariant("post", traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), [
+        `cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent> | --mention <member|agent> ...] [--parent <signal-id>] [--supersedes <ask-id>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`,
+        `cswarm ask ${signalBody} [--to <member>] [--channel <name>] [--supersedes <ask-id>] --option "<label>[::description]" --option "<label>[::description]" [--option ...] [--recommended <n|id>] [--multi] [--about <ref>] [--wait <seconds>] [--json]  # 2..6 options (--choice <label> also works); a person answers with a click or Other text`,
+      ]),
+      withdraw: commandVariant("withdraw", traced("runAskWithdraw", runAskWithdraw), [
+        "cswarm ask withdraw <ask-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]",
+      ]),
+      open: commandVariant("open", traced("runAskOpen", runAskOpen), [
+        "cswarm ask open [--limit <1-100>] [--after-created-at <iso> --after-id <uuid>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]",
+      ]),
+    }, (args) => {
+      const first = args.positionals[1];
+      if (first === "withdraw" && !args.has("body-file") && !args.has("body-stdin")) return "withdraw";
+      if (
+        first === "open" &&
+        args.positionals.length <= 2 &&
+        !args.has("body-file") && !args.has("body-stdin") &&
+        !args.has("to") && !args.has("mention") && !args.has("option") &&
+        !args.has("choice") && !args.has("supersedes") && !args.has("channel") &&
+        !args.has("about") && !args.has("until") && !args.has("parent") &&
+        !args.has("wait") && !args.has("attach")
+      ) {
+        return "open";
+      }
+      return "post";
+    }),
+    description: "Post an ask, withdraw an open ask, or list your open asks.",
+    mutates: true,
+    flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "parent", "supersedes", "wait", "limit", "after-created-at", "after-id"],
+    cliOnlyFlags: ["attach", "choice", "option", "recommended", "multi", "mention"],
+    transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, workspaceErrorJson: true,
+  }),
   reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "private", "status", "until"], cliOnlyFlags: ["attach", "mention"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--private] [--status <${REPLY_STATUSES.join("|")}>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--mention <member|agent> ...] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
@@ -12748,7 +12933,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   unreact: RUN_UNREACT_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
   note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
-  ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,
+  ask: mergeHelpFlags(POST_SIGNAL_ASK_ACCEPTED_FLAGS, RUN_ASK_WITHDRAW_ACCEPTED_FLAGS, RUN_ASK_OPEN_ACCEPTED_FLAGS),
   reply: REPLY_ACCEPTED_FLAGS,
   receipt: RUN_RECEIPT_1_ACCEPTED_FLAGS,
   feed: SIGNAL_READ_FEED_ACCEPTED_FLAGS,
@@ -12781,6 +12966,9 @@ export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "check.stamp": RUN_CHECK_STAMP_ACCEPTED_FLAGS,
   "check.status": RUN_CHECK_STATUS_ACCEPTED_FLAGS,
   "check.ci": RUN_CHECK_CI_ACCEPTED_FLAGS,
+  "ask.post": POST_SIGNAL_ASK_ACCEPTED_FLAGS,
+  "ask.withdraw": RUN_ASK_WITHDRAW_ACCEPTED_FLAGS,
+  "ask.open": RUN_ASK_OPEN_ACCEPTED_FLAGS,
   "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
   "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
   get "inbox.read"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_READ_SELECTOR_FLAGS as readonly string[]).includes(flag)); },

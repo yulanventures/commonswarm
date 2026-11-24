@@ -55,11 +55,13 @@ export const schema = (properties: Record<string, object>, required: string[] = 
 export const MCP_TOOL_TABLE = [
   { name: "whoami", description: "Show this authenticated agent and workspace.", inputSchema: schema({}), mapResult: mapWhoami },
   { name: "check", description: "Read new directed messages. If a result is lost, call check with its message_id to read the cached full text.", inputSchema: schema({ message_id: uuid }), mapResult: { fresh: mapCheck, cached: mapCachedCheck } },
-  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. Without to, @Name in the body and mentions (names or ids) wake the people and agents named. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several. With to (a member) only that person answers; without it, anyone who reads the ask may. Choices take no until, parent_signal_id or mentions. The reply reads \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), mentions, parent_signal_id: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX }, options: choiceOptionsSchema, multi: { type: "boolean" as const } }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. Without to, @Name in the body and mentions (names or ids) wake the people and agents named. Pass supersedes (UUID of an earlier open ask you sent) to replace it atomically. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several. With to (a member) only that person answers; without it, anyone who reads the ask may. Choices take no until, parent_signal_id or mentions. The reply reads \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), mentions, parent_signal_id: uuid, supersedes: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX }, options: choiceOptionsSchema, multi: { type: "boolean" as const } }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "note", description: "Share a note. Channel slugs are lowercase. Without to, @Name in the body and mentions (names or ids) wake the people and agents named. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), mentions }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply to a signal: in its thread when everyone in the channel can read it, notifying its author, otherwise privately to its author. Set private to true to answer the author privately. A thread reply takes mentions, and @Name in the body. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, mentions, private: { type: "boolean" as const }, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "reraise", description: "Re-raise an open ask you sent: one reminder note to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapReraise },
   { name: "react", description: "React to a message with one emoji, or a shortcode such as :+1:. Set remove to true to take your reaction off. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, emoji: string(SIGNAL_REACTION_MAX_BYTES, 1), remove: { type: "boolean" as const }, request_id: requestId }, ["signal_id", "emoji", "request_id"]), mapResult: mapReaction },
+  { name: "withdraw", description: "Withdraw an open ask you sent so it leaves every addressee's Waiting on you list. Only the ask's own sender can withdraw it while it is open. Withdrawing twice is idempotent. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapWithdraw },
+  { name: "asks_open", description: "List your own open asks in this workspace (signal_id, created_at, addressees, where, first 120 chars of body, and whether any addressee has dismissed it). Page with after_created_at and after_id.", inputSchema: schema({ limit: { type: "integer" as const, minimum: 1, maximum: 100 }, after_created_at: string(64, 1), after_id: uuid }), mapResult: (value: object) => fitRows(value, "asks", "More open asks exist. Page with after_created_at and after_id.") },
   { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
   { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
   { name: "channel_ls", description: "List this workspace's live channels, general (unfiled messages) first. unread is true when channel_read has messages there you haven't read, and null until you first read a channel.", inputSchema: schema({}), mapResult: mapChannelList },
@@ -132,6 +134,16 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   }
   for (const key of tool.inputSchema.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");
+  if (name === "asks_open") {
+    const hasAfterCreatedAt = args.after_created_at !== undefined;
+    const hasAfterId = args.after_id !== undefined;
+    if (hasAfterCreatedAt !== hasAfterId) {
+      throw new Error("Invalid argument: after_created_at and after_id must be provided together.");
+    }
+    if (hasAfterCreatedAt && Number.isNaN(Date.parse(String(args.after_created_at)))) {
+      throw new Error("Invalid argument: after_created_at.");
+    }
+  }
   return args as Record<string, string>;
 }
 
@@ -226,7 +238,19 @@ export function mapRoster(roster: AgentRoster): object {
 export function mapSignal(result: PostSignalResult): object {
   const row = result.response.signal!;
   return { signal_id: row.id, kind: row.kind, created_at: row.created_at,
-    in_reply_to: row.in_reply_to ?? null, channel_id: row.channel_id ?? null };
+    in_reply_to: row.in_reply_to ?? null, channel_id: row.channel_id ?? null,
+    ...(typeof result.response.superseded_signal_id === "string"
+      ? { superseded_signal_id: result.response.superseded_signal_id } : {}) };
+}
+
+export function mapWithdraw(result: PostSignalResult): object {
+  const res = result.response;
+  return {
+    signal_id: res.signal_id ?? null,
+    withdrawn: res.withdrawn === true,
+    ...(typeof res.withdrawn_at === "string" ? { withdrawn_at: res.withdrawn_at } : {}),
+    ...(typeof res.replaced_by_signal_id === "string" ? { replaced_by_signal_id: res.replaced_by_signal_id } : {}),
+  };
 }
 
 /** A reaction's outcome: added or already_there, removed or not_there. */
