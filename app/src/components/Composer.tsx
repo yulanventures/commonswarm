@@ -15,6 +15,7 @@ interface ComposerProps {
   placeholder: string;
   phonePlaceholder?: string;
   inputLabel: string;
+  disabled?: boolean;
   sendActiveWhenEmpty?: boolean;
   onSend: () => void;
   agentControls?: {
@@ -30,6 +31,7 @@ export function Composer({
   placeholder,
   phonePlaceholder,
   inputLabel,
+  disabled = false,
   sendActiveWhenEmpty = false,
   onSend,
   agentControls,
@@ -41,7 +43,7 @@ export function Composer({
   const [activeIndex, setActiveIndex] = useState(0);
   const listboxId = useId();
 
-  const startsWithSlash = draft.startsWith('/') && !draft.includes(' ');
+  const startsWithSlash = !disabled && draft.startsWith('/') && !draft.includes(' ');
   const slashQuery = startsWithSlash ? draft.slice(1).toLowerCase() : '';
   const filteredCommands = startsWithSlash
     ? SLASH_COMMANDS.filter((item) =>
@@ -50,23 +52,29 @@ export function Composer({
     : [];
 
   const isSlashOpen =
-    startsWithSlash && !dismissedSlash && filteredCommands.length > 0;
+    !disabled &&
+    startsWithSlash &&
+    !dismissedSlash &&
+    filteredCommands.length > 0;
   const safeActiveIndex =
     filteredCommands.length > 0 ? activeIndex % filteredCommands.length : 0;
 
   const handleDraftChange = (nextValue: string): void => {
+    if (disabled) return;
     appActions.setComposerDraft(targetKey, nextValue);
     setDismissedSlash(false);
     setActiveIndex(0);
   };
 
   const handleSelectCommand = (command: SlashCommand): void => {
+    if (disabled) return;
     appActions.setComposerDraft(targetKey, `${command.command} `);
     setDismissedSlash(true);
     setActiveIndex(0);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (disabled) return;
     if (isSlashOpen) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -104,8 +112,8 @@ export function Composer({
     }
   };
 
-  const hasText = draft.trim().length > 0;
-  const sendEnabled = hasText || sendActiveWhenEmpty;
+  const hasText = !disabled && draft.trim().length > 0;
+  const sendEnabled = !disabled && (hasText || sendActiveWhenEmpty);
   const activeOptionId = isSlashOpen
     ? `${listboxId}-option-${safeActiveIndex}`
     : undefined;
@@ -123,28 +131,34 @@ export function Composer({
           />
         ) : null}
 
-        <div className="flex h-btn-phone items-center gap-2 rounded-pill border border-border bg-elevated pr-2 pl-4">
+        <div
+          className={`flex h-btn-phone items-center gap-2 rounded-pill border border-border bg-elevated pr-2 pl-4 ${
+            disabled ? 'opacity-60' : ''
+          }`}
+        >
           <input
             type="text"
             role="combobox"
+            disabled={disabled}
             aria-label={inputLabel}
             aria-autocomplete="list"
             aria-expanded={isSlashOpen}
             aria-controls={isSlashOpen ? listboxId : undefined}
             aria-activedescendant={activeOptionId}
-            value={draft}
+            value={disabled ? '' : draft}
             onChange={(event) => handleDraftChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={phonePlaceholder ?? placeholder}
-            className={`min-w-0 flex-1 border-0 bg-transparent text-lg text-ink placeholder:text-ink-muted focus:outline-none ${
+            className={`min-w-0 flex-1 border-0 bg-transparent text-lg text-ink placeholder:text-ink-muted focus:outline-none disabled:cursor-not-allowed ${
               startsWithSlash ? 'font-mono text-md' : ''
             }`}
           />
           <button
             type="button"
+            disabled={disabled}
             aria-label="Send"
-            onClick={onSend}
-            className={`flex h-btn-md w-touch shrink-0 items-center justify-center rounded-modal border-0 text-phone-title font-bold leading-none transition-quiet ${
+            onClick={disabled ? undefined : onSend}
+            className={`flex h-btn-md w-touch shrink-0 items-center justify-center rounded-modal border-0 text-phone-title font-bold leading-none transition-quiet disabled:cursor-not-allowed ${
               sendEnabled
                 ? 'bg-accent text-on-accent hover:opacity-90'
                 : 'bg-border text-ink-muted'
@@ -169,20 +183,25 @@ export function Composer({
         />
       ) : null}
 
-      <div className="flex flex-col gap-3.5 rounded-composer border border-border bg-elevated px-4 pt-3.5 pb-3 transition-quiet focus-within:border-border-strong">
+      <div
+        className={`flex flex-col gap-3.5 rounded-composer border border-border bg-elevated px-4 pt-3.5 pb-3 transition-quiet focus-within:border-border-strong ${
+          disabled ? 'opacity-60' : ''
+        }`}
+      >
         <input
           type="text"
           role="combobox"
+          disabled={disabled}
           aria-label={inputLabel}
           aria-autocomplete="list"
           aria-expanded={isSlashOpen}
           aria-controls={isSlashOpen ? listboxId : undefined}
           aria-activedescendant={activeOptionId}
-          value={draft}
+          value={disabled ? '' : draft}
           onChange={(event) => handleDraftChange(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          className={`w-full border-0 bg-transparent text-ink placeholder:text-ink-muted focus:outline-none ${
+          className={`w-full border-0 bg-transparent text-ink placeholder:text-ink-muted focus:outline-none disabled:cursor-not-allowed ${
             startsWithSlash ? 'font-mono text-md' : 'text-base'
           }`}
         />
@@ -282,9 +301,10 @@ export function Composer({
 
           <button
             type="button"
+            disabled={disabled}
             aria-label="Send"
-            onClick={onSend}
-            className={`flex size-avatar-lg shrink-0 items-center justify-center rounded-full border-0 text-phone-title font-bold leading-none transition-quiet ${
+            onClick={disabled ? undefined : onSend}
+            className={`flex size-avatar-lg shrink-0 items-center justify-center rounded-full border-0 text-phone-title font-bold leading-none transition-quiet disabled:cursor-not-allowed ${
               sendEnabled
                 ? 'bg-accent text-on-accent hover:opacity-90'
                 : 'bg-border text-ink-muted'

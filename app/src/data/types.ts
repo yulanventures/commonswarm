@@ -231,6 +231,34 @@ export interface ChannelMessage {
   reviewCard?: ReviewCardData;
 }
 
+export type MessageCardKind = 'asked' | 'review_requested' | 'todo';
+
+export interface ResolvedMention {
+  readonly id: string;
+  readonly kind: 'person' | 'agent';
+  readonly name: string;
+  readonly tone: AvatarTone;
+  readonly source: 'author' | 'lead' | 'thread';
+}
+
+export interface ConversationMessage {
+  readonly id: string;
+  readonly authorType: 'person' | 'agent';
+  readonly authorId: string;
+  readonly authorName: string;
+  readonly avatarLabel: string;
+  readonly avatarTone: AvatarTone;
+  readonly createdAt: string;
+  readonly timeLabel: string;
+  readonly body: string;
+  readonly mentions: readonly ResolvedMention[];
+  readonly replyCount: number;
+  readonly cardKind: MessageCardKind | null;
+  readonly cardLabel: 'Asked' | 'Review requested' | 'To-do' | null;
+  readonly isThreadReply: boolean;
+  readonly threadRootId: string | null;
+}
+
 export interface Channel {
   id?: string;
   name: string;

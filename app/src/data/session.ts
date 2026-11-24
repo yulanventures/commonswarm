@@ -88,6 +88,7 @@ export interface SessionGate {
   readonly loginGeneration: number;
   readonly client: SupabaseClient | null;
   readonly deployment: { readonly url: string; readonly anonKey: string } | null;
+  readonly isHidden: boolean;
   readonly fenceTracker: FenceTracker;
   readonly fetchImpl: typeof fetch;
   getSnapshot(): SessionSnapshot;
@@ -233,6 +234,29 @@ export function createSessionGate(
     if (typeof sessionToQuiesce.quiesce === 'function') {
       void sessionToQuiesce.quiesce().catch(() => undefined);
     } else {
+      const realtime = (
+        sessionToQuiesce.client as unknown as {
+          removeAllChannels?: () => Promise<unknown>;
+          realtime?: {
+            removeAllChannels?: () => Promise<unknown>;
+            disconnect?: () => Promise<unknown>;
+          };
+        }
+      );
+      if (typeof realtime?.removeAllChannels === 'function') {
+        void Promise.resolve()
+          .then(() => realtime.removeAllChannels!())
+          .catch(() => undefined);
+      } else if (typeof realtime?.realtime?.removeAllChannels === 'function') {
+        void Promise.resolve()
+          .then(() => realtime.realtime!.removeAllChannels!())
+          .catch(() => undefined);
+      }
+      if (typeof realtime?.realtime?.disconnect === 'function') {
+        void Promise.resolve()
+          .then(() => realtime.realtime!.disconnect!())
+          .catch(() => undefined);
+      }
       const auth = sessionToQuiesce.client?.auth as
         | { dispose?: () => Promise<void>; stopAutoRefresh?: () => Promise<void> }
         | undefined;
@@ -713,6 +737,9 @@ export function createSessionGate(
     },
     get deployment() {
       return deployment;
+    },
+    get isHidden() {
+      return hiddenByPagehide;
     },
     fenceTracker,
     fetchImpl,
