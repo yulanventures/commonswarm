@@ -110,22 +110,31 @@ test('hosted inventory and unchanged local catalog match independently built pre
     let bytes = ''; const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText() === name) bytes = node.initializer!.getText(); ts.forEachChild(node, visit); };
     visit(ts.createSourceFile('registry.ts', source, ts.ScriptTarget.Latest, true)); assert.ok(bytes); return bytes;
   };
-  // #655 + #694 intentionally add optional origin_placement, origin_channel_id and origin_conversation_id to todo_create; every other base tool stays byte-identical.
-  const todoCreatePre655 = '    properties: { title: text(1, TODO_TITLE_LIMIT), notes: text(0, TODO_NOTES_LIMIT), due_on: due, assign: object({ to: party, start, gate }, [\'start\', \'gate\']) }, optional: ["notes", "due_on", "assign"],';
-  const todoCreateWithOrigin = [
+  // #655 + #694 intentionally add optional origin_placement, origin_channel_id and origin_conversation_id to todo_create,
+  // and #742 adds optional kind ('task' | 'approval') mapped to todo_kind; every other base tool stays byte-identical.
+  const todoCreatePre655 = [
+    '    properties: { title: text(1, TODO_TITLE_LIMIT), notes: text(0, TODO_NOTES_LIMIT), due_on: due, assign: object({ to: party, start, gate }, [\'start\', \'gate\']) }, optional: ["notes", "due_on", "assign"],',
+    '    toCore: (args) => todoCommand(\'todo_create\', args),',
+  ].join('\n');
+  const todoCreateWithOriginAndKind = [
     '    properties: {',
     '      title: text(1, TODO_TITLE_LIMIT),',
     '      notes: text(0, TODO_NOTES_LIMIT),',
     '      due_on: due,',
+    "      kind: { type: 'string', enum: ['task', 'approval'] },",
     "      assign: object({ to: party, start, gate }, ['start', 'gate']),",
     "      origin_placement: { type: 'string', enum: ['workspace', 'general', 'channel', 'dm', 'group_dm'] },",
     "      origin_channel_id: { oneOf: [uuid, { type: 'null' }] },",
     "      origin_conversation_id: { oneOf: [uuid, { type: 'null' }] },",
     '    },',
-    '    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],',
+    '    optional: ["notes", "due_on", "kind", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],',
+    '    toCore: (args) => {',
+    '      const { seat: _seat, request_id: _request, kind: todoKind, ...fields } = args;',
+    "      return { command: { kind: 'todo_create', ...(todoKind === undefined ? {} : { todo_kind: todoKind as TodoKind }), ...fields } as TodoCommand };",
+    '    },',
   ].join('\n');
   assert.ok(snapshot.includes(todoCreatePre655));
-  const expectedSnapshot = snapshot.replace(todoCreatePre655, todoCreateWithOrigin);
+  const expectedSnapshot = snapshot.replace(todoCreatePre655, todoCreateWithOriginAndKind);
   assert.equal(arraySource(readFileSync('src/protocol/household-tool-registry.ts', 'utf8'), 'BASE_HOUSEHOLD_TOOL_REGISTRY'), arraySource(expectedSnapshot, 'HOUSEHOLD_TOOL_REGISTRY'));
   const built = await build({ entryPoints: ['src/mcp/tools.ts'], bundle: true, write: false, platform: 'node', format: 'esm',
     // The snapshot predates the definition tools (C2b); they are appended after the unchanged bytes.

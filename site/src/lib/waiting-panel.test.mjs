@@ -778,10 +778,10 @@ test("filterWaitingTodos separates channel-origin, #general, and workspace-only 
   doneBtn.click();
   assert.deepEqual(doneClicks, ["todo-boiler"]);
 
-  // Request to-do has Open (no direct Mark done) and Open delegates in-app navigation without completing it.
+  // Request to-do without full gate/version terms fails closed to Review & decide and delegates in-app navigation.
   assert.equal(card2.querySelector('[data-waiting-todo-done="todo-2"]'), null);
   const openLink = card2.querySelector('[data-waiting-todo-open="todo-2"]');
-  assert.equal(openLink.textContent, "Open");
+  assert.equal(openLink.textContent, "Review & decide");
   openLink.click();
   assert.deepEqual(openClicks, ["todo-2"]);
 

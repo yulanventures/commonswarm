@@ -9,7 +9,8 @@
 import { buildChoiceCard } from "./choice-card";
 import { cleanOtherText, OTHER_TEXT_MAX, splitChoicePrompt, STALE_ASK_CLOSE_BODY, type AskChoiceState, type ChoiceDraft, type ChoiceOption, type ChoiceSubmission } from "./choices";
 import { formatWhen, initials, personFirstName, personTint } from "./home-names";
-import type { WaitingArchivedEntry, WaitingArchivedOutcomeKind } from "./home/contract";
+import type { TodoGate, TodoKind, TodoStart, WaitingArchivedEntry, WaitingArchivedOutcomeKind } from "./home/contract";
+import { evaluateInlineOfferTerms, TODO_DECISION_NOTE_LIMIT } from "./todo-offer-terms";
 import { agentOrb, personAvatar } from "./home-primitives";
 import type { AgentVM, PersonVM } from "./home-types";
 import {
@@ -167,6 +168,12 @@ export interface WaitingArchivedVM {
   hasMore: boolean;
 }
 
+export interface WaitingTodoPartyVM {
+  kind: "user" | "agent";
+  id: string;
+  name: string | null;
+}
+
 export interface WaitingTodoItem {
   id: string;
   workspaceId: string;
@@ -177,10 +184,18 @@ export interface WaitingTodoItem {
   reason: WaitingTodoReason;
   href: string;
   canMarkDone: boolean;
+  version?: number;
+  kind?: TodoKind;
+  notesPreview?: string | null;
+  notesTruncated?: boolean;
+  requestedBy?: WaitingTodoPartyVM | null;
   placement?: WaitingTodoPlacement;
   channelId?: string | null;
   conversationId?: string | null;
   offerId?: string | null;
+  offerTo?: WaitingTodoPartyVM | null;
+  offerStart?: TodoStart | null;
+  offerGate?: TodoGate | null;
   channelLabel?: string;
   pending?: true;
   error?: string;
@@ -238,6 +253,8 @@ export interface WaitingPanelHandlers {
   onDismissPlainAsk?: (item: WaitingPlainAskItem) => void;
   onMarkTodoDone?: (item: WaitingTodoItem) => void;
   onRetryTodo?: (item: WaitingTodoItem) => void;
+  onDecideTodo?: (item: WaitingTodoItem, decision: "approve" | "decline", note: string | null) => void;
+  onAnswerTodoOffer?: (item: WaitingTodoItem, answer: "accept" | "decline") => void;
   onOpenTodo?: (item: WaitingTodoItem) => void;
   onDismissTodo?: (item: WaitingTodoItem) => void;
   onUndoDismiss?: (placeholder: WaitingDismissedPlaceholder) => void;
@@ -433,13 +450,13 @@ export function mapWaitingArchivedEntry(
   };
 }
 
-function todoReasonLabel(reason: WaitingTodoReason): string {
+function todoReasonLabel(reason: WaitingTodoReason, kind?: TodoKind): string {
   switch (reason) {
     case "request": return "To-do · Waiting for your answer";
     case "hold": return "To-do · On hold";
     case "after": return "To-do · Waiting";
     case "agent_removed": return "To-do · Agent removed";
-    default: return "To-do · Assigned to you";
+    default: return kind === "approval" ? "Approval" : "To-do · Assigned to you";
   }
 }
 
@@ -459,7 +476,13 @@ function todoCardLocationText(item: WaitingTodoItem, scope: WaitingScope): strin
   return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
 }
 
-function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope, canDismiss: boolean): string {
+function todoCardSignature(
+  item: WaitingTodoItem,
+  scope: WaitingScope,
+  canDismiss: boolean,
+  canDecide = false,
+  canAnswerOffer = false,
+): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
@@ -474,11 +497,22 @@ function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope, canDismis
     item.reason,
     item.href,
     item.canMarkDone,
+    item.version ?? null,
+    item.kind ?? "task",
+    item.notesPreview ?? null,
+    item.notesTruncated ?? false,
+    item.requestedBy ?? null,
+    item.offerId ?? null,
+    item.offerTo ?? null,
+    item.offerStart ?? null,
+    item.offerGate ?? null,
     scope,
     item.pending ?? false,
     item.error ?? "",
     item.retryable ?? false,
     canDismiss,
+    canDecide,
+    canAnswerOffer,
   ]);
 }
 
@@ -489,15 +523,22 @@ function buildTodoCard(
   handlers: WaitingPanelHandlers,
 ): HTMLElement {
   const canDismiss = Boolean(handlers.onDismissTodo);
+  const canDecide = Boolean(handlers.onDecideTodo);
+  const canAnswerOffer = Boolean(handlers.onAnswerTodoOffer);
   const card = node(doc, "article", "cs-waiting-card cs-waiting-card--todo");
   card.dataset.waitingTodo = item.id;
   card.dataset.waitingWorkspace = item.workspaceId;
-  card.dataset.waitingCardSig = todoCardSignature(item, scope, canDismiss);
+  card.dataset.waitingCardSig = todoCardSignature(item, scope, canDismiss, canDecide, canAnswerOffer);
+  if (item.kind === "approval") card.dataset.waitingTodoKind = "approval";
+  if (typeof item.version === "number") card.dataset.waitingTodoVersion = String(item.version);
 
   const todoHead = node(doc, "div", "cs-waiting-card__todo-head");
   const meta = node(doc, "div", "cs-waiting-card__todo-meta");
-  const kind = node(doc, "span", "cs-waiting-card__todo-kind", todoReasonLabel(item.reason));
+  const kind = node(doc, "span", "cs-waiting-card__todo-kind", todoReasonLabel(item.reason, item.kind));
   meta.append(kind);
+  if (item.requestedBy?.name?.trim()) {
+    meta.append(node(doc, "span", "cs-waiting-card__todo-requester", `From ${item.requestedBy.name.trim()}`));
+  }
   const due = formatTodoDue(item.dueOn);
   if (due) meta.append(node(doc, "span", "cs-waiting-card__todo-due", due));
   const location = todoCardLocationText(item, scope);
@@ -519,42 +560,187 @@ function buildTodoCard(
   const title = node(doc, "p", "cs-waiting-card__question", item.title);
   card.append(todoHead, title);
 
+  if (item.notesPreview && item.notesPreview.trim()) {
+    const notes = node(doc, "p", "cs-waiting-card__todo-notes", item.notesPreview);
+    notes.dataset.waitingTodoNotes = item.id;
+    card.append(notes);
+  }
+
+  const hasValidVersion = typeof item.version === "number" && Number.isInteger(item.version) && item.version >= 1;
+  const isApprovalAssigned = item.reason === "assigned" && item.kind === "approval";
+  const isRequest = item.reason === "request";
+  const offerTerms = isRequest
+    ? evaluateInlineOfferTerms({ hasUnshownNotes: item.notesTruncated === true, offerGate: item.offerGate })
+    : null;
+
+  if (isRequest) {
+    const termsPieces: Array<{ text: string; gateKind?: "at" | "hold" }> = [];
+    if (item.offerTo?.name?.trim()) {
+      termsPieces.push({ text: `For ${item.offerTo.name.trim()}` });
+    }
+    if (item.offerStart === "now") {
+      termsPieces.push({ text: "Start now" });
+    } else if (item.offerStart === "queue") {
+      termsPieces.push({ text: "Queue" });
+    }
+    if (offerTerms?.eligible && offerTerms.gateKind === "at" && offerTerms.gateText) {
+      termsPieces.push({ text: `Scheduled ${offerTerms.gateText}`, gateKind: "at" });
+    } else if (offerTerms?.eligible && offerTerms.gateKind === "hold" && offerTerms.gateText) {
+      termsPieces.push({ text: `Hold: ${offerTerms.gateText}`, gateKind: "hold" });
+    }
+    if (termsPieces.length > 0) {
+      const termsRow = node(doc, "div", "cs-waiting-card__todo-terms");
+      for (const piece of termsPieces) {
+        const span = node(doc, "span", "cs-waiting-card__todo-term", piece.text);
+        if (piece.gateKind) span.dataset.offerGateTerm = piece.gateKind;
+        termsRow.append(span);
+      }
+      card.append(termsRow);
+    }
+  }
+
+  const canInlineApproval = isApprovalAssigned && item.notesTruncated !== true && hasValidVersion && canDecide;
+  const canInlineRequest = isRequest && Boolean(offerTerms?.eligible) && Boolean(item.offerId) && hasValidVersion && canAnswerOffer;
+
+  let noteInput: HTMLInputElement | null = null;
+  if (canInlineApproval) {
+    const safeId = item.id.replace(/[^a-zA-Z0-9_-]/gu, "-");
+    const noteWrap = node(doc, "div", "cs-waiting-card__todo-note-wrap");
+    noteWrap.hidden = true;
+    noteInput = node(doc, "input", "cs-waiting-plain__input cs-waiting-card__todo-note-input");
+    noteInput.type = "text";
+    noteInput.id = `cs-waiting-todo-note-${safeId}`;
+    noteInput.maxLength = TODO_DECISION_NOTE_LIMIT;
+    noteInput.autocomplete = "off";
+    noteInput.dataset.waitingTodoNote = item.id;
+    noteInput.setAttribute("aria-label", "Optional note");
+    noteInput.placeholder = "Add a note…";
+    if (item.pending) noteInput.readOnly = true;
+    noteWrap.append(noteInput);
+
+    const noteToggle = node(doc, "button", "cs-waiting-card__todo-note-toggle", "Add note");
+    noteToggle.type = "button";
+    noteToggle.dataset.waitingTodoNoteToggle = item.id;
+    noteToggle.setAttribute("aria-expanded", "false");
+    if (item.pending) noteToggle.setAttribute("aria-disabled", "true");
+    noteToggle.addEventListener("click", () => {
+      if (item.pending) return;
+      const opening = noteWrap.hidden;
+      noteWrap.hidden = !opening;
+      noteToggle.setAttribute("aria-expanded", opening ? "true" : "false");
+      if (opening) noteInput?.focus();
+    });
+    card.append(noteToggle, noteWrap);
+  }
+
   if (item.error) {
     const err = node(doc, "p", "cs-waiting-card__error", item.error);
     err.setAttribute("role", "alert");
     card.append(err);
   }
 
-  const actions = node(doc, "div", "cs-waiting-card__actions");
-  if (item.canMarkDone) {
-    if (item.error && item.retryable && !item.pending) {
-      const retry = node(doc, "button", "cs-waiting-card__todo-done", "Retry");
-      retry.type = "button";
-      retry.dataset.waitingTodoRetry = item.id;
-      retry.addEventListener("click", () => (handlers.onRetryTodo ?? handlers.onMarkTodoDone)?.(item));
-      actions.append(retry);
-    } else {
-      const done = node(doc, "button", "cs-waiting-card__todo-done", item.pending ? "Saving…" : "Mark done");
-      done.type = "button";
-      done.dataset.waitingTodoDone = item.id;
-      if (item.pending) done.setAttribute("aria-disabled", "true");
-      done.addEventListener("click", () => {
-        if (item.pending) return;
-        handlers.onMarkTodoDone?.(item);
-      });
-      actions.append(done);
-    }
-  }
-  const open = node(doc, "a", "cs-waiting-panel__action", "Open");
-  open.href = item.href;
-  open.dataset.waitingTodoOpen = item.id;
-  open.addEventListener("click", (event) => {
+  const openClick = (event: MouseEvent) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     if (!handlers.onOpenTodo) return;
     event.preventDefault();
     handlers.onOpenTodo(item);
-  });
-  actions.append(open);
+  };
+
+  const actions = node(doc, "div", "cs-waiting-card__actions");
+  if (isApprovalAssigned) {
+    if (canInlineApproval) {
+      const readNote = (): string | null => {
+        const trimmed = noteInput?.value.trim() ?? "";
+        return trimmed ? trimmed : null;
+      };
+      const approve = node(doc, "button", "cs-waiting-card__todo-done", item.pending ? "Saving…" : "Approve");
+      approve.type = "button";
+      approve.dataset.waitingTodoApprove = item.id;
+      if (item.pending) approve.setAttribute("aria-disabled", "true");
+      approve.addEventListener("click", () => {
+        if (item.pending) return;
+        handlers.onDecideTodo?.(item, "approve", readNote());
+      });
+      const decline = node(doc, "button", "cs-waiting-panel__action", "Decline");
+      decline.type = "button";
+      decline.dataset.waitingTodoDecline = item.id;
+      if (item.pending) decline.setAttribute("aria-disabled", "true");
+      decline.addEventListener("click", () => {
+        if (item.pending) return;
+        handlers.onDecideTodo?.(item, "decline", readNote());
+      });
+      const open = node(doc, "a", "cs-waiting-panel__action", "Open");
+      open.href = item.href;
+      open.dataset.waitingTodoOpen = item.id;
+      open.addEventListener("click", openClick);
+      actions.append(approve, decline, open);
+    } else {
+      const review = node(doc, "a", "cs-waiting-card__todo-done", "Review & decide");
+      review.href = item.href;
+      review.dataset.waitingTodoReview = item.id;
+      review.dataset.waitingTodoOpen = item.id;
+      review.addEventListener("click", openClick);
+      actions.append(review);
+    }
+  } else if (isRequest) {
+    if (canInlineRequest) {
+      const approve = node(doc, "button", "cs-waiting-card__todo-done", item.pending ? "Saving…" : "Approve");
+      approve.type = "button";
+      approve.dataset.waitingTodoApprove = item.id;
+      approve.dataset.waitingOfferAnswer = "accept";
+      if (item.pending) approve.setAttribute("aria-disabled", "true");
+      approve.addEventListener("click", () => {
+        if (item.pending) return;
+        handlers.onAnswerTodoOffer?.(item, "accept");
+      });
+      const decline = node(doc, "button", "cs-waiting-panel__action", "Decline");
+      decline.type = "button";
+      decline.dataset.waitingTodoDecline = item.id;
+      decline.dataset.waitingOfferAnswer = "decline";
+      if (item.pending) decline.setAttribute("aria-disabled", "true");
+      decline.addEventListener("click", () => {
+        if (item.pending) return;
+        handlers.onAnswerTodoOffer?.(item, "decline");
+      });
+      const open = node(doc, "a", "cs-waiting-panel__action", "Open");
+      open.href = item.href;
+      open.dataset.waitingTodoOpen = item.id;
+      open.addEventListener("click", openClick);
+      actions.append(approve, decline, open);
+    } else {
+      const review = node(doc, "a", "cs-waiting-card__todo-done", "Review & decide");
+      review.href = item.href;
+      review.dataset.waitingTodoReview = item.id;
+      review.dataset.waitingTodoOpen = item.id;
+      review.addEventListener("click", openClick);
+      actions.append(review);
+    }
+  } else {
+    if (item.canMarkDone) {
+      if (item.error && item.retryable && !item.pending) {
+        const retry = node(doc, "button", "cs-waiting-card__todo-done", "Retry");
+        retry.type = "button";
+        retry.dataset.waitingTodoRetry = item.id;
+        retry.addEventListener("click", () => (handlers.onRetryTodo ?? handlers.onMarkTodoDone)?.(item));
+        actions.append(retry);
+      } else {
+        const done = node(doc, "button", "cs-waiting-card__todo-done", item.pending ? "Saving…" : "Mark done");
+        done.type = "button";
+        done.dataset.waitingTodoDone = item.id;
+        if (item.pending) done.setAttribute("aria-disabled", "true");
+        done.addEventListener("click", () => {
+          if (item.pending) return;
+          handlers.onMarkTodoDone?.(item);
+        });
+        actions.append(done);
+      }
+    }
+    const open = node(doc, "a", "cs-waiting-panel__action", "Open");
+    open.href = item.href;
+    open.dataset.waitingTodoOpen = item.id;
+    open.addEventListener("click", openClick);
+    actions.append(open);
+  }
   card.append(actions);
   return card;
 }
@@ -935,7 +1121,10 @@ function buildArchivedCard(
   const title = node(doc, "p", "cs-waiting-card__question", item.title);
 
   const tone =
-    item.outcomeKind === "answered" || item.outcomeKind === "done" || item.outcomeKind === "accepted"
+    item.outcomeKind === "answered"
+    || item.outcomeKind === "approved"
+    || item.outcomeKind === "done"
+    || item.outcomeKind === "accepted"
       ? "positive"
       : "muted";
   const outcome = node(doc, "div", "cs-waiting-archived__outcome");
@@ -1677,6 +1866,8 @@ export function renderWaitingPanel(
   const canDismissAsk = Boolean(handlers.onDismissAsk);
   const canDismissPlain = Boolean(handlers.onDismissPlainAsk);
   const canDismissTodo = Boolean(handlers.onDismissTodo);
+  const canDecideTodo = Boolean(handlers.onDecideTodo);
+  const canAnswerTodoOffer = Boolean(handlers.onAnswerTodoOffer);
 
   let cursor: ChildNode | null = list.firstChild;
   for (const slot of orderedSlots) {
@@ -1742,7 +1933,7 @@ export function renderWaitingPanel(
         }
       }
     } else if (slot.slotKind === "todo") {
-      const sig = todoCardSignature(slot.item, vm.scope, canDismissTodo);
+      const sig = todoCardSignature(slot.item, vm.scope, canDismissTodo, canDecideTodo, canAnswerTodoOffer);
       if (!card || card.dataset.waitingCardSig !== sig) {
         const built = buildTodoCard(doc, slot.item, vm.scope, handlers);
         if (card) {
@@ -2116,7 +2307,9 @@ export function focusWaitingPanelAfterAction(
     if (card) {
       const target =
         card.querySelector<HTMLElement>("[data-waiting-todo-retry]")
+        ?? card.querySelector<HTMLElement>("[data-waiting-todo-approve]")
         ?? card.querySelector<HTMLElement>("[data-waiting-todo-done]")
+        ?? card.querySelector<HTMLElement>("[data-waiting-todo-review]")
         ?? card.querySelector<HTMLElement>("[data-waiting-todo-open]");
       if (target) return focusEl(target);
     }

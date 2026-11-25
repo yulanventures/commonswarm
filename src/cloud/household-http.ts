@@ -26,6 +26,10 @@ export function householdWireRequest(invocation: HouseholdToolInvocation & { wir
   }
   const { kind, ...command } = invocation.command;
   if (invocation.objectTypes.includes('todo') && HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === kind && row.effect === 'commit')) {
+    if (kind === 'todo_create' && 'todo_kind' in command) {
+      const { todo_kind, ...rest } = command as Record<string, unknown>;
+      return { tool: kind, arguments: { ...args, ...rest, ...(todo_kind === undefined ? {} : { kind: todo_kind }) } };
+    }
     return { tool: kind, arguments: { ...args, ...command } };
   }
   if (kind === 'create_household_object') return { tool: 'object_create', arguments: { ...args, ...command } };
@@ -58,6 +62,43 @@ export function createHouseholdHttpTransport(options: { target: CloudTarget;
       return await response.json();
     },
   };
+}
+
+export async function callHouseholdHumanCommand(options: {
+  target: CloudTarget;
+  workspaceId: string;
+  credential: string;
+  fetcher?: typeof fetch;
+  commandId: string;
+  command: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<Record<string, unknown>> {
+  const fetcher = options.fetcher ?? fetch;
+  const response = await fetcher(commandEndpoint(options.target), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${options.credential}`,
+      apikey: options.target.anonKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(withClientBuild({
+      command_id: options.commandId,
+      client_version: CLIENT_PROTOCOL_VERSION,
+      workspace_id: options.workspaceId,
+      stream: { kind: 'workspace' },
+      command: options.command,
+    })),
+    signal: options.signal,
+  });
+  if (response.status >= 500) throw new ServerError(response.status);
+  if (!response.ok) {
+    let body: unknown;
+    try { body = await response.json(); } catch { /* ignore */ }
+    const data = body !== null && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+    const code = data.reason ?? data.error ?? data.code;
+    return { status: 'refused', reason: typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'request_refused' };
+  }
+  return await response.json() as Record<string, unknown>;
 }
 
 export async function callHouseholdSkills(options: {

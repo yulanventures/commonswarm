@@ -1,22 +1,31 @@
 /** Closed local projections of the home contract. The server owns permissions,
  * gate evaluation and paging. Stored write receipts lack derived read fields. */
 import type { HouseholdToolInvocation } from '../protocol/household-tool-registry.js';
-import type { Todo, TodoActor, TodoComment, TodoGate, TodoOffer, Party } from '../protocol/household-todos.js';
+import type { Todo, TodoActor, TodoComment, TodoDecisionStatus, TodoGate, TodoKind, TodoOffer, Party } from '../protocol/household-todos.js';
 import type { AgentWork, AgentWorkFacts } from '../protocol/household-todo-policy.js';
-import { TODO_TITLE_LIMIT, TODO_NOTES_LIMIT, TODO_COMMENT_LIMIT, TODO_MENTIONS_LIMIT, TODO_GATE_NOTE_LIMIT } from '../protocol/household-todo-policy.js';
+import { TODO_TITLE_LIMIT, TODO_NOTES_LIMIT, TODO_COMMENT_LIMIT, TODO_MENTIONS_LIMIT, TODO_GATE_NOTE_LIMIT, TODO_DECISION_NOTE_LIMIT } from '../protocol/household-todo-policy.js';
 
+export interface HouseholdTodoDecisionView {
+  status: TodoDecisionStatus;
+  by: string;
+  at: string;
+  note: string | null;
+}
 export type HouseholdTodoView = Omit<Todo, 'queue_rank' | 'gate_set_by'> & {
+  decision?: HouseholdTodoDecisionView | null;
   gate_clear?: boolean; queue_position?: number | null;
 };
 export interface HouseholdTodoSummary {
-  todo_id: string; version: number; title: string; state: Todo['state']; due_on: string | null;
+  todo_id: string; version: number; kind?: TodoKind; title: string; state: Todo['state']; due_on: string | null;
   assignee: Party | null;
-  offer: Pick<TodoOffer, 'offer_id' | 'to' | 'decider_user_id' | 'start'> | null;
+  decision_status?: TodoDecisionStatus | null;
+  has_notes?: boolean;
+  offer: (Pick<TodoOffer, 'offer_id' | 'to' | 'decider_user_id' | 'start'> & { gate?: TodoGate; by?: TodoActor; at?: string }) | null;
   gate: { kind: TodoGate['kind']; clear: boolean; todo_id: string | null; at: string | null };
   queue_position: number | null; comment_count: number; state_at: string;
 }
 export type HouseholdTodoNotice = { to: Party[]; status: 'sent'; signal_id: string }
-  | { to: Party[]; status: 'not_sent'; reason: 'signal_rate_limited' | 'recipient_not_live' };
+  | { to: Party[]; status: 'not_sent'; reason: 'signal_rate_limited' | 'recipient_not_live' | 'recipient_access_refused' };
 const sections = ['working', 'up_next', 'not_yet', 'requests'] as const;
 type Section = typeof sections[number];
 export type HouseholdTodoQueue = {
@@ -72,11 +81,22 @@ function gate(value: unknown): TodoGate {
   if (kind === 'at') return { kind, at: time(r.at) };
   return { kind };
 }
+const todoKind = (value: unknown): TodoKind => choice(value, ['task', 'approval']);
+const decisionStatus = (value: unknown): TodoDecisionStatus => choice(value, ['approved', 'declined']);
+function decisionView(value: unknown): HouseholdTodoDecisionView {
+  const r = record(value);
+  return { status: decisionStatus(r.status), by: id(r.by), at: time(r.at), note: nullable(r.note, v => text(v, TODO_DECISION_NOTE_LIMIT)) };
+}
 function offerSummary(value: unknown): NonNullable<HouseholdTodoSummary['offer']> {
-  const r = record(value); return { offer_id: id(r.offer_id), to: party(r.to), decider_user_id: id(r.decider_user_id), start: choice(r.start, ['queue', 'now']) };
+  const r = record(value);
+  const out: NonNullable<HouseholdTodoSummary['offer']> = { offer_id: id(r.offer_id), to: party(r.to), decider_user_id: id(r.decider_user_id), start: choice(r.start, ['queue', 'now']) };
+  if (r.gate !== undefined) out.gate = gate(r.gate);
+  if (r.by !== undefined) out.by = actor(r.by);
+  if (r.at !== undefined) out.at = time(r.at);
+  return out;
 }
 function offer(value: unknown): TodoOffer {
-  const r = record(value); return { ...offerSummary(r), gate: gate(r.gate), by: actor(r.by), at: time(r.at) };
+  const r = record(value); return { offer_id: id(r.offer_id), to: party(r.to), decider_user_id: id(r.decider_user_id), start: choice(r.start, ['queue', 'now']), gate: gate(r.gate), by: actor(r.by), at: time(r.at) };
 }
 function todo(value: unknown, workspace: string, expectedId?: string, reading = false): HouseholdTodoView {
   const r = record(value); requireValue(r.workspace_id === workspace && (expectedId === undefined || r.todo_id === expectedId));
@@ -87,16 +107,26 @@ function todo(value: unknown, workspace: string, expectedId?: string, reading = 
     assigned_by: nullable(r.assigned_by, actor), assigned_at: nullable(r.assigned_at, time), offer: nullable(r.offer, offer),
     gate: gate(r.gate), state_by: actor(r.state_by), state_at: time(r.state_at), comment_count: integer(r.comment_count),
   };
+  if (r.kind !== undefined) output.kind = todoKind(r.kind);
+  if (r.decision_status !== undefined) output.decision_status = nullable(r.decision_status, decisionStatus);
+  if (r.decision_by_user !== undefined) output.decision_by_user = nullable(r.decision_by_user, id);
+  if (r.decision_at !== undefined) output.decision_at = nullable(r.decision_at, time);
+  if (r.decision_note !== undefined) output.decision_note = nullable(r.decision_note, v => text(v, TODO_DECISION_NOTE_LIMIT));
+  if (r.decision !== undefined) output.decision = nullable(r.decision, decisionView);
   if (reading || r.gate_clear !== undefined) output.gate_clear = boolean(r.gate_clear);
   if (reading || r.queue_position !== undefined) output.queue_position = nullable(r.queue_position, v => integer(v, 1));
   return output;
 }
 function summary(value: unknown): HouseholdTodoSummary {
   const r = record(value), g = record(r.gate);
-  return { todo_id: id(r.todo_id), version: integer(r.version, 1), title: text(r.title, TODO_TITLE_LIMIT, 1), state: state(r.state),
+  const out: HouseholdTodoSummary = { todo_id: id(r.todo_id), version: integer(r.version, 1), title: text(r.title, TODO_TITLE_LIMIT, 1), state: state(r.state),
     due_on: nullable(r.due_on, date), assignee: nullable(r.assignee, party), offer: nullable(r.offer, offerSummary),
     gate: { kind: gateKind(g.kind), clear: boolean(g.clear), todo_id: g.todo_id === undefined ? null : nullable(g.todo_id, id), at: g.at === undefined ? null : nullable(g.at, time) },
     queue_position: nullable(r.queue_position, v => integer(v, 1)), comment_count: integer(r.comment_count), state_at: time(r.state_at) };
+  if (r.kind !== undefined) out.kind = todoKind(r.kind);
+  if (r.decision_status !== undefined) out.decision_status = nullable(r.decision_status, decisionStatus);
+  if (r.has_notes !== undefined) out.has_notes = boolean(r.has_notes);
+  return out;
 }
 function target(value: unknown): TodoComment['target'] {
   const r = record(value); return { kind: choice(r.kind, ['todo', 'list', 'doc', 'file']), id: id(r.id) };
@@ -110,7 +140,7 @@ function comment(value: unknown, expected?: TodoComment['target']): TodoComment 
 function notice(value: unknown): HouseholdTodoNotice {
   const r = record(value), to = list(r.to, party, TODO_MENTIONS_LIMIT);
   return r.status === 'sent' ? { to, status: 'sent', signal_id: id(r.signal_id) }
-    : (requireValue(r.status === 'not_sent'), { to, status: 'not_sent', reason: choice(r.reason, ['signal_rate_limited', 'recipient_not_live']) });
+    : (requireValue(r.status === 'not_sent'), { to, status: 'not_sent', reason: choice(r.reason, ['signal_rate_limited', 'recipient_not_live', 'recipient_access_refused']) });
 }
 function workStatus(value: unknown): HouseholdTodoQueue['status'] {
   const r = record(value), f = record(r.facts);
@@ -121,6 +151,31 @@ function workStatus(value: unknown): HouseholdTodoQueue['status'] {
     doing: nullable(f.doing, v => { const d = record(v); return { todo_id: id(d.todo_id), title: nullable(d.title, v => text(v, TODO_TITLE_LIMIT)), since: time(d.since) }; }),
     working_on: nullable(f.working_on, v => { const w = record(v); return { signal_id: id(w.signal_id), at: time(w.at), until: time(w.until) }; }),
   } };
+}
+
+export function decodeHouseholdTodoDecideResponse(
+  data: Record<string, unknown>,
+  workspaceId: string,
+  requestId: string,
+  todoId: string,
+): HouseholdTodoClientResult | { status: 'refused'; request_id: string; reason: string } | null {
+  try {
+    if (data.status === 'refused') {
+      const reason = typeof data.reason === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(data.reason) ? data.reason : 'request_refused';
+      return { status: 'refused', request_id: requestId, reason };
+    }
+    requireValue(data.request_id === undefined || data.request_id === requestId);
+    if (data.status === 'conflict') {
+      return { status: 'conflict', kind: 'todo', request_id: requestId, current: todo(data.current, workspaceId, todoId) };
+    }
+    requireValue(data.status === 'committed');
+    const notices = list(data.notices ?? [], notice, 1);
+    const replayed = boolean(data.replayed ?? false);
+    return { status: 'committed', kind: 'todo', request_id: requestId, value: todo(data.value, workspaceId, todoId), notices, replayed };
+  } catch (error) {
+    if (!(error instanceof InvalidResponse)) throw error;
+    return null;
+  }
 }
 
 /** Accept both the edge's flat receipt and the injected store's outcome wrapper.

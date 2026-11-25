@@ -147,7 +147,10 @@ test('a human queue needs an explicit principal; valid queue summaries omit note
   assert.equal(queue.principal_id, principal);
   const held = (queue.not_yet as Row[])[0]!, offered = (queue.requests as Row[])[0]!;
   assert.deepEqual(held.gate, { kind: 'hold', clear: false });
-  assert.deepEqual((offered.offer as Row).gate, { kind: 'hold' });
+  assert.deepEqual((offered.offer as Row).gate, { kind: 'hold', note: 'Offer notes stay private in summaries' });
+  assert.equal(held.has_notes, true);
+  assert.equal(held.kind, 'task');
+  assert.equal(held.decision_status, null);
   for (const query of [{ kind: 'todo_list', scope: 'all' }, { kind: 'todo_queue', principal_id: principal }] as const) {
     const result = await read(query) as Row;
     const summaries = query.kind === 'todo_list' ? result.todos as Row[] : [...result.not_yet as Row[], ...result.requests as Row[]];
@@ -157,7 +160,6 @@ test('a human queue needs an explicit principal; valid queue summaries omit note
       assert.equal(Object.hasOwn(summary, 'gate_note'), false);
       assert.equal(Object.hasOwn(summary, 'gate_clear'), false);
       assert.equal(Object.hasOwn(summary.gate as Row, 'note'), false);
-      if (summary.offer) assert.equal(Object.hasOwn((summary.offer as Row).gate as Row, 'note'), false);
     }
   }
   const detail = await read({ kind: 'todo_read', todo_id: id(260) }) as { todo: Row };

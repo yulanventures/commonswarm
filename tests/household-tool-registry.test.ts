@@ -340,7 +340,8 @@ test('to-do tools map paged reads and versioned writes with content permissions'
 test('human-only HTTP schemas refuse extra identity fields and invalid action or paging input', () => {
   const todo_id = '00000000-0000-4000-8000-000000000001';
   const valid = [
-    { kind: 'household_todo_answer', todo_id, offer_id: todo_id, answer: 'accept' },
+    { kind: 'household_todo_answer', todo_id, offer_id: todo_id, base_version: 1, answer: 'accept' },
+    { kind: 'household_todo_decide', todo_id, base_version: 1, decision: 'approve', note: 'Looks good' },
     { kind: 'household_todo_steer', todo_id, base_version: 1, action: { kind: 'move', after_todo_id: null } },
     { kind: 'household_agent_work_policy', principal_id: todo_id, accepts_from: 'owner' },
     { kind: 'household_activity', since: '2026-10-05T00:00:00Z', limit: 100 },
@@ -350,8 +351,11 @@ test('human-only HTTP schemas refuse extra identity fields and invalid action or
     assert.throws(() => validateHouseholdHumanCommand({ ...command, actor_user: todo_id }), HouseholdToolInputError);
   }
   for (const invalid of [
-    { ...valid[1], action: { kind: 'move' } }, { ...valid[1], action: { kind: 'unknown' } },
-    { ...valid[2], accepts_from: 'all' }, { ...valid[3], limit: 101 },
+    { kind: 'household_todo_answer', todo_id, offer_id: todo_id, answer: 'accept' },
+    { kind: 'household_todo_decide', todo_id, base_version: 1, decision: 'maybe' },
+    { kind: 'household_todo_decide', todo_id, decision: 'approve' },
+    { ...valid[2], action: { kind: 'move' } }, { ...valid[2], action: { kind: 'unknown' } },
+    { ...valid[3], accepts_from: 'all' }, { ...valid[4], limit: 101 },
     { ...valid[0], answer: 'replaced' }, { kind: 'todo_start' },
   ]) assert.throws(() => validateHouseholdHumanCommand(invalid), HouseholdToolInputError);
 });

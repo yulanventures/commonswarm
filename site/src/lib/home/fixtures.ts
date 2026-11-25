@@ -118,10 +118,15 @@ function todo(
 export function todoSummary(row: Todo): TodoSummary {
   return {
     todo_id: row.todo_id, version: row.version, title: row.title, state: row.state,
-    due_on: row.due_on, assignee: row.assignee,
+    due_on: row.due_on,
+    kind: row.kind ?? 'task',
+    decision_status: row.decision_status ?? null,
+    has_notes: row.notes.length > 0,
+    assignee: row.assignee,
     offer: row.offer ? {
       offer_id: row.offer.offer_id, to: row.offer.to,
       decider_user_id: row.offer.decider_user_id, start: row.offer.start,
+      gate: row.offer.gate, by: row.offer.by, at: row.offer.at,
     } : null,
     gate: {
       kind: row.gate.kind, clear: row.gate_clear,

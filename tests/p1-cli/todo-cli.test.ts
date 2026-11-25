@@ -67,11 +67,27 @@ async function cloud(options: { dropFirst?: string } = {}) {
           identity: { credential_valid: true, principal_id: AGENT, workspace_id: WORKSPACE, owner_user_id: USER } });
       }
       if (request.url !== "/functions/v1/command") return reply(400, { error: "invalid_request" });
-      const command = body.command as { kind: string; tool: string; arguments: Record<string, unknown> };
+      const command = body.command as { kind: string; tool?: string; arguments?: Record<string, unknown>; [key: string]: unknown };
+      if (command.kind === "household_todo_decide") {
+        calls.push({ tool: command.kind, arguments: command, command_id: String(body.command_id) });
+        if (!person) return reply(200, { status: "refused", reason: "human_confirmation_required" });
+        if (command.todo_id === MISSING) return reply(200, { status: "refused", reason: "todo_not_found" });
+        if (command.base_version !== 2) return reply(200, { status: "conflict", current: stored({ version: 2, kind: "approval" }) });
+        const approved = command.decision === "approve";
+        return reply(200, {
+          status: "committed",
+          value: stored({
+            version: 3, kind: "approval", state: approved ? "done" : "dropped",
+            decision_status: approved ? "approved" : "declined", decision_by_user: USER,
+            decision_at: AT, decision_note: command.note ?? null,
+          }),
+          notices: [], request_id: String(body.command_id), replayed: false,
+        });
+      }
       if (command.kind !== "household_tool") return reply(400, { error: "invalid_request" });
-      calls.push({ tool: command.tool, arguments: command.arguments, command_id: String(body.command_id) });
+      calls.push({ tool: command.tool!, arguments: command.arguments!, command_id: String(body.command_id) });
       if (command.tool === options.dropFirst && !dropped) { dropped = true; response.destroy(); return; }
-      const args = command.arguments;
+      const args = command.arguments!;
       const write = (value: unknown) => reply(200, { status: "committed", value, notices: [], request_id: args.request_id, replayed: false });
       if (args.todo_id === MISSING) return reply(200, { status: "refused", reason: "todo_not_found" });
       switch (command.tool) {
@@ -135,7 +151,7 @@ const requestId = (call: Call) => {
 
 test("todo is a profile command group with no MCP tool of its own, and every verb has help", () => {
   const group = AGENT_COMMANDS.todo as AgentCommandGroup;
-  assert.deepEqual(Object.keys(group.subcommands), ["ls", "queue", "read", "create", "start", "done", "drop", "reopen", "comment"]);
+  assert.deepEqual(Object.keys(group.subcommands), ["ls", "queue", "read", "create", "start", "done", "drop", "reopen", "approve", "decline", "comment"]);
   for (const [verb, entry] of Object.entries(group.subcommands)) {
     assert.equal(entry.tool, null, verb);
     assert.equal(entry.profile, "expand", verb);
@@ -292,7 +308,11 @@ test("bad flags and arguments are refused before the credential is read or anyth
       [["todo", "comment", TODO, "   "], /A comment cannot be empty/],
       [["todo", "comment", TODO, "hi", "--body-file", tokenPath], /Give the comment one way/],
       [["todo", "start", TODO, "--base-version", "2"], /unknown option: --base-version/],
-      [["todo", "later"], /cswarm todo takes ls, queue, read, create, start, done, drop, reopen, or comment/],
+      [["todo", "create", "Approve", "--approval"], /--approval requires --assign <person>/],
+      [["todo", "create", "Approve", "--assign", "Pat", "--approval", "--start", "now"], /--approval cannot use --start now/],
+      [["todo", "create", "Approve", "--assign", "Pat", "--approval", "--channel", "general"], /unknown option: --channel/],
+      [["todo", "approve", TODO, "--note", "x".repeat(501)], /at most 500 characters/],
+      [["todo", "later"], /cswarm todo takes ls, queue, read, create, start, done, drop, reopen, approve, decline, or comment/],
     ] as const) {
       const result = await cli(fake.url, [...args], absent);
       assert.notEqual(result.code, 0, args.join(" "));
@@ -431,5 +451,31 @@ test("with a person's sign-in, me is the person and queue needs --agent", async 
     assert.equal(queue.code, 1);
     assert.deepEqual(fake.calls.at(-1)!.arguments, { seat });
     assert.match(queue.stderr, /refused: principal_required\. Name the agent whose line to read: cswarm todo queue --agent <name\|id>\./);
+
+    // todo create --approval sets kind:'approval' and requires a human assignee; agent token refused on approve/decline.
+    const createdApproval = await cli(fake.url, ["todo", "create", "Approve invoice", "--assign", "Pat", "--approval", "--json"]);
+    assert.equal(createdApproval.code, 0, createdApproval.stderr);
+    assert.deepEqual(requestId(fake.calls.at(-1)!), {
+      seat, title: "Approve invoice", kind: "approval", assign: { to: { kind: "user", id: USER } },
+    });
+
+    const agentApprove = await cli(fake.url, ["todo", "approve", TODO, "--note", "no", "--json"]);
+    assert.equal(agentApprove.code, 1);
+    assert.equal(JSON.parse(agentApprove.stdout).reason, "human_confirmation_required");
+
+    const approved = await cli(fake.url, ["todo", "approve", TODO, "--note", "Ship it", "--json"], ["--force-file-store"]);
+    assert.equal(approved.code, 0, approved.stderr);
+    assert.equal(fake.calls.at(-1)!.tool, "household_todo_decide");
+    assert.deepEqual(fake.calls.at(-1)!.arguments, {
+      kind: "household_todo_decide", todo_id: TODO, base_version: 2, decision: "approve", note: "Ship it",
+    });
+    assert.equal(JSON.parse(approved.stdout).value.decision_status, "approved");
+
+    const declined = await cli(fake.url, ["todo", "decline", TODO, "--base-version", "2", "--note", "Hold off", "--json"], ["--force-file-store"]);
+    assert.equal(declined.code, 0, declined.stderr);
+    assert.deepEqual(fake.calls.at(-1)!.arguments, {
+      kind: "household_todo_decide", todo_id: TODO, base_version: 2, decision: "decline", note: "Hold off",
+    });
+    assert.equal(JSON.parse(declined.stdout).value.decision_status, "declined");
   } finally { await fake.close(); }
 });

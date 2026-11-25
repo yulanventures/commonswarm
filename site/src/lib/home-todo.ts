@@ -6,8 +6,9 @@ import { agentOrb, choiceChips, lockIcon, notice, personAvatar } from "./home-pr
 import { personTint } from "./home-names";
 import { assignOptions, assignPicker, commentSegments, personNames, tagLabel, tagOptions, tagPicker, tagsInBody, type AssignFacts,
   type PickerPeople } from "./home-pickers";
-import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, isAgent, personName, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, todoSteerLine, whenStamp,
+import { TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, displayName, isAgent, personName, todoAssigneeLabel, todoMetaLine, todoStartChoice, todoStatus, todoSteerLine, whenStamp,
   type TodoCopyContext, type TodoNotice, type TodoStartMode } from "./home-todo-copy";
+import { formatExactOfferAt, TODO_DECISION_NOTE_LIMIT } from "./todo-offer-terms";
 
 /** Local to lane T: what the view needs beyond TodoVM (home-types.ts has no type for it). */
 export interface TodoViewVM {
@@ -34,6 +35,8 @@ export interface TodoViewCallbacks {
   assign: (option: PickOptionVM) => void;
   setStart: (input: TodoStartInput) => void;
   comment: (body: string, tags: { id: Id; label: string }[]) => void;
+  decide?: (decision: "approve" | "decline", note: string | null) => void;
+  answerOffer?: (answer: "accept" | "decline") => void;
 }
 
 export const TODO_LOADING = "Loading this to-do…";
@@ -184,6 +187,149 @@ function atEditor(doc: Document, todo: TodoVM, callbacks: TodoViewCallbacks): HT
 }
 
 
+function approvalPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: TodoViewCallbacks, ctx: TodoCopyContext): HTMLElement | null {
+  if (todo.kind !== "approval") return null;
+  if (todo.decision) {
+    const panel = node(doc, "section", "hm-todo-panel hm-todo-approval");
+    panel.dataset.todoApproval = todo.decision.status;
+    const status = todoStatus(todo, ctx);
+    const statusLine = node(doc, "p", "hm-todo-status-line", status.line);
+    statusLine.dataset.todoDecisionStatus = todo.decision.status;
+    panel.append(statusLine);
+    if (todo.decision.note && todo.decision.note.trim()) {
+      const noteEl = node(doc, "p", "hm-todo-decision-note", todo.decision.note);
+      noteEl.dataset.todoDecisionNote = "";
+      panel.append(noteEl);
+    }
+    return panel;
+  }
+  if (!todo.may.decide || todo.sample || !callbacks.decide) return null;
+  const panel = node(doc, "section", "hm-todo-panel hm-todo-approval");
+  panel.dataset.todoApproval = "pending";
+  const headId = `hm-todo-${todo.id}-approval`.replace(/[^A-Za-z0-9_-]/g, "_");
+  const head = node(doc, "h2", "hm-todo-panel-title", "Approval");
+  head.id = headId;
+  panel.setAttribute("aria-labelledby", headId);
+  if (vm.save === "saving") panel.setAttribute("aria-busy", "true");
+  panel.append(head);
+  if (todo.requester) {
+    const req = node(doc, "p", "hm-todo-status-more", `Requested by ${displayName(todo.requester, ctx.names)}`);
+    req.dataset.todoRequester = "";
+    panel.append(req);
+  }
+  const noteInput = input(doc, "text");
+  noteInput.maxLength = TODO_DECISION_NOTE_LIMIT;
+  noteInput.autocomplete = "off";
+  noteInput.dataset.todoDecisionNoteInput = "";
+  noteInput.setAttribute("aria-label", "Optional note");
+  noteInput.placeholder = "Add a note (optional)";
+  if (vm.save === "saving") noteInput.disabled = true;
+  const actions = node(doc, "div", "hm-todo-decision-actions");
+  const approve = button(doc, vm.save === "saving" ? "Saving…" : "Approve", "hm-todo-save");
+  approve.dataset.todoApprove = "";
+  approve.disabled = vm.save === "saving";
+  approve.addEventListener("click", () => {
+    const note = noteInput.value.trim();
+    callbacks.decide?.("approve", note ? note : null);
+  });
+  const decline = button(doc, "Decline", "hm-todo-cancel");
+  decline.dataset.todoDecline = "";
+  decline.disabled = vm.save === "saving";
+  decline.addEventListener("click", () => {
+    const note = noteInput.value.trim();
+    callbacks.decide?.("decline", note ? note : null);
+  });
+  actions.append(approve, decline);
+  panel.append(noteInput, actions);
+  return panel;
+}
+
+function offerPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: TodoViewCallbacks, ctx: TodoCopyContext): HTMLElement | null {
+  const offer = todo.pendingOffer;
+  if (!offer || !offer.deciderIsViewer) return null;
+  const panel = node(doc, "section", "hm-todo-panel hm-todo-offer");
+  panel.dataset.todoOfferPanel = offer.offerId;
+  const headId = `hm-todo-${todo.id}-offer`.replace(/[^A-Za-z0-9_-]/g, "_");
+  const head = node(doc, "h2", "hm-todo-panel-title", "Request");
+  head.id = headId;
+  panel.setAttribute("aria-labelledby", headId);
+  if (vm.save === "saving") panel.setAttribute("aria-busy", "true");
+  panel.append(head);
+
+  const terms = node(doc, "div", "hm-todo-offer-terms");
+  if (offer.by) {
+    terms.append(node(doc, "p", "hm-todo-status-more", `Requested by ${displayName(offer.by, ctx.names)}`));
+  }
+  if (offer.to) {
+    terms.append(node(doc, "p", "hm-todo-status-more", `For ${displayName(offer.to, ctx.names)}`));
+  }
+  terms.append(node(doc, "p", "hm-todo-status-more", offer.start === "now" ? "Start now" : "Queue"));
+  let formattedAt: string | null = null;
+  const validHoldGate = offer.termsAvailable
+    && (offer.gate === null || (offer.gate.kind === "note" && offer.gate.note.trim().length > 0));
+  if (offer.gateKind === "at") {
+    formattedAt = offer.termsAvailable && offer.gate?.kind === "time"
+      ? formatExactOfferAt(offer.gate.at, vm.timeZone)
+      : null;
+    const gateEl = node(
+      doc,
+      "p",
+      "hm-todo-status-more",
+      formattedAt ? `Scheduled ${formattedAt}` : "Scheduled time unavailable. Reload to review before deciding.",
+    );
+    gateEl.dataset.offerGateTerm = "at";
+    terms.append(gateEl);
+  } else if (offer.gateKind === "hold") {
+    const holdText = !validHoldGate
+      ? "Hold details unavailable. Reload to review before deciding."
+      : offer.gate?.kind === "note"
+        ? `Hold: ${offer.gate.note}`
+        : "On hold";
+    const gateEl = node(doc, "p", "hm-todo-status-more", holdText);
+    gateEl.dataset.offerGateTerm = "hold";
+    terms.append(gateEl);
+  } else if (offer.gateKind === "after") {
+    const prereqTitle = offer.termsAvailable && offer.gate?.kind === "todo" && offer.gate.todo.title.trim()
+      ? offer.gate.todo.title
+      : null;
+    const gateEl = node(
+      doc,
+      "p",
+      "hm-todo-status-more",
+      prereqTitle ? `After ‘${prereqTitle}’` : "Prerequisite details unavailable. Reload to review before deciding.",
+    );
+    gateEl.dataset.offerGateTerm = "after";
+    terms.append(gateEl);
+  } else if (!offer.termsAvailable) {
+    const gateEl = node(doc, "p", "hm-todo-status-more", "Offer details unavailable. Reload to review before deciding.");
+    gateEl.dataset.offerGateTerm = "unavailable";
+    terms.append(gateEl);
+  }
+  panel.append(terms);
+
+  const canSubmitOffer = offer.termsAvailable
+    && (offer.gateKind !== "at" || formattedAt !== null)
+    && (offer.gateKind !== "after" || (offer.gate?.kind === "todo" && offer.gate.todo.title.trim().length > 0))
+    && (offer.gateKind !== "hold" || validHoldGate);
+
+  if (todo.may.answerOffer && !todo.sample && callbacks.answerOffer) {
+    const actions = node(doc, "div", "hm-todo-decision-actions");
+    for (const [answer, label, cls] of [["accept", "Accept", "hm-todo-save"], ["decline", "Decline", "hm-todo-cancel"]] as const) {
+      const btn = button(doc, label, cls);
+      btn.dataset.todoOfferAnswer = answer;
+      btn.setAttribute("aria-label", `${label} ‘${todo.title}’`);
+      btn.disabled = vm.save === "saving" || !canSubmitOffer;
+      btn.addEventListener("click", () => {
+        if (!canSubmitOffer || vm.save === "saving") return;
+        callbacks.answerOffer?.(answer);
+      });
+      actions.append(btn);
+    }
+    panel.append(actions);
+  }
+  return panel;
+}
+
 function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: TodoViewCallbacks, ctx: TodoCopyContext): HTMLElement {
   const panel = node(doc, "section", "hm-todo-panel"); panel.dataset.todoAssigned = "";
   const headId = `hm-todo-${todo.id}-assigned`.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -311,7 +457,8 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
   const title = node(doc, "h1", "hm-todo-title", todo.title); title.id = titleId; title.tabIndex = -1;
   root.setAttribute("aria-labelledby", titleId);
   // One semantic sequence on every viewport: Back, completion/title, metadata, then full-width notes.
-  const checkable = !todo.sample && todo.may.complete && todo.state !== "dropped";
+  const decidedApproval = todo.kind === "approval" && Boolean(todo.decision);
+  const checkable = !todo.sample && todo.may.complete && todo.state !== "dropped" && todo.kind !== "approval";
   if (checkable) {
     const label = node(doc, "label", "hm-todo-done");
     const box = input(doc, "checkbox"); box.className = "hm-todo-done-box"; box.checked = todo.state === "done"; box.dataset.todoComplete = "";
@@ -320,7 +467,11 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
     head.append(label);
   }
   const copy = node(doc, "div", "hm-todo-head-copy");
-  if (!checkable && (todo.state === "done" || todo.state === "dropped")) copy.append(node(doc, "span", "hm-todo-word", todo.state === "done" ? "Done" : "Dropped"));
+  if (decidedApproval && todo.decision) {
+    copy.append(node(doc, "span", "hm-todo-word", todo.decision.status === "approved" ? "Approved" : "Declined"));
+  } else if (!checkable && (todo.state === "done" || todo.state === "dropped")) {
+    copy.append(node(doc, "span", "hm-todo-word", todo.state === "done" ? "Done" : "Dropped"));
+  }
   copy.append(title);
   head.append(copy);
   intro.append(topBar(doc, vm, callbacks, todo.sample), head);
@@ -328,6 +479,11 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
   if (meta) intro.append(node(doc, "p", "hm-todo-meta", meta));
   if (todo.notes.trim()) intro.append(node(doc, "p", "hm-todo-notes", todo.notes));
   root.append(intro);
-  root.append(assignedPanel(doc, todo, vm, callbacks, ctx), commentsSection(doc, todo, vm, callbacks, ctx));
+  const approval = approvalPanel(doc, todo, vm, callbacks, ctx);
+  const offer = offerPanel(doc, todo, vm, callbacks, ctx);
+  if (approval) root.append(approval);
+  if (offer) root.append(offer);
+  if (!decidedApproval) root.append(assignedPanel(doc, todo, vm, callbacks, ctx));
+  root.append(commentsSection(doc, todo, vm, callbacks, ctx));
   return root;
 }

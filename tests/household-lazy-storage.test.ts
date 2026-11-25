@@ -139,6 +139,11 @@ test('connection summaries preserve family consent across bearer replacement and
       if (q.includes('household_member_content_roles')) return [{ content_role: 'editor', content_consent_id: receipt, revoked_at: null }];
       if (q.includes('SELECT revoked_at FROM swarm.agent_principals')) return c.principalRevoked ? [] : [{ revoked_at: null }];
       if (q.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return c.bearerExpired ? [] : [{ renewal_grant_id: family, lineage_id: id(24), run_id: run }];
+      if (q.includes('AS expired') && q.includes('FROM swarm.renewal_grants')) {
+        const expired = Boolean(c.familyRevoked) || c.expired !== null
+          || (c.deadline !== null && Date.parse(c.deadline) <= Date.parse(at));
+        return [{ now: at, expired }];
+      }
       if (q.includes('FROM swarm.renewal_grants')) return [policy];
       if (q.includes('FROM swarm.local_content_approval_workspaces')) return [{ token_id: original }];
       if (q.includes('SELECT c.*')) return [approval];

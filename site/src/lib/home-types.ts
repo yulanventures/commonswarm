@@ -30,11 +30,24 @@ export interface SwitchRowVM { id: Id; label: string; detail: string; state: "on
 export type Assignee = { kind: "person"; person: PersonVM } | { kind: "agent"; agent: AgentVM } | null;
 export type Gate = { kind: "todo"; todo: { id: Id; title: string; href: string; done: boolean } } | { kind: "time"; at: string } | { kind: "note"; note: string };
 export interface TodoVM { id: Id; workspaceId: Id; title: string; notes: string; state: "open" | "doing" | "done" | "dropped";
+  kind?: "task" | "approval";
+  requester?: PersonVM | AgentVM | null;
+  decision?: { status: "approved" | "declined"; by: PersonVM | AgentVM | null; at: string; note: string | null } | null;
+  pendingOffer?: {
+    offerId: Id;
+    by: PersonVM | AgentVM | null;
+    to: PersonVM | AgentVM | null;
+    start: "queue" | "now";
+    gate: Gate | null;
+    gateKind: "none" | "hold" | "after" | "at";
+    termsAvailable: boolean;
+    deciderIsViewer: boolean;
+  } | null;
   addedBy: PersonVM | AgentVM; addedAt: string; due: string | null; assignee: Assignee;
   start: { mode: "queue" | "now" | "gated" | "at"; position: number | null; gate: Gate | null; at: string | null } | null;
   request: { status: "pending" | "declined"; ownerFirstName: string } | null;
   doneBy: PersonVM | AgentVM | null; doneAt: string | null; receipt: string | null; sample: boolean;
-  may: { edit: boolean; assign: boolean; start: boolean; reorder: boolean; complete: boolean; comment: boolean };
+  may: { edit: boolean; assign: boolean; start: boolean; reorder: boolean; complete: boolean; comment: boolean; decide?: boolean; answerOffer?: boolean };
   comments: { id: Id; author: PersonVM | AgentVM; at: string; body: string; tags: { id: Id; label: string }[] }[]; tagDelivers: boolean }
 export interface QueueRowVM { todoId: Id; position: number; title: string; href: string; meta: string;
   may: { up: boolean; down: boolean; startNow: boolean; notYet: boolean; release: boolean } }

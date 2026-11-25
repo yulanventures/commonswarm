@@ -24,10 +24,11 @@ function access(user = alice, principal: string | null = null): HouseholdAccessF
       connection_id: 'connection', grant_id: 'approval', revoked_at: null, expires_at: now + 10000, operations: ['read', 'create', 'update'], purpose: 'shared' } } : { kind: 'human' } };
 }
 function todo(todoId = first, extra: Partial<Todo> = {}): Todo {
-  return { workspace_id: 'home', todo_id: todoId, version: 1, title: 'Buy milk', notes: '', due_on: null,
+  return { workspace_id: 'home', todo_id: todoId, version: 1, kind: 'task', title: 'Buy milk', notes: '', due_on: null,
     state: 'open', created_by: { user_id: alice, principal_id: null }, created_at: at,
     assignee: null, assigned_by: null, assigned_at: null, offer: null, gate: { kind: 'none' }, gate_set_by: null,
     queue_rank: null, state_by: { user_id: alice, principal_id: null }, state_at: at, comment_count: 0,
+    decision_status: null, decision_by_user: null, decision_at: null, decision_note: null,
     origin_placement: 'workspace', origin_channel_id: null, origin_conversation_id: null, ...extra };
 }
 function state(...todos: Todo[]): HouseholdTodoState {
@@ -246,7 +247,7 @@ test('reassignment preserves an omitted gate and its setter; an explicit gate re
     assert.deepEqual(value(offer).offer!.gate, gate);
     const offeredState = reduceTodoEvents(s, offer.events);
     const accepted = run(offeredState, { kind: 'household_todo_answer', todo_id: first,
-      offer_id: uid(300000), answer: 'accept' }, carol);
+      offer_id: uid(300000), base_version: offeredState.todos[first]!.version, answer: 'accept' }, carol);
     assert.deepEqual(value(accepted).gate, gate);
     const changed = run(s, { kind: 'todo_assign', todo_id: first, base_version: 1,
       to: { kind: 'agent', id: agentA }, gate: { kind: 'hold', note: 'New hold' } });
@@ -259,7 +260,7 @@ test('offer decisions require the named human, and acceptance applies the offere
   const s0 = state(todo());
   const d = run(s0, { kind: 'todo_assign', todo_id: first, base_version: 1, to: { kind: 'user', id: bob }, gate: { kind: 'hold', note: null } });
   const s = reduceTodoEvents(s0, d.events);
-  const answer: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), answer: 'accept' };
+  const answer: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), base_version: s.todos[first]!.version, answer: 'accept' };
   refused(run(s, answer, carol), 'not_decider');
   refused(run(s, answer, bob, agentB), 'human_confirmation_required');
   const accepted = run(s, answer, bob);
@@ -290,7 +291,7 @@ test('accepted agent-authored offers keep the gate author and reject forged sett
       to: { kind: 'agent', id: agentB }, gate: row.gate }, alice, agentA);
     const pending = reduceTodoEvents(initial, offered.events);
     const accepted = run(pending, { kind: 'household_todo_answer', todo_id: first,
-      offer_id: uid(300000), answer: 'accept' }, bob);
+      offer_id: uid(300000), base_version: pending.todos[first]!.version, answer: 'accept' }, bob);
     assert.deepEqual(value(accepted).gate, row.gate);
     assert.equal(value(accepted).gate_set_by, row.setter);
     assert.deepEqual(value(accepted).assigned_by, { user_id: bob, principal_id: null });
@@ -327,7 +328,7 @@ test('accepting an agent now offer puts it first and sends one start ask to that
   const initial = state(todo(), assignedA(second, { queue_rank: 4 }));
   const request = run(initial, assign({ kind: 'agent', id: agentA }, 'now'), bob);
   const s = reduceTodoEvents(initial, request.events);
-  const command: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), answer: 'accept' };
+  const command: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), base_version: s.todos[first]!.version, answer: 'accept' };
   refused(run(s, command, admin), 'not_decider');
   const accepted = run(s, command);
   assert.equal(value(accepted).queue_rank, 1);
@@ -340,7 +341,6 @@ test('finishing a to-do answers its pending request as replaced, so no one holds
   const s0 = state(todo());
   const s = reduceTodoEvents(s0, run(s0, { kind: 'todo_assign', todo_id: first, base_version: 1, to: { kind: 'user', id: bob } }).events);
   assert.ok(s.todos[first]!.offer, 'a pending request to bob');
-  const answer: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), answer: 'accept' };
   const version = s.todos[first]!.version;
   for (const finish of ['done', 'dropped'] as const) {
     const d = run(s, { kind: 'todo_set_state', todo_id: first, base_version: version, state: finish });
@@ -350,6 +350,7 @@ test('finishing a to-do answers its pending request as replaced, so no one holds
     assert.equal(value(d).state, finish);
     const after = reduceTodoEvents(s, d.events);
     assert.equal(after.todos[first]!.offer, null, `${finish}: the projection drops the request`);
+    const answer: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), base_version: after.todos[first]!.version, answer: 'accept' };
     refused(run(after, answer, bob), 'offer_not_pending');
     // Reopening leaves it without a request; a new one can be sent.
     const reopened = run(after, { kind: 'todo_set_state', todo_id: first, base_version: after.todos[first]!.version, state: 'open' });
@@ -788,6 +789,11 @@ test('origin_placement and origin_channel_id validate on create, replay determin
   //    accepts a post-migration update hydrated with explicit ('workspace', null), and still
   //    rejects forged mutations to 'channel' or 'general' or stripping a channel origin.
   const legacyTodo = todo();
+  delete legacyTodo.kind;
+  delete legacyTodo.decision_status;
+  delete legacyTodo.decision_by_user;
+  delete legacyTodo.decision_at;
+  delete legacyTodo.decision_note;
   delete legacyTodo.origin_placement;
   delete legacyTodo.origin_channel_id;
   delete legacyTodo.origin_conversation_id;

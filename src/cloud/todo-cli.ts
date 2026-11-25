@@ -4,7 +4,7 @@
  * The server decides permission; these sentences only say what it decided. */
 import { HOUSEHOLD_TOOL_REGISTRY, HouseholdToolInputError, validateHouseholdToolArguments, type Schema } from '../protocol/household-tool-registry.js';
 import { householdRefusalNextStep } from '../protocol/household-next-steps.js';
-import { TODO_COMMENT_LIMIT, TODO_MENTIONS_LIMIT, TODO_NOTES_LIMIT, TODO_TITLE_LIMIT } from '../protocol/household-todo-policy.js';
+import { TODO_COMMENT_LIMIT, TODO_DECISION_NOTE_LIMIT, TODO_MENTIONS_LIMIT, TODO_NOTES_LIMIT, TODO_TITLE_LIMIT } from '../protocol/household-todo-policy.js';
 import type { Party, TodoComment } from '../protocol/household-todos.js';
 import { foldMentionName } from '../protocol/mention-address.js';
 import type { HouseholdClientResult } from './household-objects.js';
@@ -86,6 +86,13 @@ export function todoCommentBody(value: string): string {
   if (value.trim() === '') throw new Error('A comment cannot be empty');
   if (length(value) > TODO_COMMENT_LIMIT) throw new Error(`A comment is at most ${TODO_COMMENT_LIMIT} characters`);
   if (CONTROLS_BUT_TAB_AND_NEWLINE.test(value)) throw new Error('A comment cannot contain control characters other than tabs and newlines');
+  return value;
+}
+
+export function todoDecisionNote(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (length(value) > TODO_DECISION_NOTE_LIMIT) throw new Error(`A decision note is at most ${TODO_DECISION_NOTE_LIMIT} characters`);
+  if (CONTROLS_BUT_TAB_AND_NEWLINE.test(value)) throw new Error('A decision note cannot contain control characters other than tabs and newlines');
   return value;
 }
 
@@ -318,7 +325,9 @@ export function renderTodoRead(result: Extract<HouseholdClientResult, { kind: 't
   const lines = [
     `To-do ${todo.todo_id} (${UNTRUSTED})`,
     `Title: ${terminalLine(todo.title)}`,
+    ...(todo.kind === 'approval' ? [`Kind: approval`] : []),
     `State: ${todo.state} · version ${todo.version}`,
+    ...(todo.decision ? [`Decision: ${todo.decision.status} by ${partyLabel({ kind: 'user', id: todo.decision.by }, names)} at ${todo.decision.at}${todo.decision.note ? ` · ${terminalLine(todo.decision.note)}` : ''}`] : []),
     `Assignee: ${todo.assignee ? partyLabel(todo.assignee, names) : 'nobody'}${todo.queue_position ? ` · #${todo.queue_position} in line` : ''}`,
     ...(todo.offer ? [`Asked of: ${partyLabel(todo.offer.to, names)} (${todo.offer.start === 'now' ? 'start now' : 'add to line'})`] : []),
     `Due: ${todo.due_on ?? 'none'}`,
@@ -334,7 +343,11 @@ export function renderTodoRead(result: Extract<HouseholdClientResult, { kind: 't
 function noticeLines(notices: readonly HouseholdTodoNotice[], names: TodoNames): string[] {
   return notices.map((notice) => notice.status === 'sent'
     ? `Notified ${notice.to.map((party) => partyLabel(party, names)).join(', ')}.`
-    : `Did not notify ${notice.to.map((party) => partyLabel(party, names)).join(', ')} (${notice.reason === 'signal_rate_limited' ? 'too many notices just now' : 'not connected'}).`);
+    : `Did not notify ${notice.to.map((party) => partyLabel(party, names)).join(', ')} (${
+      notice.reason === 'signal_rate_limited' ? 'too many notices just now'
+        : notice.reason === 'recipient_access_refused' ? 'no Lists & docs access'
+        : 'not connected'
+    }).`);
 }
 
 export function renderTodoWrite(result: Extract<HouseholdClientResult, { status: 'committed' }>, verb: string, names: TodoNames): string {
@@ -366,6 +379,11 @@ export function todoRefusalNextStep(reason: string, todoId?: string): string | u
     case 'queue_full': return 'That line is full. Finish or drop something in it first.';
     case 'todo_limit_reached': return 'This workspace has too many open to-dos. Finish or drop some first.';
     case 'todo_write_rate_limited': return 'Too many to-do changes just now. Wait a little and try again.';
+    case 'approval_origin_not_allowed': return 'Approval to-dos can only be created at the workspace or #general level, not inside channels or DMs.';
+    case 'approval_decided_frozen': return `Decided approvals cannot be edited. Reopen it first if a new decision is needed; ${read} shows its status.`;
+    case 'offer_pending_frozen': return `This to-do has a pending request and cannot be edited until it is answered or replaced; ${read} shows the request.`;
+    case 'not_decider': return `Only the assigned person can decide this to-do; ${read} shows who.`;
+    case 'human_confirmation_required': return 'This action requires a signed-in person, not an agent token.';
     default: return householdRefusalNextStep(reason);
   }
 }

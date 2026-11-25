@@ -175,9 +175,9 @@ import {
 } from "./file-artifacts.ts";
 import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
 import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
-import { assertHouseholdContentServiceReady, HouseholdContentServiceUpdating } from "./household-content-access.ts";
+import { assertHouseholdContentServiceReady, HouseholdContentServiceUpdating, loadHouseholdContentAccess } from "./household-content-access.ts";
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
-import type { HouseholdTodoNoticePort } from './household-todos.ts';
+import { checkAgentHouseholdContentAccess, type HouseholdTodoNoticePort } from './household-todos.ts';
 import { provisionHouseholdPermissions, pendingLinkInvitationIds, revokeRemovedMemberHousehold } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
 import {
@@ -286,6 +286,7 @@ import {
   SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminCapability, seatAdminPrincipalTargetRefusal, validWorkspaceName,
   SEAT_ADMIN_SEATS_PER_GRANT, seatAdminRequiredCapabilities, seatAdminSeatCeilingRefusal,
   HouseholdToolInputError,
+  householdAccessRefusal,
   applyCommand,
   canonicalPrincipal,
   decideWorkspace,
@@ -13195,8 +13196,53 @@ type PostSignalOutcome =
   | { status: "hosted_refused" }
   | { status: "chain_refused"; error: AskChainRefusal };
 
+class HouseholdNoticeNotLive extends Error {
+  constructor() { super("Household notice recipient not live."); this.name = "HouseholdNoticeNotLive"; }
+}
+class HouseholdNoticeRateLimited extends Error {
+  constructor() { super("Household notice signal rate limited."); this.name = "HouseholdNoticeRateLimited"; }
+}
+class HouseholdNoticeAccessRefused extends Error {
+  constructor() { super("Household notice recipient household access refused."); this.name = "HouseholdNoticeAccessRefused"; }
+}
+
+/** Pure read-only MVCC recipient household read-rights verifier on live PostgreSQL clock_timestamp(). */
+async function verifyNoticeRecipients(
+  sp: Sql,
+  workspaceId: string,
+  recipients: readonly { kind: "user" | "agent"; id: string }[],
+): Promise<boolean> {
+  if (recipients.length === 0) return false;
+  for (const party of recipients) {
+    if (party.kind === "user") {
+      const checked = await loadHouseholdContentAccess(
+        sp,
+        workspaceId,
+        { user_id: party.id, principal_id: null, run_id: null, connection: null },
+        { lock: false },
+      );
+      if (checked === null || householdAccessRefusal(checked.facts, workspaceId, "read", checked.now) !== null) {
+        return false;
+      }
+    } else {
+      const access = await checkAgentHouseholdContentAccess(
+        sp,
+        workspaceId,
+        party.id,
+        { householdAccessRefusal },
+        { lock: false },
+      );
+      if (access === "none") return false;
+    }
+  }
+  return true;
+}
+
 /** Fixed-content notices share signal targeting, rate and delivery truth.
- * The to-do store owns replay and invokes this port at most once per command. */
+ * The to-do store owns replay and invokes this port at most once per command.
+ * Every notice attempt runs in a rollback-capable savepoint across Steps A-G so
+ * a recipient losing household read rights before or during late writes/filing
+ * discards every notice-side row and realtime frame while the outer decision commits. */
 function householdNotice(route: Route, auth: AuthContext): HouseholdTodoNoticePort {
   let attempted = false;
   return async (tx, workspaceId, identity, notice) => {
@@ -13206,17 +13252,64 @@ function householdNotice(route: Route, auth: AuthContext): HouseholdTodoNoticePo
       throw new Error("Household notice identity mismatch.");
     const command: SignalCommand = { kind: "post_signal", signal_kind: notice.kind,
       body: notice.body, about: notice.about, to_user_id: null, to: [...notice.to] };
-    const target = await resolveSignalWriteTarget(tx, route, auth, command);
-    if (target === null) return { to: notice.to, status: "not_sent", reason: "recipient_not_live" };
-    const rate = await enforceSignalRate(tx, auth, workspaceId, command, target);
-    if (rate !== null) return { to: notice.to, status: "not_sent", reason: "signal_rate_limited" };
-    const posted = await postSignal(tx, route, auth, command, target, [], {
-      channelId: null, threadRootId: null, broadcastToChannel: false,
-      untilMs: SIGNAL_DEFAULT_UNTIL_MS[notice.kind], untilCeiling: null, untilExplicit: false,
-    });
-    if (posted.status !== "inserted") throw new Error("Household notice insertion failed.");
-    await chargeSpend(tx, "signal_post");
-    return { to: notice.to, status: "sent", signal_id: posted.signal.id };
+    try {
+      const signalId = await tx.savepoint(async (sp) => {
+        // Step A: target resolution
+        const target = await resolveSignalWriteTarget(sp, route, auth, command);
+        if (target === null) throw new HouseholdNoticeNotLive();
+        // Step B: signal rate limit
+        const rate = await enforceSignalRate(sp, auth, workspaceId, command, target);
+        if (rate !== null) throw new HouseholdNoticeRateLimited();
+        // Step C: early lock-free MVCC fast-fail recipient access check
+        if (!await verifyNoticeRecipients(sp, workspaceId, notice.to)) {
+          throw new HouseholdNoticeAccessRefused();
+        }
+        // Step D: signal, recipient, delivery, and wake writes inside the savepoint
+        const posted = await postSignal(sp, route, auth, command, target, [], {
+          channelId: null, threadRootId: null, broadcastToChannel: false,
+          untilMs: SIGNAL_DEFAULT_UNTIL_MS[notice.kind], untilCeiling: null, untilExplicit: false,
+        });
+        if (posted.status !== "inserted") throw new Error("Household notice insertion failed.");
+        // Step E: spend shard write inside the savepoint
+        await chargeSpend(sp, "signal_post");
+        // Step F: settle all 5 deferred signal/mention/conversation constraint triggers inside the savepoint
+        await sp`
+          SET CONSTRAINTS
+            swarm.signal_recipients_first_is_the_scalar,
+            swarm.signal_mentions_public_at_commit,
+            swarm.signals_settle_conversation,
+            swarm.signal_recipients_settle_conversation,
+            swarm.conversation_signals_settle
+          IMMEDIATE
+        `;
+        await sp`
+          SET CONSTRAINTS
+            swarm.signal_recipients_first_is_the_scalar,
+            swarm.signal_mentions_public_at_commit,
+            swarm.signals_settle_conversation,
+            swarm.signal_recipients_settle_conversation,
+            swarm.conversation_signals_settle
+          DEFERRED
+        `;
+        // Step G: final live lock-free MVCC recipient access check after all writes and triggers settle
+        if (!await verifyNoticeRecipients(sp, workspaceId, notice.to)) {
+          throw new HouseholdNoticeAccessRefused();
+        }
+        return posted.signal.id;
+      });
+      return { to: notice.to, status: "sent", signal_id: signalId };
+    } catch (error) {
+      if (error instanceof HouseholdNoticeNotLive) {
+        return { to: notice.to, status: "not_sent", reason: "recipient_not_live" };
+      }
+      if (error instanceof HouseholdNoticeRateLimited) {
+        return { to: notice.to, status: "not_sent", reason: "signal_rate_limited" };
+      }
+      if (error instanceof HouseholdNoticeAccessRefused) {
+        return { to: notice.to, status: "not_sent", reason: "recipient_access_refused" };
+      }
+      throw error;
+    }
   };
 }
 

@@ -17,7 +17,7 @@ type Core = Pick<typeof import('../_shared/household-todos.d.ts'), 'decideTodo' 
   & Pick<typeof import('../_shared/household-todo-policy.d.ts'), 'agentWorkState' | 'TODO_IDENTITY_WRITE_HOURLY_LIMIT' | 'TODO_WORKSPACE_WRITE_HOURLY_LIMIT'>;
 export type HouseholdTodoAccess = (tx: Sql, workspaceId: string, identity: HouseholdIdentity) => Promise<{ facts: HouseholdAccessFacts; now: number } | null>;
 export type HouseholdTodoNoticeReceipt = { to: readonly Party[]; status: 'sent'; signal_id: string }
-  | { to: readonly Party[]; status: 'not_sent'; reason: 'signal_rate_limited' | 'recipient_not_live' };
+  | { to: readonly Party[]; status: 'not_sent'; reason: 'signal_rate_limited' | 'recipient_not_live' | 'recipient_access_refused' };
 export type HouseholdTodoNoticePort = (tx: Sql, workspaceId: string, identity: HouseholdIdentity, notice: TodoNotice) => Promise<HouseholdTodoNoticeReceipt>;
 export type HouseholdTodoQuery =
   | { kind: 'todo_list'; scope: 'open' | 'all'; assignee?: Party; offset?: number; limit?: number }
@@ -50,7 +50,9 @@ function todoFromRow(r: Record<string, unknown>): Todo {
   const originConversationId = (originPlacement === 'dm' || originPlacement === 'group_dm') && r.origin_conversation_id != null
     ? String(r.origin_conversation_id).toLowerCase()
     : null;
-  return { workspace_id: String(r.workspace_id), todo_id: String(r.todo_id), version: Number(r.version), title: String(r.title), notes: String(r.notes),
+  return { workspace_id: String(r.workspace_id), todo_id: String(r.todo_id), version: Number(r.version),
+    kind: r.kind === 'approval' ? 'approval' : 'task',
+    title: String(r.title), notes: String(r.notes),
     state: r.state as Todo['state'], due_on: r.due_on == null ? null : r.due_on instanceof Date ? iso(r.due_on).slice(0, 10) : String(r.due_on).slice(0, 10),
     created_by: actor(r.created_by_user, r.created_by_principal), created_at: iso(r.created_at), assignee: party(r.assignee_user, r.assignee_principal),
     assigned_by: r.assigned_by_user == null ? null : actor(r.assigned_by_user, r.assigned_by_principal), assigned_at: nullableIso(r.assigned_at),
@@ -58,6 +60,10 @@ function todoFromRow(r: Record<string, unknown>): Todo {
       start: r.offer_start as 'queue' | 'now', gate: r.offer_gate as TodoGate, by: actor(r.offer_by_user, r.offer_by_principal), at: iso(r.offered_at) },
     gate: gateFromRow(r), gate_set_by: r.gate_set_by as string | null, queue_rank: r.queue_rank == null ? null : Number(r.queue_rank),
     state_by: actor(r.state_by_user, r.state_by_principal), state_at: iso(r.state_at), comment_count: Number(r.comment_count),
+    decision_status: r.decision_status === 'approved' || r.decision_status === 'declined' ? r.decision_status : null,
+    decision_by_user: r.decision_by_user == null ? null : String(r.decision_by_user),
+    decision_at: nullableIso(r.decision_at),
+    decision_note: r.decision_note == null ? null : String(r.decision_note),
     origin_placement: originPlacement, origin_channel_id: originChannelId, origin_conversation_id: originConversationId };
 }
 const commentFromRow = (r: Record<string, unknown>): TodoComment => ({ comment_id: String(r.comment_id),
@@ -84,6 +90,76 @@ function redactTodoOutcome(outcome: TodoOutcome): TodoOutcome {
     return { status: 'conflict', current: redactTodoFields(outcome.current) };
   }
   return outcome;
+}
+
+export async function checkAgentHouseholdContentAccess(
+  tx: Sql,
+  workspaceId: string,
+  principalId: string,
+  core: Pick<Core, 'householdAccessRefusal'>,
+  options: { lock?: boolean } = {},
+): Promise<'none' | 'read' | 'read_write'> {
+  // These are durable candidate identities, never accepted as credentials.
+  // The same facts/policy used for actual content decide each candidate.
+  // Read-only MVCC callers pass { lock: false } inside a settled savepoint check.
+  const planned = await discoverLocalTargets(tx, workspaceId, { principals: [principalId], tokens: [] });
+  const tokenIds = [...new Set(planned.flatMap(r => r.token_id ? [r.token_id] : []))];
+  const candidates = await tx`SELECT s.owner_user_id,s.seat_id AS connection_id,s.grant_id,h.handle,g.provider_grant_id FROM swarm.hosted_mcp_seats s
+      JOIN swarm.hosted_mcp_seat_handles h ON h.seat_id=s.seat_id AND h.revoked_at IS NULL
+      JOIN swarm.hosted_mcp_grants g ON g.grant_id=s.grant_id
+      WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=${principalId}::uuid
+      UNION ALL SELECT DISTINCT c.owner_user_id,t.token_id AS connection_id,c.grant_id,NULL,NULL
+      FROM swarm.household_content_connections c
+      JOIN swarm.agent_tokens original ON original.token_id=c.connection_id AND original.run_id=c.grant_id
+        AND original.principal_id=c.principal_id
+      LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=c.renewal_grant_id
+        AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
+      JOIN swarm.agent_tokens t ON t.run_id=c.grant_id AND t.principal_id=c.principal_id
+        AND (c.renewal_grant_id IS NULL AND t.token_id=c.connection_id
+          OR t.renewal_grant_id=c.renewal_grant_id AND t.lineage_id=original.lineage_id)
+      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+      JOIN swarm.devices d ON d.device_id=r.device_id
+      WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp() AND NOT t.surrender_only
+        AND (c.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL
+          AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
+          AND ((SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid) IS NULL OR (SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid)=c.connection_id))
+        AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
+        AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
+        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
+          WHERE z.kind='renewal_grant' AND z.target_id=t.renewal_grant_id)
+        AND r.ended_at IS NULL AND d.revoked_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones rt WHERE
+          (rt.kind='token' AND rt.target_id=t.token_id) OR (rt.kind='principal' AND rt.target_id=t.principal_id)
+          OR (rt.kind='run' AND rt.target_id=t.run_id) OR (rt.kind='device' AND rt.target_id=d.device_id)
+          OR (rt.kind='membership' AND rt.target_id=c.owner_user_id)
+          OR (rt.kind IN ('lineage','family') AND rt.target_id=t.lineage_id))
+        AND c.workspace_id=${workspaceId}::uuid AND c.principal_id=${principalId}::uuid AND c.hosted_grant_id IS NULL`;
+  let result: 'none' | 'read' | 'read_write' = 'none';
+  for (const candidate of candidates) {
+    if (candidate.handle) {
+      // Existing hosted-read authority, never OAuth-runtime membership.
+      const [role] = await tx`SELECT current_setting('role') AS value`;
+      let live = false;
+      await tx`SELECT set_config('role','swarm_read',true)`;
+      try {
+        const [row] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
+            ${candidate.grant_id}::uuid,${candidate.handle}::text,'whoami') a
+            WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${principalId}::uuid
+              AND a.owner_user_id=${candidate.owner_user_id}::uuid)
+            AND commonswarm_oauth.provider_family_active(${candidate.provider_grant_id}::text) AS live`;
+        live = row?.live === true;
+      } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
+      if (!live) continue;
+    }
+    const checked = await loadHouseholdContentAccess(tx, workspaceId, { user_id: String(candidate.owner_user_id), principal_id: principalId,
+      run_id: null, connection: { connection_id: String(candidate.connection_id), grant_id: String(candidate.grant_id) } }, options);
+    if (!checked || core.householdAccessRefusal(checked.facts, workspaceId, 'read', checked.now)) continue;
+    if (!core.householdAccessRefusal(checked.facts, workspaceId, 'create', checked.now)
+      || !core.householdAccessRefusal(checked.facts, workspaceId, 'update', checked.now)) return 'read_write';
+    result = 'read';
+  }
+  return result;
 }
 
 export function createHouseholdTodoStore({ core, access, notice }: { core: Core; access: HouseholdTodoAccess; notice: HouseholdTodoNoticePort }) {
@@ -121,7 +197,9 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const originChannelId = originPlacement === 'channel' && todo.origin_channel_id ? todo.origin_channel_id.toLowerCase() : null;
     const originConversationId = (originPlacement === 'dm' || originPlacement === 'group_dm') && todo.origin_conversation_id
       ? todo.origin_conversation_id.toLowerCase() : null;
-    const record = { workspace_id: todo.workspace_id, todo_id: todo.todo_id, version: todo.version, title: todo.title, notes: todo.notes, state: todo.state, due_on: todo.due_on,
+    const record = { workspace_id: todo.workspace_id, todo_id: todo.todo_id, version: todo.version,
+      kind: todo.kind === 'approval' ? 'approval' : 'task',
+      title: todo.title, notes: todo.notes, state: todo.state, due_on: todo.due_on,
       created_by_user: todo.created_by.user_id, created_by_principal: todo.created_by.principal_id, created_at: todo.created_at,
       assignee_user: todo.assignee?.kind === 'user' ? todo.assignee.id : null, assignee_principal: todo.assignee?.kind === 'agent' ? todo.assignee.id : null,
       assigned_by_user: todo.assigned_by?.user_id ?? null, assigned_by_principal: todo.assigned_by?.principal_id ?? null, assigned_at: todo.assigned_at,
@@ -131,10 +209,13 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       gate_kind: gate.kind, gate_note: gate.kind === 'hold' ? gate.note : null, gate_todo_id: gate.kind === 'after' ? gate.todo_id : null,
       gate_at: gate.kind === 'at' ? gate.at : null, gate_set_by: todo.gate_set_by, queue_rank: todo.queue_rank,
       state_by_user: todo.state_by.user_id, state_by_principal: todo.state_by.principal_id, state_at: todo.state_at, comment_count: todo.comment_count, last_seq: lastSeq,
+      decision_status: todo.decision_status ?? null, decision_by_user: todo.decision_by_user ?? null,
+      decision_at: todo.decision_at ?? null, decision_note: todo.decision_note ?? null,
       origin_placement: originPlacement, origin_channel_id: originChannelId, origin_conversation_id: originConversationId };
-    // origin_placement, origin_channel_id and origin_conversation_id are immutable creation provenance: never overwritten on UPDATE.
+    // kind, origin_placement, origin_channel_id and origin_conversation_id are immutable creation provenance: never overwritten on UPDATE.
     const mutableKeys = Object.keys(record).filter(k =>
-      k !== 'workspace_id' && k !== 'todo_id' && k !== 'origin_placement' && k !== 'origin_channel_id' && k !== 'origin_conversation_id',
+      k !== 'workspace_id' && k !== 'todo_id' && k !== 'kind'
+      && k !== 'origin_placement' && k !== 'origin_channel_id' && k !== 'origin_conversation_id',
     ) as (keyof typeof record)[];
     await tx`INSERT INTO swarm.household_todos ${tx(record)} ON CONFLICT(workspace_id,todo_id) DO UPDATE SET ${tx(record, ...mutableKeys)}`;
   }
@@ -151,6 +232,12 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const principal = identity.principal_id ?? identity.user_id;
     const [previous] = await tx`SELECT request_digest,outcome FROM swarm.household_todo_receipts WHERE workspace_id=${workspaceId}::uuid AND principal=${principal}::uuid AND command_id=${requestId}`;
     if (previous) {
+      const reauth = await authorize(tx, workspaceId, identity, op);
+      if (reauth.denied) {
+        const outcome = { status: 'refused' as const, reason: reauth.denied };
+        await audit(tx, workspaceId, identity, requestId, command, digest, outcome);
+        return { outcome, events: [], notices: [], replayed: false };
+      }
       const replayed = previous.request_digest === digest;
       const stored = previous.outcome as { outcome: TodoOutcome; notices: HouseholdTodoNoticeReceipt[] };
       const outcome = redactTodoOutcome(replayed ? stored.outcome : { status: 'refused' as const, reason: 'request_id_reused' as const });
@@ -231,12 +318,24 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const upNext = Object.values(current.todos).filter(t => t.state === 'open' && t.assignee?.kind === 'agent' && t.assignee.id === todo.assignee?.id && t.queue_rank !== null && core.evaluateGate(t.gate, current.todos, now))
       .sort((a, b) => a.queue_rank! - b.queue_rank! || a.todo_id.localeCompare(b.todo_id));
     const { queue_rank: _rank, gate_set_by: _setter, origin_placement: _originPlacement, origin_channel_id: _originChannelId, origin_conversation_id: _originConversationId, ...fields } = todo;
-    return { ...fields, gate_clear: core.evaluateGate(todo.gate, current.todos, now), queue_position: upNext.findIndex(t => t.todo_id === todo.todo_id) + 1 || null };
+    const kind = todo.kind ?? 'task';
+    const decisionStatus = todo.decision_status ?? null;
+    const decision = decisionStatus !== null && todo.decision_by_user && todo.decision_at
+      ? { status: decisionStatus, by: todo.decision_by_user, at: todo.decision_at, note: todo.decision_note ?? null }
+      : null;
+    const offerPrereq = todo.offer?.gate.kind === 'after' && Object.hasOwn(current.todos, todo.offer.gate.todo_id)
+      ? current.todos[todo.offer.gate.todo_id]!
+      : null;
+    const offer_prerequisite = todo.offer?.gate.kind === 'after' && offerPrereq
+      ? { todo_id: offerPrereq.todo_id, title: offerPrereq.title, state: offerPrereq.state }
+      : null;
+    return { ...fields, kind, decision_status: decisionStatus, decision, offer_prerequisite, gate_clear: core.evaluateGate(todo.gate, current.todos, now), queue_position: upNext.findIndex(t => t.todo_id === todo.todo_id) + 1 || null };
   }
   function summary(todo: Todo, current: HouseholdTodoState, now: number) {
     const v = view(todo, current, now);
-    return { todo_id: v.todo_id, version: v.version, title: v.title, state: v.state, due_on: v.due_on, assignee: v.assignee,
-      offer: v.offer ? { offer_id: v.offer.offer_id, to: v.offer.to, decider_user_id: v.offer.decider_user_id, start: v.offer.start, gate: { kind: v.offer.gate.kind }, by: v.offer.by, at: v.offer.at } : null,
+    return { todo_id: v.todo_id, version: v.version, kind: v.kind, title: v.title, state: v.state, due_on: v.due_on, assignee: v.assignee,
+      decision_status: v.decision_status, has_notes: todo.notes.length > 0,
+      offer: v.offer ? { offer_id: v.offer.offer_id, to: v.offer.to, decider_user_id: v.offer.decider_user_id, start: v.offer.start, gate: v.offer.gate, by: v.offer.by, at: v.offer.at } : null,
       gate: { kind: v.gate.kind, clear: v.gate_clear }, queue_position: v.queue_position, comment_count: v.comment_count, state_at: v.state_at };
   }
   function page<T>(rows: T[], offset: number, limit: number, items: T[], make: (next: number | null) => unknown, minimumRows = 1) {
@@ -259,67 +358,8 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       ORDER BY seq,comment_id OFFSET ${offset} LIMIT ${limit + 1}`;
     return rows.map(commentFromRow);
   }
-  async function queueContentAccess(tx: Sql, workspaceId: string, principalId: string): Promise<'none' | 'read' | 'read_write'> {
-    // These are durable candidate identities, never accepted as credentials.
-    // The same locked facts/policy used for actual content decide each candidate.
-    const planned=await discoverLocalTargets(tx,workspaceId,{principals:[principalId],tokens:[]});
-    const tokenIds=[...new Set(planned.flatMap(r=>r.token_id ? [r.token_id]:[]))];
-    const candidates = await tx`SELECT s.owner_user_id,s.seat_id AS connection_id,s.grant_id,h.handle,g.provider_grant_id FROM swarm.hosted_mcp_seats s
-      JOIN swarm.hosted_mcp_seat_handles h ON h.seat_id=s.seat_id AND h.revoked_at IS NULL
-      JOIN swarm.hosted_mcp_grants g ON g.grant_id=s.grant_id
-      WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=${principalId}::uuid
-      UNION ALL SELECT DISTINCT c.owner_user_id,t.token_id AS connection_id,c.grant_id,NULL,NULL
-      FROM swarm.household_content_connections c
-      JOIN swarm.agent_tokens original ON original.token_id=c.connection_id AND original.run_id=c.grant_id
-        AND original.principal_id=c.principal_id
-      LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=c.renewal_grant_id
-        AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
-      JOIN swarm.agent_tokens t ON t.run_id=c.grant_id AND t.principal_id=c.principal_id
-        AND (c.renewal_grant_id IS NULL AND t.token_id=c.connection_id
-          OR t.renewal_grant_id=c.renewal_grant_id AND t.lineage_id=original.lineage_id)
-      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
-      JOIN swarm.devices d ON d.device_id=r.device_id
-      WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp() AND NOT t.surrender_only
-        AND (c.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL
-          AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
-          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
-          AND ((SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid) IS NULL OR (SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid)=c.connection_id))
-        AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
-        AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
-        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
-          WHERE z.kind='renewal_grant' AND z.target_id=t.renewal_grant_id)
-        AND r.ended_at IS NULL AND d.revoked_at IS NULL
-        AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones rt WHERE
-          (rt.kind='token' AND rt.target_id=t.token_id) OR (rt.kind='principal' AND rt.target_id=t.principal_id)
-          OR (rt.kind='run' AND rt.target_id=t.run_id) OR (rt.kind='device' AND rt.target_id=d.device_id)
-          OR (rt.kind='membership' AND rt.target_id=c.owner_user_id)
-          OR (rt.kind IN ('lineage','family') AND rt.target_id=t.lineage_id))
-        AND c.workspace_id=${workspaceId}::uuid AND c.principal_id=${principalId}::uuid AND c.hosted_grant_id IS NULL`;
-    let result: 'none' | 'read' | 'read_write' = 'none';
-    for (const candidate of candidates) {
-      if (candidate.handle) {
-        // Existing hosted-read authority, never OAuth-runtime membership.
-        const [role] = await tx`SELECT current_setting('role') AS value`;
-        let live = false;
-        await tx`SELECT set_config('role','swarm_read',true)`;
-        try {
-          const [row] = await tx`SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization(
-            ${candidate.grant_id}::uuid,${candidate.handle}::text,'whoami') a
-            WHERE a.workspace_id=${workspaceId}::uuid AND a.principal_id=${principalId}::uuid
-              AND a.owner_user_id=${candidate.owner_user_id}::uuid)
-            AND commonswarm_oauth.provider_family_active(${candidate.provider_grant_id}::text) AS live`;
-          live = row?.live === true;
-        } finally { await tx`SELECT set_config('role',${String(role!.value)},true)`; }
-        if (!live) continue;
-      }
-      const checked = await loadHouseholdContentAccess(tx, workspaceId, { user_id: String(candidate.owner_user_id), principal_id: principalId,
-        run_id: null, connection: { connection_id: String(candidate.connection_id), grant_id: String(candidate.grant_id) } });
-      if (!checked || core.householdAccessRefusal(checked.facts, workspaceId, 'read', checked.now)) continue;
-      if (!core.householdAccessRefusal(checked.facts, workspaceId, 'create', checked.now)
-        || !core.householdAccessRefusal(checked.facts, workspaceId, 'update', checked.now)) return 'read_write';
-      result = 'read';
-    }
-    return result;
+  async function queueContentAccess(tx: Sql, workspaceId: string, principalId: string, options: { lock?: boolean } = {}): Promise<'none' | 'read' | 'read_write'> {
+    return await checkAgentHouseholdContentAccess(tx, workspaceId, principalId, core, options);
   }
   async function queueFacts(tx: Sql, workspaceId: string, principalId: string, current: HouseholdTodoState, now: number, viewerIdentity: HouseholdIdentity) {
     const contentAccess = await queueContentAccess(tx, workspaceId, principalId);

@@ -385,6 +385,7 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         kind: "household_todo_answer",
         todo_id: privMayaTodo.todo_id,
         offer_id: privMayaTodo.offer!.offer_id,
+        base_version: privMayaTodo.version,
         answer: "accept",
       }));
       await store.write(tx, wsId, mayaIdentity, `req-${randomUUID()}`, {
@@ -423,6 +424,7 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         kind: "household_todo_answer",
         todo_id: reviewTodo.todo_id,
         offer_id: reviewOfferId,
+        base_version: reviewTodo.version,
         answer: "decline",
       });
 

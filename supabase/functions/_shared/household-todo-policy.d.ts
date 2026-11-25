@@ -6,6 +6,7 @@ export declare const TODO_NOTES_LIMIT = 4000;
 export declare const TODO_COMMENT_LIMIT = 4000;
 export declare const TODO_MENTIONS_LIMIT = 8;
 export declare const TODO_GATE_NOTE_LIMIT = 200;
+export declare const TODO_DECISION_NOTE_LIMIT = 500;
 export declare const TODO_EVENT_BYTE_LIMIT: number;
 export declare const TODO_IDENTITY_WRITE_HOURLY_LIMIT = 600;
 export declare const TODO_WORKSPACE_WRITE_HOURLY_LIMIT = 2000;
@@ -42,6 +43,9 @@ export declare const TODO_NOTICE_BODIES: {
     readonly agent_offer: "Asks for a to-do for your agent.";
     readonly accepted: "Accepted your to-do request.";
     readonly declined: "Declined your to-do request.";
+    readonly approval_ask: "Asks for your approval on a to-do.";
+    readonly approved: "Approved your to-do.";
+    readonly declined_decision: "Declined your to-do.";
     readonly mentioned: "Mentioned you in a comment.";
 };
 export declare function todoNoticeAbout(todoId: string): string;

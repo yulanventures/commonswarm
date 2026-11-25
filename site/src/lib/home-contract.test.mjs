@@ -64,9 +64,14 @@ const cases = [
     unknown: 'The to-do may or may not be in Doing. Reload to check.',
   },
   {
-    method: 'answerRequest', args: [W.home, { todo_id: T.requestClaude, offer_id: O.claude, answer: 'accept' }, 'req-answer-1'],
-    command: { kind: 'household_todo_answer', todo_id: T.requestClaude, offer_id: O.claude, answer: 'accept' },
+    method: 'answerRequest', args: [W.home, { todo_id: T.requestClaude, offer_id: O.claude, base_version: 2, answer: 'accept' }, 'req-answer-1'],
+    command: { kind: 'household_todo_answer', todo_id: T.requestClaude, offer_id: O.claude, base_version: 2, answer: 'accept' },
     unknown: 'The request may or may not have been answered. Reload to check.',
+  },
+  {
+    method: 'decideTodo', args: [W.home, { todo_id: T.assignedTom, base_version: 3, decision: 'approve', note: 'Looks good' }, 'req-decide-1'],
+    command: { kind: 'household_todo_decide', todo_id: T.assignedTom, base_version: 3, decision: 'approve', note: 'Looks good' },
+    unknown: 'The decision may or may not have been saved. Reload to check.',
   },
   {
     method: 'steerQueue', args: [W.home, { todo_id: T.claudeUp2, base_version: 2, action: { kind: 'move', after_todo_id: T.claudeUp1 } }, 'req-steer-1'],
@@ -128,4 +133,47 @@ test('refusals use stable codes and conflicts retain the current to-do', async (
   await assert.rejects(write);
   result = { status: 500, body: { status: 'ok', todos: [], next_offset: null } };
   await assert.rejects(() => server.listTodos(W.home, { scope: 'all', offset: 0, limit: 25 }));
+});
+
+test('readTodo preserves valid offer_prerequisite and normalizes absent or malformed values to null', async () => {
+  const baseTodo = HOME_FIXTURES.todosByWorkspace[W.home].find(row => row.todo_id === T.requestClaude);
+  let wirePrereq = {
+    todo_id: T.done,
+    title: 'Authoritative prereq',
+    state: 'open',
+    origin_placement: 'channel',
+    origin_channel_id: 'should-be-stripped',
+  };
+  const server = createHomeServer(session, {
+    postCommand: async () => ({
+      status: 200,
+      body: {
+        status: 'ok',
+        todo: { ...baseTodo, offer_prerequisite: wirePrereq },
+        comments: [],
+        next_comment_offset: null,
+      },
+    }),
+    client: () => null,
+  });
+
+  const valid = await server.readTodo(W.home, T.requestClaude);
+  assert.deepEqual(valid.todo.offer_prerequisite, {
+    todo_id: T.done,
+    title: 'Authoritative prereq',
+    state: 'open',
+  });
+
+  for (const malformed of [
+    undefined,
+    null,
+    'not-an-object',
+    { todo_id: T.done, title: '   ', state: 'open' },
+    { todo_id: '', title: 'Title', state: 'open' },
+    { todo_id: T.done, title: 'Title', state: 'unknown_state' },
+  ]) {
+    wirePrereq = malformed;
+    const res = await server.readTodo(W.home, T.requestClaude);
+    assert.equal(res.todo.offer_prerequisite, null);
+  }
 });

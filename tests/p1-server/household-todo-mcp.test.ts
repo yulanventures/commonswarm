@@ -489,7 +489,8 @@ try {
     await tx.unsafe('RELEASE SAVEPOINT local_listing_tombstone');
     assert.deepEqual(await localListing(),listedLocal,'rolling back the tombstone restores the live listing');
     const humanCommands=[
-      {kind:'household_todo_answer',todo_id:done.todo_id,offer_id:crypto.randomUUID(),answer:'accept'},
+      {kind:'household_todo_answer',todo_id:done.todo_id,offer_id:crypto.randomUUID(),base_version:done.version,answer:'accept'},
+      {kind:'household_todo_decide',todo_id:done.todo_id,base_version:done.version,decision:'approve'},
       {kind:'household_todo_steer',todo_id:done.todo_id,base_version:done.version,action:{kind:'start_now'}},
       {kind:'household_agent_work_policy',principal_id:f.principal,accepts_from:'anyone'},
       {kind:'household_activity',since:'2020-01-01T00:00:00Z',limit:100},
@@ -510,7 +511,7 @@ try {
       creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS fresh
       FROM swarm.signals WHERE id=\x24{offeredSignal}::uuid\x60;
     assert.equal(offeredFresh[0]!.fresh,true,'a notice after the resolver probe carries both server-stamped creation proofs');
-    const answered=committed(await human(envelope({kind:'household_todo_answer',todo_id:offered.todo_id,offer_id:offered.offer.offer_id,answer:'accept'})));
+    const answered=committed(await human(envelope({kind:'household_todo_answer',todo_id:offered.todo_id,offer_id:offered.offer.offer_id,base_version:offered.version,answer:'accept'})));
     assert.equal(answered.assignee.id,f.sibling); assert.equal(answered.offer,null);
     const acceptedId=crypto.randomUUID();
     const accepted=committed(await human(envelope({kind:'household_tool',tool:'todo_create',arguments:{seat:'seat_0000000000000000000000',request_id:acceptedId,
@@ -537,7 +538,7 @@ try {
     const projection={workspace_id:f.workspace,stream_id:crypto.randomUUID(),last_seq:0,objects:{'doc-one':{object_id:'doc-one',kind:'doc',history:[revision]}},
       reservations:{},drafts:{'hidden':{title:'Private draft'}},receipts:{}};
     await tx\x60INSERT INTO swarm.household_object_streams(workspace_id,stream_id,last_seq,projection) VALUES (\x24{f.workspace}::uuid,\x24{projection.stream_id}::uuid,0,\x24{tx.json(projection)})\x60;
-    const activity=await human(envelope(humanCommands[3]!)); assert.equal(activity.body.status,'ok');
+    const activity=await human(envelope(humanCommands[4]!)); assert.equal(activity.body.status,'ok');
     assert.ok(activity.body.activity.some((r: {object: {id: string}; event: string})=>r.object.id===done.todo_id&&r.event==='done'));
     assert.deepEqual(activity.body.activity.filter((r: {object: {kind: string}})=>r.object.kind==='doc').map((r: {title: string})=>r.title),['Committed doc']);
     assert.ok(!JSON.stringify(activity.body).includes('Private draft'));
@@ -546,10 +547,10 @@ try {
     assert.ok(ordered[0]);
     assert.deepEqual(activity.body.activity.filter((r: {key: string})=>r.key.startsWith('todo:'+ordered[0]!.event_id+':'))
       .map((r: {object: {id: string}})=>r.object.id).sort(), (ordered[0]!.ids as string[]).sort());
-    const bounded=await human(envelope({...humanCommands[3],limit:1})); assert.equal(bounded.body.activity.length,1);
+    const bounded=await human(envelope({...humanCommands[4]!,limit:1})); assert.equal(bounded.body.activity.length,1);
     await tx\x60DELETE FROM swarm.household_content_connections WHERE workspace_id=\x24{f.workspace}::uuid AND owner_user_id=\x24{f.owner}::uuid\x60;
     await tx\x60DELETE FROM swarm.household_member_content_roles WHERE workspace_id=\x24{f.workspace}::uuid AND user_id=\x24{f.owner}::uuid\x60;
-    const hidden=await human(envelope(humanCommands[3]!)); assert.equal(hidden.body.reason,'content_consent_required');
+    const hidden=await human(envelope(humanCommands[4]!)); assert.equal(hidden.body.reason,'content_consent_required');
 
     // A grant on a live column is forbidden; after dropping that column,
     // dropped pg_attribute entries must not invalidate the exact ACL proof.
@@ -572,7 +573,8 @@ test('hosted to-do round trip preserves notices, replay, tenant isolation and hu
   const schema = emptyApplicationSchema() + repoSql('supabase/household-todo-reserve/20261006000001-rollback.sql')
     + repoSql('supabase/migrations/20261006000001_household_todos.sql')
     + repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql')
-    + repoSql('supabase/migrations/20261120000002_waiting_dm_convergence.sql');
+    + repoSql('supabase/migrations/20261120000002_waiting_dm_convergence.sql')
+    + repoSql('supabase/migrations/20261125000004_todo_approvals.sql');
   const result = spawnSync('deno', ['eval', '--no-lock', '--config', 'supabase/functions/command/deno.json', harness], {
     cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify({ f, schema, setup: f.setup,
       ownerRollback: repoSql('deploy/release-proofs/hosted-owner-content/20261019000006-rollback.sql'),

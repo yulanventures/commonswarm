@@ -12,6 +12,9 @@ export interface TodoActor {
     user_id: string;
     principal_id: string | null;
 }
+export type TodoKind = 'task' | 'approval';
+export type TodoDecisionStatus = 'approved' | 'declined';
+export type TodoDecisionChoice = 'approve' | 'decline';
 export type TodoState = 'open' | 'doing' | 'done' | 'dropped';
 export type TodoStart = 'queue' | 'now';
 export type TodoOriginPlacement = 'workspace' | 'general' | 'channel' | 'dm' | 'group_dm';
@@ -41,6 +44,7 @@ export interface Todo {
     workspace_id: string;
     todo_id: string;
     version: number;
+    kind?: TodoKind;
     title: string;
     notes: string;
     state: TodoState;
@@ -57,6 +61,10 @@ export interface Todo {
     state_by: TodoActor;
     state_at: string;
     comment_count: number;
+    decision_status?: TodoDecisionStatus | null;
+    decision_by_user?: string | null;
+    decision_at?: string | null;
+    decision_note?: string | null;
     origin_placement?: TodoOriginPlacement;
     origin_channel_id?: string | null;
     origin_conversation_id?: string | null;
@@ -82,7 +90,7 @@ export interface AgentWorkPolicy {
     set_by_user: string;
     set_at: string;
 }
-export type TodoRefusal = HouseholdAccessRefusal | 'human_confirmation_required' | 'principal_required' | 'todo_not_found' | 'target_not_found' | 'title_invalid' | 'notes_invalid' | 'due_invalid' | 'comment_invalid' | 'mentions_invalid' | 'assignee_not_member' | 'assignee_removed' | 'invalid_transition' | 'not_assignee' | 'not_permitted' | 'owner_only' | 'offer_not_pending' | 'not_decider' | 'not_in_queue' | 'gate_invalid' | 'gate_cycle' | 'queue_empty' | 'queue_full' | 'todo_limit_reached' | 'request_id_reused' | 'todo_write_rate_limited' | 'invalid_command_context';
+export type TodoRefusal = HouseholdAccessRefusal | 'human_confirmation_required' | 'principal_required' | 'todo_not_found' | 'target_not_found' | 'title_invalid' | 'notes_invalid' | 'due_invalid' | 'comment_invalid' | 'mentions_invalid' | 'assignee_not_member' | 'assignee_removed' | 'invalid_transition' | 'not_assignee' | 'not_permitted' | 'owner_only' | 'offer_not_pending' | 'not_decider' | 'not_in_queue' | 'gate_invalid' | 'gate_cycle' | 'queue_empty' | 'queue_full' | 'todo_limit_reached' | 'request_id_reused' | 'todo_write_rate_limited' | 'invalid_command_context' | 'approval_origin_not_allowed' | 'approval_decided_frozen' | 'offer_pending_frozen';
 export type TodoOutcome = {
     status: 'committed';
     value: Todo | TodoComment | AgentWorkPolicy;
@@ -106,7 +114,7 @@ export interface TodoNotice {
     about: string;
     body: string;
 }
-export declare const TODO_EVENT_TYPES: readonly ["TodoCreated", "TodoDetailsChanged", "TodoAssigned", "TodoOffered", "TodoOfferAnswered", "TodoStateChanged", "TodoQueueOrdered", "TodoGateSet", "TodoStartAsked", "TodoCommented", "AgentWorkPolicySet"];
+export declare const TODO_EVENT_TYPES: readonly ["TodoCreated", "TodoDetailsChanged", "TodoAssigned", "TodoOffered", "TodoOfferAnswered", "TodoStateChanged", "TodoDecided", "TodoQueueOrdered", "TodoGateSet", "TodoStartAsked", "TodoCommented", "AgentWorkPolicySet"];
 export type TodoEventType = typeof TODO_EVENT_TYPES[number];
 type TodoPayloads = {
     TodoCreated: {
@@ -128,6 +136,11 @@ type TodoPayloads = {
     };
     TodoStateChanged: {
         todo: Todo;
+    };
+    TodoDecided: {
+        todo: Todo;
+        decision: TodoDecisionChoice;
+        note: string | null;
     };
     TodoQueueOrdered: {
         principal_id: string;
@@ -181,6 +194,7 @@ export type TodoCommand = {
     title: string;
     notes?: string;
     due_on?: string | null;
+    todo_kind?: TodoKind;
     assign?: AssignInput;
     origin_placement?: TodoOriginPlacement;
     origin_channel_id?: string | null;
@@ -211,7 +225,14 @@ export type TodoCommand = {
     kind: 'household_todo_answer';
     todo_id: string;
     offer_id: string;
+    base_version: number;
     answer: 'accept' | 'decline' | 'withdraw';
+} | {
+    kind: 'household_todo_decide';
+    todo_id: string;
+    base_version: number;
+    decision: TodoDecisionChoice;
+    note?: string | null;
 } | {
     kind: 'household_todo_steer';
     todo_id: string;

@@ -180,6 +180,12 @@ const linePossessive = (agent: AgentVM, ctx: TodoCopyContext) => possessive(agen
  * because nothing moves for any of them until the agent reconnects. */
 export function todoStatus(todo: TodoVM, ctx: TodoCopyContext): TodoStatusCopy {
   const plain = (line: string, more: string[] = []): TodoStatusCopy => ({ line, more, warning: null });
+  if (todo.kind === "approval" && todo.decision) {
+    const label = todo.decision.status === "approved" ? "Approved" : "Declined";
+    const by = todo.decision.by ? sentenceName(todo.decision.by, ctx.names) : null;
+    const at = todo.decision.at ? whenStamp(todo.decision.at, ctx) : null;
+    return plain(`${label}${by ? ` by ${by}` : ""}${at ? ` · ${at}` : ""}`);
+  }
   if (todo.state === "dropped") return plain("Dropped.");
   if (todo.state === "done") {
     const at = todo.doneAt ? whenStamp(todo.doneAt, ctx) : null;
@@ -220,6 +226,10 @@ export function todoStatus(todo: TodoVM, ctx: TodoCopyContext): TodoStatusCopy {
 /** The short subline in lists and cards: "Your Claude · 2nd in line". A disconnected agent
  * adds its state word in every open state. */
 export function todoSubline(todo: TodoVM, ctx: TodoCopyContext): string {
+  if (todo.kind === "approval" && todo.decision) {
+    const label = todo.decision.status === "approved" ? "Approved" : "Declined";
+    return todo.decision.by ? `${label} by ${sentenceName(todo.decision.by, ctx.names)}` : label;
+  }
   if (todo.state === "dropped") return "Dropped";
   if (todo.state === "done") return todo.doneBy ? `Done by ${sentenceName(todo.doneBy, ctx.names)}` : "Done";
   const assignee = todo.assignee;

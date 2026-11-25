@@ -410,7 +410,15 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
   `;
 
   runSql(
-    sqlPhase("dismissals-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +
+    sqlPhase(
+      "dismissals-rollback-later-migrations",
+      repoSql("deploy/release-proofs/todo-approvals/20261125000004-rollback.sql") +
+        "\n" +
+        repoSql("deploy/release-proofs/ask-withdrawals/20261125000001-rollback.sql") +
+        "\n" +
+        repoSql("deploy/release-proofs/waiting-autoclear/20261124000002-rollback.sql"),
+    ) +
+      sqlPhase("dismissals-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +
       sqlPhase("dismissals-parity-fixture", fixtureSql) +
       sqlPhase(
         "dismissals-snapshot-after",
@@ -589,6 +597,7 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         kind: "household_todo_answer",
         todo_id: bobPrivateOriginOffer.todo_id,
         offer_id: bobPrivateOriginOffer.offer.offer_id,
+        base_version: bobPrivateOriginOffer.version,
         answer: "accept",
       }));
       assert.equal(
@@ -621,6 +630,7 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         kind: "household_todo_answer",
         todo_id: declinedOfferTodo.todo_id,
         offer_id: formerOfferId,
+        base_version: declinedOfferTodo.version,
         answer: "decline",
       }));
       await tx`RESET ROLE`;

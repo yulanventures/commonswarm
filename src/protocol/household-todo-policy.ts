@@ -9,6 +9,7 @@ export const TODO_NOTES_LIMIT = 4000;
 export const TODO_COMMENT_LIMIT = 4000;
 export const TODO_MENTIONS_LIMIT = 8;
 export const TODO_GATE_NOTE_LIMIT = 200;
+export const TODO_DECISION_NOTE_LIMIT = 500;
 export const TODO_EVENT_BYTE_LIMIT = 64 * 1024;
 export const TODO_IDENTITY_WRITE_HOURLY_LIMIT = HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT;
 export const TODO_WORKSPACE_WRITE_HOURLY_LIMIT = HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT;
@@ -48,6 +49,9 @@ export const TODO_NOTICE_BODIES = {
   agent_offer: 'Asks for a to-do for your agent.',
   accepted: 'Accepted your to-do request.',
   declined: 'Declined your to-do request.',
+  approval_ask: 'Asks for your approval on a to-do.',
+  approved: 'Approved your to-do.',
+  declined_decision: 'Declined your to-do.',
   mentioned: 'Mentioned you in a comment.',
 } as const;
 
