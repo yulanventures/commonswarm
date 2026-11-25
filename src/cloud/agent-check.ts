@@ -25,6 +25,7 @@ import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
 import { reportSeenReactions, seenAckTargets } from "./agent-signal-receipts.js";
 import { buildCheckNext, encodeOpaqueCursor } from "../cli/ax.js";
 import { acknowledgeNativeWakeOnCheck } from "./native-wake.js";
+import { clearStalledAttendedCanaryOnCheck } from "../listener/health-notice.js";
 
 export {
   AGENT_CHECK_DIRECT_TIMEOUT_MS,
@@ -485,6 +486,13 @@ export async function checkAgentMessages(options: {
         surfacedSignalIds: checked.result.messages.map((m) => m.id),
       });
     } catch { /* Wake acknowledgement is best-effort and must not alter check output. */ }
+    try {
+      await clearStalledAttendedCanaryOnCheck({
+        profileId: profileTarget(profile).profileId,
+        workspaceId: profile.workspace_id,
+        principalId: profile.principal_id,
+      });
+    } catch { /* Canary state clearing is best-effort and must not alter check output. */ }
     return checked.result;
   } catch (error) {
     if (error instanceof FileLockTimeoutError) {

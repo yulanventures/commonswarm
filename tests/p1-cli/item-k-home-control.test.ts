@@ -16,6 +16,7 @@ const expectedProfileTestFiles = [
   "item-i-profile-binding.test.ts",
   "mcp-connect.test.ts", "mcp-stdio.test.ts", "native-wake-claude.test.ts", "native-wake-codex.test.ts", "profile-ls.test.ts", "seat-admin-cli.test.ts",
   "todo-cli.test.ts",
+  "wake-honesty.test.ts",
 ];
 
 test("every profile-writing test call has a fixture HOME", { timeout: 10_000 }, async () => {

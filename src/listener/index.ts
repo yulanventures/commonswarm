@@ -13,3 +13,4 @@ export * from "./brain-digest.js";
 export * from "./attendance-canary.js";
 export * from "./activity.js";
 export * from "./wake.js";
+export * from "./health-notice.js";
