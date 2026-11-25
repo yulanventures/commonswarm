@@ -56,4 +56,22 @@ test("the web server applies preview security headers and no-cache HTML strictly
   ]) {
     assert.ok(check.includes(expectedCase), `check-site-caddy.sh missing case: ${expectedCase}`);
   }
+
+  // Post-rollback state: next/assets/* retained on disk while next/index.html and next/fonts/ are absent.
+  const rollbackStart = check.indexOf('rm -rf "$site/next/index.html" "$site/next/fonts"');
+  const fullRemoveStart = check.indexOf('rm -rf "$site/next"\n');
+  assert.ok(rollbackStart !== -1 && fullRemoveStart !== -1 && rollbackStart < fullRemoveStart,
+    "check-site-caddy.sh must test the post-rollback retained next/assets/ state before removing $site/next");
+  const rollbackBlock = check.slice(rollbackStart, fullRemoveStart);
+  for (const expectedCase of [
+    'check /next                            404 "text/html"               page  revalidate next',
+    'check /next/                           404 "text/html"               page  revalidate next',
+    'check /next/index.html                 404 "text/html"               page  revalidate next',
+    'check /next/assets/index-Ab12Cd34.js   200 "application/javascript"  file  immutable  next',
+    'check /next/assets/index-Ef56Gh78.css  200 "text/css"                file  immutable  next',
+    'check /next/assets/                    404 "text/plain"              plain revalidate next',
+    'check /next/fonts/inter-latin.woff2    404 "text/plain"              plain revalidate next',
+  ]) {
+    assert.ok(rollbackBlock.includes(expectedCase), `check-site-caddy.sh post-rollback block missing case: ${expectedCase}`);
+  }
 });

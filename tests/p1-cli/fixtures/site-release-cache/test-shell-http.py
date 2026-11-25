@@ -1,6 +1,7 @@
 """Run actual rendered release/rollback lifecycle; only host/paths/tools are adapted for macOS."""
 from pathlib import Path
 import functools
+import gzip
 import hashlib
 import http.server
 import io
@@ -21,17 +22,27 @@ hashbytes=lambda data:hashlib.sha256(data).hexdigest()
 checks=[]
 class Handler(http.server.SimpleHTTPRequestHandler):
     fail_app=False
+    fail_next_path=None
+    fail_next_status=503
+    inject_html_mode=None
+    inject_html_path=None
+    postflip_bad_header=None
+    postflip_bad_header_path=None
+    postflip_dup_header=None
+    postflip_dup_header_path=None
     postflip_csp_path=None
     postflip_csp_values=None
     preflip_csp_path=None
     preflip_csp_values=None
+    send_interim_103=False
     send_next_headers=False
     seen_paths=[]
+    seen_requests=[]
     def log_message(self,*args): pass
     def _is_candidate(self):
         return Path(self.directory).resolve().name == 'candidate'
-    def end_headers(self):
-        raw_path = getattr(self, '_raw_path', self.path)
+    def _next_headers(self, raw_path):
+        headers = []
         if self.send_next_headers and (raw_path == '/next' or raw_path.startswith('/next/')):
             if self._is_candidate() and self.postflip_csp_path == raw_path:
                 csp_values = self.postflip_csp_values
@@ -40,17 +51,94 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 csp_values = ["frame-ancestors 'none'"]
             for value in (csp_values or []):
-                self.send_header('Content-Security-Policy', value)
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Referrer-Policy', 'no-referrer')
+                headers.append(('Content-Security-Policy', value))
+            bad_here = self._is_candidate() and self.postflip_bad_header_path == raw_path
+            if not (bad_here and self.postflip_bad_header in ('nosniff', 'all-four')):
+                headers.append(('X-Content-Type-Options', 'nosniff'))
+            if not (bad_here and self.postflip_bad_header in ('referrer', 'all-four')):
+                headers.append(('Referrer-Policy', 'no-referrer'))
             if raw_path in ('/next', '/next/', '/next/index.html') and self._is_candidate():
-                self.send_header('Cache-Control', 'no-cache')
+                if bad_here and self.postflip_bad_header in ('cache', 'all-four'):
+                    headers.append(('Cache-Control', 'public, max-age=60'))
+                else:
+                    headers.append(('Cache-Control', 'no-cache'))
+            if self._is_candidate() and self.postflip_dup_header_path == raw_path:
+                dup_map = {
+                    'csp': ('Content-Security-Policy', 'frame-ancestors https://example.com'),
+                    'nosniff': ('X-Content-Type-Options', 'nosniff'),
+                    'referrer': ('Referrer-Policy', 'unsafe-url'),
+                    'cache': ('Cache-Control', 'public, max-age=3600'),
+                }
+                if self.postflip_dup_header in dup_map:
+                    headers.append(dup_map[self.postflip_dup_header])
+        return headers
+    def end_headers(self):
+        raw_path = getattr(self, '_raw_path', self.path)
+        for name, value in self._next_headers(raw_path):
+            self.send_header(name, value)
         super().end_headers()
     def do_GET(self):
         self._raw_path = self.path
+        ua = self.headers.get('User-Agent', '')
+        ae = self.headers.get('Accept-Encoding', '')
+        accept = self.headers.get('Accept', '')
         self.seen_paths.append(self.path)
+        self.seen_requests.append((self._is_candidate(), self.path, ua, ae, accept))
         if self.fail_app and self.path=='/app' and self._is_candidate():
             self.send_error(503); return
+        if self._is_candidate() and self.fail_next_path == self.path:
+            self.send_error(self.fail_next_status); return
+        if self._is_candidate() and self.path in ('/next', '/next/', '/next/index.html'):
+            body_path = Path(self.directory) / 'next/index.html'
+            if body_path.is_file():
+                body = body_path.read_bytes()
+                is_browser = ua.startswith('Mozilla/')
+                is_identity = ae.strip().lower() == 'identity'
+                should_inject = (
+                    (self.inject_html_path is None or self.inject_html_path == self.path)
+                    and (
+                        self.inject_html_mode == 'all'
+                        or (self.inject_html_mode == 'browser-ua' and is_browser)
+                        or (self.inject_html_mode == 'identity' and is_identity)
+                        or (self.inject_html_mode == 'compressed' and 'gzip' in ae.lower() and not is_identity)
+                    )
+                )
+                if should_inject:
+                    body = body + b'<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>'
+                use_gzip = 'gzip' in ae.lower() and not is_identity
+                payload = gzip.compress(body) if use_gzip else body
+                bad_here = self.postflip_bad_header_path == self.path
+                dup_here = self.postflip_dup_header_path == self.path
+                if bad_here and self.postflip_bad_header == 'combined-content-type':
+                    ct = 'text/html; charset=utf-8, text/plain'
+                elif bad_here and self.postflip_bad_header in ('content-type', 'all-four'):
+                    ct = 'text/plain; charset=utf-8'
+                else:
+                    ct = 'text/html; charset=utf-8'
+                final_headers = [('Content-Type', ct)]
+                if dup_here and self.postflip_dup_header == 'content-type':
+                    final_headers.append(('Content-Type', 'text/plain; charset=utf-8'))
+                if use_gzip:
+                    final_headers.append(('Content-Encoding', 'gzip'))
+                final_headers.append(('Content-Length', str(len(payload))))
+                final_headers.append(('Connection', 'close'))
+                final_headers.extend(self._next_headers(self.path))
+                if self.send_interim_103:
+                    self.wfile.write(
+                        b"HTTP/1.1 103 Early Hints\r\n"
+                        b"Content-Type: text/html; charset=utf-8\r\n"
+                        b"Content-Security-Policy: frame-ancestors 'none'\r\n"
+                        b"X-Content-Type-Options: nosniff\r\n"
+                        b"Referrer-Policy: no-referrer\r\n"
+                        b"Cache-Control: no-cache\r\n"
+                        b"\r\n"
+                    )
+                    self.wfile.flush()
+                head = 'HTTP/1.1 200 OK\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in final_headers) + '\r\n'
+                self.wfile.write(head.encode('latin-1') + payload)
+                self.wfile.flush()
+                self.close_connection = True
+                return
         if self.path == '/app': self.path = '/app/'
         if self.path == '/next': self.path = '/next/'
         super().do_GET()
@@ -73,6 +161,15 @@ def scenario(
     postflip_csp_path=None,
     postflip_csp_values=None,
     postflip_csp_label=None,
+    fail_next_path=None,
+    fail_next_status=503,
+    inject_html_mode=None,
+    inject_html_path=None,
+    postflip_bad_header=None,
+    postflip_bad_header_path=None,
+    postflip_dup_header=None,
+    postflip_dup_header_path=None,
+    send_interim_103=False,
 ):
     with tempfile.TemporaryDirectory(prefix='site-shell-http-') as tmp:
         root=Path(tmp).resolve(); site=root/'site'; old=site/'releases/old'; reserve=root/'reserve'; reserve.mkdir()
@@ -83,7 +180,8 @@ def scenario(
         (old/'_astro/old.js').write_text('old module')
         (site/'current').symlink_to(old)
         now=int(time.time())
-        tar_mtime=now-2 if (preflip_csp_path or postflip_csp_path) else now
+        fast_fault = any([preflip_csp_path, postflip_csp_path, fail_next_path, inject_html_mode, postflip_bad_header, postflip_dup_header])
+        tar_mtime=now-2 if fast_fault else now
         contents={'index.html':b'new HTML','app/index.html':b'new app HTML','_astro/new.js':b'import "./chunks/dynamic.js"','_astro/chunks/dynamic.js':b'new dynamic','_astro/new.css':b'new css'}
         if include_next:
             contents['next/index.html']=b'<!doctype html><title>next</title>'
@@ -98,12 +196,22 @@ def scenario(
         if failure=='symlink': (old/'_astro/link').symlink_to(old/'_astro/old.js')
         if failure=='future': os.utime(old/'index.html',(now+60,now+60))
         Handler.fail_app=automatic
+        Handler.fail_next_path=fail_next_path
+        Handler.fail_next_status=fail_next_status
+        Handler.inject_html_mode=inject_html_mode
+        Handler.inject_html_path=inject_html_path
+        Handler.postflip_bad_header=postflip_bad_header
+        Handler.postflip_bad_header_path=postflip_bad_header_path
+        Handler.postflip_dup_header=postflip_dup_header
+        Handler.postflip_dup_header_path=postflip_dup_header_path
         Handler.postflip_csp_path=postflip_csp_path
         Handler.postflip_csp_values=postflip_csp_values
         Handler.preflip_csp_path=preflip_csp_path
         Handler.preflip_csp_values=preflip_csp_values
+        Handler.send_interim_103=send_interim_103
         Handler.send_next_headers=include_next
         Handler.seen_paths=[]
+        Handler.seen_requests=[]
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(site/'current')))
         thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
         url=f'http://127.0.0.1:{server.server_port}'
@@ -121,6 +229,7 @@ def scenario(
         try:
             prior=get(url+'/app/')[1]
             Handler.seen_paths.clear()
+            Handler.seen_requests.clear()
             r=run('deploy')
             if preflip_csp_path:
                 assert r.returncode!=0 and (site/'current').resolve()==old,(preflip_csp_path,preflip_csp_label,r.returncode)
@@ -132,14 +241,44 @@ def scenario(
             if failure:
                 assert r.returncode!=0 and (site/'current').resolve()==old,(failure,r.returncode)
                 checks.append(f'full shell {failure}: fails before flip, old live retained'); return
-            if automatic or postflip_csp_path:
+            if automatic or postflip_csp_path or fail_next_path or inject_html_mode or postflip_bad_header or postflip_dup_header:
                 assert r.returncode!=0 and (site/'current').resolve()==old
                 log=(reserve/'hostrun.log').read_text()
-                assert 'PASS rollback' in log
+                assert 'PASS rollback' in log, log
                 if postflip_csp_path:
-                    expected_assertion = 'assertion=next-csp' if postflip_csp_path == '/next' else 'assertion=next-asset-csp'
+                    expected_assertion = 'assertion=next-html-headers' if postflip_csp_path in ('/next', '/next/', '/next/index.html') else 'assertion=next-asset-csp'
                     assert expected_assertion in log, log
                     checks.append(f'full shell automatic rollback on {postflip_csp_label} CSP at {postflip_csp_path}: rollback PASS'); return
+                if fail_next_path:
+                    assert 'assertion=httpstatus' in log, log
+                    checks.append(f'full shell automatic rollback on postflip HTTP {fail_next_status} at {fail_next_path}: rollback PASS'); return
+                if inject_html_mode:
+                    assert 'assertion=httphash' in log, log
+                    checks.append(f'full shell automatic rollback on rewritten HTML ({inject_html_mode}) at {inject_html_path or "any"}: rollback PASS'); return
+                if postflip_bad_header:
+                    assert 'assertion=next-html-headers' in log, log
+                    reason_map = {
+                        'content-type': 'content-type-mismatch',
+                        'combined-content-type': 'content-type-mismatch',
+                        'nosniff': 'missing-nosniff',
+                        'referrer': 'missing-referrer-policy',
+                        'cache': 'cache-control-mismatch',
+                        'all-four': 'content-type-mismatch',
+                    }
+                    assert reason_map[postflip_bad_header] in log, log
+                    tag = ' with 103 Early Hints' if send_interim_103 else ''
+                    checks.append(f'full shell automatic rollback on bad {postflip_bad_header} header{tag} at {postflip_bad_header_path}: rollback PASS'); return
+                if postflip_dup_header:
+                    assert 'assertion=next-html-headers' in log, log
+                    dup_reason_map = {
+                        'content-type': 'multiple-content-type',
+                        'csp': 'multiple-csp',
+                        'nosniff': 'multiple-nosniff',
+                        'referrer': 'multiple-referrer-policy',
+                        'cache': 'multiple-cache-control',
+                    }
+                    assert dup_reason_map[postflip_dup_header] in log, log
+                    checks.append(f'full shell automatic rollback on duplicate {postflip_dup_header} header at {postflip_dup_header_path}: rollback PASS'); return
                 assert get(url+'/app/',prior)[0]==200
                 assert get(url+'/_astro/new.js')[0]==200
                 if include_next:
@@ -158,6 +297,13 @@ def scenario(
                     assert 'CHECK step=preflip-next-ingress path=/next http=404' in log, log
                     assert 'CHECK step=preflip-next-ingress path=/next/ http=404' in log, log
                     assert 'CHECK step=preflip-next-ingress path=/next/index.html http=404' in log, log
+                    for p in ('/next', '/next/', '/next/index.html'):
+                        post_reqs = [req for req in Handler.seen_requests if req[0] and req[1] == p]
+                        assert any(req[2].startswith('CommonSwarmReleaseCheck/') for req in post_reqs), (p, post_reqs)
+                        assert any(req[2].startswith('Mozilla/') and 'gzip' in req[3].lower() and 'text/html' in req[4] for req in post_reqs), (p, post_reqs)
+                        assert any(req[2].startswith('Mozilla/') and req[3].strip().lower() == 'identity' and 'text/html' in req[4] for req in post_reqs), (p, post_reqs)
+                        for mode in ('release-check', 'browser-compressed', 'browser-identity'):
+                            assert f'CHECK step=http-next path={p} mode={mode} http=200' in log, log
                     assert 'PASS deploy revision=fixture H0=1 NEXT=1' in log
                 else:
                     assert not any(p == '/next' or p.startswith('/next/') for p in Handler.seen_paths), Handler.seen_paths
@@ -191,7 +337,7 @@ def scenario(
                 assert 'PASS rollback unchanged' in (reserve/'hostrun.log').read_text()
                 for name in ['old.js','new.js','chunks/dynamic.js','new.css']: assert get(url+'/_astro/'+name)[0]==200
                 if include_next:
-                    checks.append('full NEW deploy/explicit rollback/repeated rollback (next=1): preflip + postflip /next probed, conditional 200, both graphs + next assets 200, unchanged PASS')
+                    checks.append('full NEW deploy/explicit rollback/repeated rollback (next=1): preflip + postflip /next /next/ /next/index.html (release-check + browser compressed & identity) probed, conditional 200, both graphs + next assets 200, unchanged PASS')
                 else:
                     checks.append('full NEW deploy/explicit rollback/repeated rollback (default next=0): no /next probe, conditional 200, both graphs 200, unchanged PASS')
         finally:
@@ -212,6 +358,21 @@ for label, headers in bad_csp_cases:
         scenario(include_next=True, preflip_csp_path=preflip_path, preflip_csp_values=headers, preflip_csp_label=label)
     scenario(include_next=True, postflip_csp_path='/next', postflip_csp_values=headers, postflip_csp_label=label)
     scenario(include_next=True, postflip_csp_path='/next/assets/next-app.js', postflip_csp_values=headers, postflip_csp_label=label)
+scenario(include_next=True, postflip_csp_path='/next/', postflip_csp_values=[], postflip_csp_label='missing')
+scenario(include_next=True, postflip_csp_path='/next/index.html', postflip_csp_values=[], postflip_csp_label='missing')
+for bad_path in ['/next/', '/next/index.html']:
+    scenario(include_next=True, fail_next_path=bad_path, fail_next_status=503)
+    scenario(include_next=True, inject_html_mode='all', inject_html_path=bad_path)
+scenario(include_next=True, inject_html_mode='browser-ua', inject_html_path='/next')
+scenario(include_next=True, inject_html_mode='compressed', inject_html_path='/next/')
+scenario(include_next=True, inject_html_mode='identity', inject_html_path='/next/index.html')
+for bad_header, bad_path in [('content-type', '/next/'), ('combined-content-type', '/next'), ('nosniff', '/next/'), ('referrer', '/next/index.html'), ('cache', '/next/index.html')]:
+    scenario(include_next=True, postflip_bad_header=bad_header, postflip_bad_header_path=bad_path)
+scenario(include_next=True, send_interim_103=True)
+for bad_header, bad_path in [('content-type', '/next/'), ('nosniff', '/next/'), ('referrer', '/next/index.html'), ('cache', '/next/index.html'), ('all-four', '/next')]:
+    scenario(include_next=True, send_interim_103=True, postflip_bad_header=bad_header, postflip_bad_header_path=bad_path)
+for dup_header, dup_path in [('content-type', '/next'), ('csp', '/next/'), ('nosniff', '/next/'), ('referrer', '/next/index.html'), ('cache', '/next/index.html')]:
+    scenario(include_next=True, postflip_dup_header=dup_header, postflip_dup_header_path=dup_path)
 for failure in ['collision','symlink','future']: scenario(failure=failure)
 for failure in ['collision','symlink','future']: scenario(rollback_failure=failure)
 print(json.dumps({'passed':True,'checks':checks,'ceiling':'macOS HTTP fixture with real rendered templates/helper; only paths/host/root guard/HTTP origin and GNU mv adaptation changed; no Caddy/Cloudflare or production execution'},indent=2))

@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
+import { gzipSync } from 'node:zlib';
 const exec = promisify(execFile);
 const repo = resolve(import.meta.dirname, '../..');
 const validator = join(repo, 'deploy/site/validate-site-env.mjs');
@@ -584,6 +586,10 @@ test('probe-next-ingress.sh and finalize-release.sh share one exact effective CS
   assert.equal(refreshNextCsp[1], caddyNextCsp[1], 'refresh-site.py EXPECTED_NEXT_CSP must match commonswarm-site.caddy');
   assert.match(probeSource, /refresh-site\.py" --check-next-csp/);
   assert.match(finalizeSource, /refresh-site\.py" --check-next-csp/);
+  assert.match(probeSource, /refresh-site\.py" --check-next-html-headers/);
+  assert.match(finalizeSource, /refresh-site\.py" --check-next-html-headers/);
+  assert.doesNotMatch(probeSource, /has_header/);
+  assert.doesNotMatch(finalizeSource, /has_header/);
   assert.doesNotMatch(probeSource, /grep .*frame-ancestors/);
   assert.doesNotMatch(finalizeSource, /grep .*frame-ancestors/);
 
@@ -657,15 +663,370 @@ test('probe-next-ingress.sh and finalize-release.sh share one exact effective CS
   }
 });
 
+test('probe-next-ingress.sh --expect-sha verifies three paths, compressed and identity, browser UA, exact hash, and all required headers', async () => {
+  const probeScript = join(repo, 'deploy/site/probe-next-ingress.sh');
+  const htmlBody = Buffer.from(syntheticNextHtml(), 'utf8');
+  const htmlSha = hash(htmlBody);
+  const injectedBody = Buffer.from(syntheticNextHtml() + '<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>', 'utf8');
+
+  let statusMode = 200;
+  let targetPath: string | null = null;
+  let corruptEncoding: 'compressed' | 'identity' | null = null;
+  let dropHeader: 'content-type' | 'csp' | 'nosniff' | 'referrer' | 'cache-control' | null = null;
+  let overrideContentType: string | null = null;
+  let overrideCacheControl: string | null = null;
+  const seen: Array<{ path: string; ua: string; accept: string; ae: string }> = [];
+
+  const server = createServer((req, res) => {
+    const urlPath = req.url ?? '/';
+    const ua = String(req.headers['user-agent'] ?? '');
+    const accept = String(req.headers.accept ?? '');
+    const ae = String(req.headers['accept-encoding'] ?? '');
+    seen.push({ path: urlPath, ua, accept, ae });
+
+    const isIdentity = ae.trim().toLowerCase() === 'identity';
+    const isCompressed = !isIdentity && ae.toLowerCase().includes('gzip');
+    const faultHere = targetPath === null || targetPath === urlPath;
+
+    const headers: Record<string, string | string[]> = {};
+    if (!(faultHere && dropHeader === 'content-type')) {
+      headers['content-type'] = (faultHere && overrideContentType) ? overrideContentType : 'text/html; charset=utf-8';
+    }
+    if (!(faultHere && dropHeader === 'csp')) {
+      headers['content-security-policy'] = "frame-ancestors 'none'";
+    }
+    if (!(faultHere && dropHeader === 'nosniff')) {
+      headers['x-content-type-options'] = 'nosniff';
+    }
+    if (!(faultHere && dropHeader === 'referrer')) {
+      headers['referrer-policy'] = 'no-referrer';
+    }
+    if (!(faultHere && dropHeader === 'cache-control')) {
+      headers['cache-control'] = (faultHere && overrideCacheControl) ? overrideCacheControl : 'no-cache';
+    }
+
+    const body = faultHere && (
+      (corruptEncoding === 'compressed' && isCompressed) ||
+      (corruptEncoding === 'identity' && isIdentity)
+    ) ? injectedBody : htmlBody;
+
+    const payload = isCompressed ? gzipSync(body) : body;
+    if (isCompressed) headers['content-encoding'] = 'gzip';
+    res.writeHead(faultHere ? statusMode : 200, headers);
+    res.end(payload);
+  });
+
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    // Reject invalid --expect-sha CLI values fail-closed (exit 2).
+    for (const badArgs of [
+      [baseUrl, '--expect-sha'],
+      [baseUrl, '--expect-sha', ''],
+      [baseUrl, '--expect-sha', 'not-a-sha'],
+      [baseUrl, '--expect-sha', htmlSha.toUpperCase()],
+      ['--expect-sha', htmlSha, '--expect-sha', htmlSha, baseUrl],
+    ]) {
+      await assert.rejects(exec('bash', [probeScript, ...badArgs]), (error: unknown) => {
+        assert.equal((error as { code: number }).code, 2);
+        return true;
+      });
+    }
+
+    // Pass case: all three paths x both encodings with browser UA and Accept: text/html.
+    seen.length = 0;
+    const passed = await exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]);
+    assert.match(passed.stdout, /PASS probe-next-ingress/);
+    assert.equal(seen.length, 6);
+    for (const path of ['/next', '/next/', '/next/index.html']) {
+      const forPath = seen.filter(r => r.path === path);
+      assert.equal(forPath.length, 2, path);
+      assert.ok(forPath.every(r => r.ua.startsWith('Mozilla/5.0 ') && r.accept.includes('text/html')), path);
+      assert.ok(forPath.some(r => r.ae.toLowerCase().includes('gzip') && r.ae.trim().toLowerCase() !== 'identity'), `${path} compressed`);
+      assert.ok(forPath.some(r => r.ae.trim().toLowerCase() === 'identity'), `${path} identity`);
+    }
+
+    // Flag-before-URL ordering also works.
+    const passedAlt = await exec('bash', [probeScript, `--expect-sha=${htmlSha}`, baseUrl]);
+    assert.match(passedAlt.stdout, /PASS probe-next-ingress/);
+
+    // Body mismatch under compression only (identity clean) and under identity only (compression clean).
+    for (const encoding of ['compressed', 'identity'] as const) {
+      for (const path of ['/next', '/next/', '/next/index.html']) {
+        targetPath = path;
+        corruptEncoding = encoding;
+        await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+          const stderr = (error as { stderr: string }).stderr;
+          assert.match(stderr, new RegExp(`FAIL path=${path.replace(/\./g, '\\.')} encoding=${encoding} status=200 reason=body-sha-mismatch`), `${encoding} on ${path}`);
+          return true;
+        });
+      }
+    }
+    corruptEncoding = null;
+
+    // Non-200 (including 404, which preview-off accepts) fails under --expect-sha.
+    for (const badStatus of [404, 302] as const) {
+      statusMode = badStatus;
+      targetPath = '/next/';
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        assert.match((error as { stderr: string }).stderr, new RegExp(`FAIL path=/next/ encoding=compressed status=${badStatus} reason=unexpected-status`));
+        return true;
+      });
+    }
+    statusMode = 200;
+
+    // Each missing or wrong required header fails with its specific reason.
+    const headerCases: Array<{
+      name: string;
+      path: string;
+      drop?: 'content-type' | 'csp' | 'nosniff' | 'referrer' | 'cache-control';
+      ct?: string;
+      cc?: string;
+      reason: RegExp;
+    }> = [
+      { name: 'missing-content-type', path: '/next', drop: 'content-type', reason: /reason=content-type-mismatch/ },
+      { name: 'wrong-content-type', path: '/next/', ct: 'text/plain; charset=utf-8', reason: /reason=content-type-mismatch/ },
+      { name: 'missing-csp', path: '/next/index.html', drop: 'csp', reason: /reason=missing-csp/ },
+      { name: 'missing-nosniff', path: '/next', drop: 'nosniff', reason: /reason=missing-nosniff/ },
+      { name: 'missing-referrer', path: '/next/', drop: 'referrer', reason: /reason=missing-referrer-policy/ },
+      { name: 'missing-cache-control', path: '/next/index.html', drop: 'cache-control', reason: /reason=cache-control-mismatch/ },
+      { name: 'wrong-cache-control', path: '/next/', cc: 'public, max-age=0, must-revalidate', reason: /reason=cache-control-mismatch/ },
+    ];
+    for (const row of headerCases) {
+      targetPath = row.path;
+      dropHeader = row.drop ?? null;
+      overrideContentType = row.ct ?? null;
+      overrideCacheControl = row.cc ?? null;
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        assert.match((error as { stderr: string }).stderr, row.reason, row.name);
+        return true;
+      });
+    }
+    dropHeader = null;
+    overrideContentType = null;
+    overrideCacheControl = null;
+  } finally {
+    await new Promise<void>(r => server.close(() => r()));
+  }
+});
+
+test('refresh-site.py --check-next-html-headers and probe-next-ingress.sh --expect-sha reject interim-only headers, duplicate final headers, and malformed lines', async () => {
+  const refreshScript = join(repo, 'deploy/site/refresh-site.py');
+  const probeScript = join(repo, 'deploy/site/probe-next-ingress.sh');
+  const headerFile = join(root, 'check-headers.txt');
+
+  const validFinalLines = [
+    'Content-Type: text/html; charset=utf-8',
+    "Content-Security-Policy: frame-ancestors 'none'",
+    'X-Content-Type-Options: nosniff',
+    'Referrer-Policy: no-referrer',
+    'Cache-Control: no-cache',
+  ];
+  const valid103Block = [
+    'HTTP/1.1 103 Early Hints',
+    ...validFinalLines,
+    '',
+  ].join('\r\n');
+  const makeDump = (statusLine: string, lines: string[], prefix = '') =>
+    `${prefix}${statusLine}\r\n${lines.join('\r\n')}\r\n\r\n`;
+
+  // Direct parser pass cases: HTTP/1.1, HTTP/2, OWS, case-insensitive non-CSP values, quoted charset, and 103 + valid 200.
+  for (const [label, payload] of [
+    ['http11-valid', makeDump('HTTP/1.1 200 OK', validFinalLines)],
+    ['ct-bare-html', makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html', ...validFinalLines.slice(1)])],
+    ['ct-upper-charset', makeDump('HTTP/1.1 200 OK', ['Content-Type: TEXT/HTML; CHARSET=UTF-8', ...validFinalLines.slice(1)])],
+    ['ct-quoted-charset', makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset="utf-8"', ...validFinalLines.slice(1)])],
+    ['http2-valid', makeDump('HTTP/2 200 ', [
+      'content-type:  TEXT/HTML ; charset=utf-8 \t',
+      "content-security-policy: \tframe-ancestors 'none' ",
+      'x-content-type-options:  NOSNIFF\t',
+      'referrer-policy: No-Referrer ',
+      'cache-control: NO-CACHE',
+    ])],
+    ['early-hints-plus-valid-200', makeDump('HTTP/1.1 200 OK', validFinalLines, `${valid103Block}\r\n`)],
+  ] as const) {
+    await writeFile(headerFile, payload, 'binary');
+    await exec('python3', [refreshScript, '--check-next-html-headers', headerFile]);
+    await exec('python3', [refreshScript, '--check-next-csp', headerFile]);
+    assert.ok(label);
+  }
+
+  // Direct parser rejection cases: interim-only, duplicates, combined Content-Type, wrong values, obs-fold, control/non-ASCII, malformed lines.
+  const directFailures: Array<{ name: string; bytes: Buffer; reason: RegExp }> = [
+    { name: 'interim-103-only', bytes: Buffer.from(`${valid103Block}\r\n`, 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'no-colon', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'MalformedLine']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'empty-name', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, ': value']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'space-in-name', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'X-Bad Name: 1']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'obs-fold-space', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, ' continuation']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'obs-fold-tab', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, '\tcontinuation']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'control-vtab', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html\x0b; charset=utf-8', ...validFinalLines.slice(1)]), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'embedded-cr', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Cache-Control: no-cache\r', ...validFinalLines.slice(0, 4)]), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'non-ascii-nbsp', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html;\u00a0charset=utf-8', ...validFinalLines.slice(1)]), 'utf8'), reason: /^invalid-http-headers$/m },
+    { name: 'combined-ct-with-charset', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset=utf-8, text/plain', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'combined-ct-bare', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html, text/plain', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'wrong-ct-charset', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset=iso-8859-1', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'extra-ct-param', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset=utf-8; foo=bar', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'wrong-nosniff', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', validFinalLines.map(l => l.startsWith('X-Content-Type-Options:') ? 'X-Content-Type-Options: sniff' : l)), 'binary'), reason: /^nosniff-mismatch$/m },
+    { name: 'wrong-referrer', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', validFinalLines.map(l => l.startsWith('Referrer-Policy:') ? 'Referrer-Policy: origin' : l)), 'binary'), reason: /^referrer-policy-mismatch$/m },
+    { name: 'dup-content-type', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Content-Type: text/plain']), 'binary'), reason: /^multiple-content-type$/m },
+    { name: 'dup-csp', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Content-Security-Policy: frame-ancestors https://example.com']), 'binary'), reason: /^multiple-csp$/m },
+    { name: 'dup-nosniff', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'X-Content-Type-Options: nosniff']), 'binary'), reason: /^multiple-nosniff$/m },
+    { name: 'dup-referrer', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Referrer-Policy: unsafe-url']), 'binary'), reason: /^multiple-referrer-policy$/m },
+    { name: 'dup-cache-control', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Cache-Control: public, max-age=3600']), 'binary'), reason: /^multiple-cache-control$/m },
+  ];
+  for (const row of directFailures) {
+    await writeFile(headerFile, row.bytes);
+    await assert.rejects(exec('python3', [refreshScript, '--check-next-html-headers', headerFile]), (error: unknown) => {
+      assert.match((error as { stderr: string }).stderr, row.reason, row.name);
+      return true;
+    });
+  }
+
+  // Raw TCP HTTP/1.1 fixture driving probe-next-ingress.sh --expect-sha with 103 Early Hints and duplicate final headers.
+  const htmlBody = Buffer.from(syntheticNextHtml(), 'utf8');
+  const htmlSha = hash(htmlBody);
+  let send103 = false;
+  let finalHeaderOverride: (urlPath: string) => string[] = () => [...validFinalLines];
+
+  const tcpServer = createTcpServer((socket) => {
+    let buffered = '';
+    socket.on('data', (chunk) => {
+      buffered += chunk.toString('latin1');
+      const headerEnd = buffered.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return;
+      const head = buffered.slice(0, headerEnd).split('\r\n');
+      const reqLine = head[0] ?? 'GET / HTTP/1.1';
+      const urlPath = reqLine.split(' ')[1] ?? '/';
+      let ae = '';
+      for (const line of head.slice(1)) {
+        const idx = line.indexOf(':');
+        if (idx > 0 && line.slice(0, idx).trim().toLowerCase() === 'accept-encoding') {
+          ae = line.slice(idx + 1).trim();
+        }
+      }
+      const isIdentity = ae.toLowerCase() === 'identity';
+      const isCompressed = !isIdentity && ae.toLowerCase().includes('gzip');
+      const payload = isCompressed ? gzipSync(htmlBody) : htmlBody;
+      const finalHeaders = [
+        ...finalHeaderOverride(urlPath),
+        ...(isCompressed ? ['Content-Encoding: gzip'] : []),
+        `Content-Length: ${payload.length}`,
+        'Connection: close',
+      ];
+      const prefix = send103 ? `${valid103Block}\r\n` : '';
+      const responseHead = `${prefix}HTTP/1.1 200 OK\r\n${finalHeaders.join('\r\n')}\r\n\r\n`;
+      socket.end(Buffer.concat([Buffer.from(responseHead, 'latin1'), payload]));
+    });
+  });
+
+  await new Promise<void>(r => tcpServer.listen(0, '127.0.0.1', r));
+  const address = tcpServer.address();
+  assert.ok(address && typeof address === 'object');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    // 103 Early Hints followed by a valid final 200 OK must pass.
+    send103 = true;
+    finalHeaderOverride = () => [...validFinalLines];
+    const okWith103 = await exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]);
+    assert.match(okWith103.stdout, /PASS probe-next-ingress/);
+
+    // 103 Early Hints supplies all five valid headers, while final 200 OK serves exact body + valid CSP with bad final headers.
+    const interimBypassCases: Array<{ name: string; lines: string[]; reason: RegExp }> = [
+      {
+        name: '103-bad-content-type',
+        lines: validFinalLines.map(l => l.startsWith('Content-Type:') ? 'Content-Type: text/plain; charset=utf-8' : l),
+        reason: /reason=content-type-mismatch/,
+      },
+      {
+        name: '103-bad-cache-control',
+        lines: validFinalLines.map(l => l.startsWith('Cache-Control:') ? 'Cache-Control: public, max-age=60' : l),
+        reason: /reason=cache-control-mismatch/,
+      },
+      {
+        name: '103-missing-referrer-policy',
+        lines: validFinalLines.filter(l => !l.startsWith('Referrer-Policy:')),
+        reason: /reason=missing-referrer-policy/,
+      },
+      {
+        name: '103-missing-nosniff',
+        lines: validFinalLines.filter(l => !l.startsWith('X-Content-Type-Options:')),
+        reason: /reason=missing-nosniff/,
+      },
+      {
+        name: '103-all-four-bad',
+        lines: [
+          'Content-Type: text/plain; charset=utf-8',
+          "Content-Security-Policy: frame-ancestors 'none'",
+          'Cache-Control: public, max-age=60',
+        ],
+        reason: /reason=content-type-mismatch/,
+      },
+    ];
+    for (const row of interimBypassCases) {
+      send103 = true;
+      finalHeaderOverride = (urlPath) => urlPath === '/next/' ? row.lines : [...validFinalLines];
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        const stderr = (error as { stderr: string }).stderr;
+        assert.match(stderr, /FAIL path=\/next\/ /, row.name);
+        assert.match(stderr, row.reason, row.name);
+        return true;
+      });
+    }
+
+    // Conflicting duplicate headers on the final 200 OK response must fail.
+    send103 = false;
+    const duplicateCases: Array<{ name: string; extra: string; reason: RegExp }> = [
+      { name: 'dup-content-type', extra: 'Content-Type: text/plain; charset=utf-8', reason: /reason=multiple-content-type/ },
+      { name: 'dup-csp', extra: 'Content-Security-Policy: frame-ancestors https://example.com', reason: /reason=multiple-csp/ },
+      { name: 'dup-nosniff', extra: 'X-Content-Type-Options: nosniff', reason: /reason=multiple-nosniff/ },
+      { name: 'dup-referrer', extra: 'Referrer-Policy: unsafe-url', reason: /reason=multiple-referrer-policy/ },
+      { name: 'dup-cache-control', extra: 'Cache-Control: public, max-age=3600', reason: /reason=multiple-cache-control/ },
+    ];
+    for (const row of duplicateCases) {
+      finalHeaderOverride = (urlPath) => urlPath === '/next/index.html' ? [...validFinalLines, row.extra] : [...validFinalLines];
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        const stderr = (error as { stderr: string }).stderr;
+        assert.match(stderr, /FAIL path=\/next\/index\.html /, row.name);
+        assert.match(stderr, row.reason, row.name);
+        return true;
+      });
+    }
+
+    // Combined or non-UTF-8 Content-Type on a final 200 OK with exact body and valid sibling headers must fail.
+    const combinedCtCases: Array<{ name: string; path: string; header: string }> = [
+      { name: 'combined-ct-with-charset', path: '/next', header: 'Content-Type: text/html; charset=utf-8, text/plain' },
+      { name: 'combined-ct-bare', path: '/next/', header: 'Content-Type: text/html, text/plain' },
+      { name: 'wrong-ct-charset', path: '/next/index.html', header: 'Content-Type: text/html; charset=iso-8859-1' },
+    ];
+    for (const row of combinedCtCases) {
+      finalHeaderOverride = (urlPath) => urlPath === row.path
+        ? validFinalLines.map(l => l.startsWith('Content-Type:') ? row.header : l)
+        : [...validFinalLines];
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        const stderr = (error as { stderr: string }).stderr;
+        assert.match(stderr, new RegExp(`FAIL path=${row.path.replace(/\./g, '\\.')} `), row.name);
+        assert.match(stderr, /reason=content-type-mismatch/, row.name);
+        return true;
+      });
+    }
+  } finally {
+    await new Promise<void>(r => tcpServer.close(() => r()));
+  }
+});
+
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
   const nextVariants = new Set([
-    'next-success', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive',
+    'next-success', 'next-status', 'next-slash-status', 'next-body', 'next-index-body',
+    'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type',
+    'next-header', 'next-header-duplicate-directive',
     'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status',
     'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index',
     'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy',
   ]);
-  for (const variant of ['success', 'next-success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status', 'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index', 'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
+  for (const variant of ['success', 'next-success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-slash-status', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status', 'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index', 'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
     const useNext = nextVariants.has(variant);
     const packet = await prepare(`run-${variant}`, undefined, useNext ? await artifactDirWithNext() : undefined);
     const site = join(root, `site-${variant}`), old = join(site, 'releases/old');
@@ -674,6 +1035,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
     await symlink('releases/old', join(site, 'current')); await mkdir(join(site, 'releases/reserve'));
     const oldProbes = new Set<string>();
     const newProbes = new Set<string>();
+    const newNextRequests: Array<{ path: string; ua: string; accept: string; ae: string }> = [];
     let unhealthyOldApp = false;
     let notifyHeld!: () => void, releaseHeld!: () => void;
     const probeHeld = new Promise<void>(r => { notifyHeld = r; });
@@ -682,18 +1044,27 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       if (variant === 'closed-pipe-failure' && (await readlink(join(site, 'current'))) !== 'releases/old') { res.writeHead(503); res.end(); return; }
       if (variant === 'rollback-status') { res.writeHead(503); res.end(); return; }
       const urlPath = req.url ?? '/';
+      const ua = String(req.headers['user-agent'] ?? '');
+      const accept = String(req.headers.accept ?? '');
+      const ae = String(req.headers['accept-encoding'] ?? '');
       const isNew = (await readlink(join(site, 'current'))) !== 'releases/old';
+      const isNextHtml = urlPath === '/next' || urlPath === '/next/' || urlPath === '/next/index.html';
       if (isNew && variant === 'hup') { notifyHeld(); await probeReleased; }
-      if (isNew) newProbes.add(urlPath);
+      if (isNew) {
+        newProbes.add(urlPath);
+        if (isNextHtml) newNextRequests.push({ path: urlPath, ua, accept, ae });
+      }
       if (!isNew) oldProbes.add(urlPath);
       if (!isNew && unhealthyOldApp && urlPath === '/app') { res.writeHead(503); res.end(); return; }
       if (isNew && variant === 'root-status' && urlPath === '/') { res.writeHead(503); res.end('unavailable'); return; }
       if (isNew && variant === 'app-status' && urlPath === '/app') { res.writeHead(503); res.end('unavailable'); return; }
       if (isNew && variant === 'next-status' && urlPath === '/next') { res.writeHead(503); res.end('unavailable'); return; }
-      if (isNew && variant === 'next-asset-status' && urlPath.startsWith('/next/')) { res.writeHead(404); res.end('missing'); return; }
+      if (isNew && variant === 'next-slash-status' && urlPath === '/next/') { res.writeHead(503); res.end('unavailable'); return; }
+      if (isNew && variant === 'next-asset-status' && urlPath.startsWith('/next/') && !isNextHtml) { res.writeHead(404); res.end('missing'); return; }
       if (isNew && variant === 'root-body' && urlPath === '/') { res.end('wrong HTML'); return; }
       if (isNew && variant === 'app-body' && urlPath === '/app') { res.end('wrong HTML'); return; }
       if (isNew && variant === 'next-body' && urlPath === '/next') { res.end('wrong HTML'); return; }
+      if (isNew && variant === 'next-index-body' && urlPath === '/next/index.html') { res.end('wrong HTML'); return; }
       const route = urlPath === '/app' ? 'app/index.html' : (urlPath === '/next' || urlPath === '/next/') ? 'next/index.html' : urlPath === '/' ? 'index.html' : urlPath.replace(/^\//, '');
       const nextCspOverride = (): string[] | undefined => {
         if (!isNew) {
@@ -724,13 +1095,32 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
             ...cspHeader,
             'x-content-type-options': 'nosniff',
             'referrer-policy': 'no-referrer',
-            ...(isNew && urlPath === '/next' ? { 'cache-control': 'no-cache' } : {}),
+            ...(isNew && isNextHtml ? {
+              'content-type': variant === 'next-index-content-type' && urlPath === '/next/index.html'
+                ? 'text/plain; charset=utf-8'
+                : 'text/html; charset=utf-8',
+              'cache-control': variant === 'next-slash-cache' && urlPath === '/next/'
+                ? 'public, max-age=0, must-revalidate'
+                : 'no-cache',
+            } : {}),
           }
         : {};
       try {
-        const body = await readFile(join(site, 'current', route));
+        let body = await readFile(join(site, 'current', route));
+        const isIdentity = ae.trim().toLowerCase() === 'identity';
+        const isCompressed = !isIdentity && ae.toLowerCase().includes('gzip');
+        if (isNew && isNextHtml) {
+          if (variant === 'next-browser-ua-inject' && ua.startsWith('Mozilla/')) {
+            body = Buffer.concat([body, Buffer.from('<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>')]);
+          }
+          if (variant === 'next-identity-inject' && isIdentity) {
+            body = Buffer.concat([body, Buffer.from('<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>')]);
+          }
+        }
+        const payload = isNew && isNextHtml && isCompressed ? gzipSync(body) : body;
+        if (isNew && isNextHtml && isCompressed) nextHeaders['content-encoding'] = 'gzip';
         res.writeHead(200, nextHeaders);
-        res.end(body);
+        res.end(payload);
       } catch { res.writeHead(404, nextHeaders); res.end(); }
     });
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); const address = server.address(); assert.ok(address && typeof address === 'object');
@@ -759,8 +1149,15 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         assert.equal(completed.stdout, ''); assert.equal(completed.stderr, '');
         const deployLog = await readFile(join(packet, 'hostrun.log'), 'utf8');
         assert.match(deployLog, useNext ? /PASS deploy .* NEXT=1/ : /PASS deploy .* NEXT=0/);
-        if (useNext) assert.ok(newProbes.has('/next'), 'preview-on release must probe /next');
-        else assert.equal([...newProbes].some(p => p === '/next' || p.startsWith('/next/')), false, 'preview-off release must not probe /next');
+        if (useNext) {
+          for (const p of ['/next', '/next/', '/next/index.html']) {
+            assert.ok(newProbes.has(p), `preview-on release must probe ${p}`);
+            const forPath = newNextRequests.filter(r => r.path === p);
+            assert.ok(forPath.some(r => r.ua.startsWith('CommonSwarmReleaseCheck/')), `${p} release-check UA`);
+            assert.ok(forPath.some(r => r.ua.startsWith('Mozilla/5.0 ') && r.accept.includes('text/html') && r.ae.toLowerCase().includes('gzip') && r.ae.trim().toLowerCase() !== 'identity'), `${p} browser compressed`);
+            assert.ok(forPath.some(r => r.ua.startsWith('Mozilla/5.0 ') && r.accept.includes('text/html') && r.ae.trim().toLowerCase() === 'identity'), `${p} browser identity`);
+          }
+        } else assert.equal([...newProbes].some(p => p === '/next' || p.startsWith('/next/')), false, 'preview-off release must not probe /next');
         const current = await readlink(join(site, 'current')); assert.notEqual(current, 'releases/old');
         assert.equal(await readFile(join(site, 'current/_astro/retained.js'), 'utf8'), 'old asset');
         if (variant === 'missing-old') {
@@ -804,15 +1201,26 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
           } finally { clearTimeout(timer!); releaseHeld(); await exited; }
         } else await assert.rejects(run());
         const output = await readFile(join(packet, 'hostrun.log'), 'utf8');
-        if (['root-status', 'app-status', 'next-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
-        if (['root-body', 'app-body', 'next-body'].includes(variant)) assert.match(output, /assertion=httphash/);
-        if (variant === 'next-header' || variant.startsWith('next-header-')) assert.match(output, /assertion=next-csp/);
+        if (['root-status', 'app-status', 'next-status', 'next-slash-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
+        if (['root-body', 'app-body', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject'].includes(variant)) assert.match(output, /assertion=httphash/);
+        if (variant === 'next-slash-cache') {
+          assert.match(output, /assertion=next-html-headers/);
+          assert.match(output, /cache-control-mismatch/);
+        }
+        if (variant === 'next-index-content-type') {
+          assert.match(output, /assertion=next-html-headers/);
+          assert.match(output, /content-type-mismatch/);
+        }
+        if (variant === 'next-header' || variant.startsWith('next-header-')) {
+          assert.match(output, /assertion=next-html-headers/);
+          assert.match(output, /(?:missing-csp|csp-mismatch|multiple-csp)/);
+        }
         if (variant.startsWith('next-preflip-')) {
           assert.match(output, /assertion=preflip-next-csp/);
           assert.doesNotMatch(output, /PASS rollback/);
           assert.equal(newProbes.size, 0, 'pre-flip ingress failure must refuse before switching');
         }
-        if (['root-status', 'app-status', 'next-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
+        if (['root-status', 'app-status', 'next-status', 'next-slash-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
         if (variant === 'asset-drift') assert.match(output, /Refusing site refresh: asset byte collision/);
         if (variant === 'current-drift') assert.match(output, /assertion=exact-old-link/);
         if (variant === 'artifact-pin') assert.match(output, /assertion=artifactSHA/);
@@ -823,7 +1231,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
       if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
-      if (['next-success', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app', '/next', '/next/', '/next/index.html']);
+      if (['next-success', 'next-status', 'next-slash-status', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app', '/next', '/next/', '/next/index.html']);
       assert.equal((await stat(join(packet, 'hostrun.log'))).mode & 0o777, 0o600);
       assert.ok((await readdir(join(site, 'releases'))).includes('reserve'));
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');
