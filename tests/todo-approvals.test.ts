@@ -571,3 +571,154 @@ test('MCP catalog excludes household_todo_decide, todo_create accepts kind, and 
   assert.equal(replayDenied.replayed, false);
   assert.equal(replayDenied.outcome.status, 'refused');
 });
+
+test('todo_read projects authoritative offer_prerequisite for after-gated offers without origin_* fields, reflects updates, and returns null otherwise', async () => {
+  const prereqId = uid(701);
+  const afterOfferId = uid(702);
+  const atOfferId = uid(703);
+  const missingPrereqOfferId = uid(704);
+  const missingPrereqId = uid(705);
+  const offerIdA = uid(801);
+  const offerIdB = uid(802);
+  const offerIdC = uid(803);
+
+  const rowFor = (t: Todo): Record<string, unknown> => ({
+    workspace_id: t.workspace_id,
+    todo_id: t.todo_id,
+    version: t.version,
+    kind: t.kind ?? 'task',
+    title: t.title,
+    notes: t.notes,
+    state: t.state,
+    due_on: t.due_on,
+    created_by_user: t.created_by.user_id,
+    created_by_principal: t.created_by.principal_id,
+    created_at: t.created_at,
+    assignee_user: t.assignee?.kind === 'user' ? t.assignee.id : null,
+    assignee_principal: t.assignee?.kind === 'agent' ? t.assignee.id : null,
+    assigned_by_user: t.assigned_by?.user_id ?? null,
+    assigned_by_principal: t.assigned_by?.principal_id ?? null,
+    assigned_at: t.assigned_at,
+    offer_id: t.offer?.offer_id ?? null,
+    offer_user: t.offer?.to.kind === 'user' ? t.offer.to.id : null,
+    offer_principal: t.offer?.to.kind === 'agent' ? t.offer.to.id : null,
+    offer_decider: t.offer?.decider_user_id ?? null,
+    offer_start: t.offer?.start ?? null,
+    offer_gate: t.offer?.gate ?? null,
+    offer_by_user: t.offer?.by.user_id ?? null,
+    offer_by_principal: t.offer?.by.principal_id ?? null,
+    offered_at: t.offer?.at ?? null,
+    gate_kind: t.gate.kind,
+    gate_note: t.gate.kind === 'hold' ? t.gate.note : null,
+    gate_todo_id: t.gate.kind === 'after' ? t.gate.todo_id : null,
+    gate_at: t.gate.kind === 'at' ? t.gate.at : null,
+    gate_set_by: t.gate_set_by,
+    queue_rank: t.queue_rank,
+    state_by_user: t.state_by.user_id,
+    state_by_principal: t.state_by.principal_id,
+    state_at: t.state_at,
+    comment_count: t.comment_count,
+    decision_status: t.decision_status ?? null,
+    decision_by_user: t.decision_by_user ?? null,
+    decision_at: t.decision_at ?? null,
+    decision_note: t.decision_note ?? null,
+    origin_placement: t.origin_placement ?? 'workspace',
+    origin_channel_id: t.origin_channel_id ?? null,
+    origin_conversation_id: t.origin_conversation_id ?? null,
+  });
+
+  let prereqTitle = 'Complete security checklist';
+  const rows = () => [
+    rowFor(todo(prereqId, {
+      title: prereqTitle,
+      state: 'open',
+      origin_placement: 'channel',
+      origin_channel_id: chOne,
+      origin_conversation_id: null,
+    })),
+    rowFor(todo(afterOfferId, {
+      version: 3,
+      title: 'Deploy to production',
+      offer: {
+        offer_id: offerIdA,
+        to: { kind: 'agent', id: agentA },
+        decider_user_id: alice,
+        start: 'queue',
+        gate: { kind: 'after', todo_id: prereqId },
+        by: { user_id: bob, principal_id: null },
+        at,
+      },
+    })),
+    rowFor(todo(atOfferId, {
+      version: 2,
+      title: 'Scheduled job',
+      offer: {
+        offer_id: offerIdB,
+        to: { kind: 'agent', id: agentA },
+        decider_user_id: alice,
+        start: 'queue',
+        gate: { kind: 'at', at: '2026-12-01T15:00:05.125Z' },
+        by: { user_id: bob, principal_id: null },
+        at,
+      },
+    })),
+    rowFor(todo(missingPrereqOfferId, {
+      version: 2,
+      title: 'Orphan after offer',
+      offer: {
+        offer_id: offerIdC,
+        to: { kind: 'agent', id: agentA },
+        decider_user_id: alice,
+        start: 'queue',
+        gate: { kind: 'after', todo_id: missingPrereqId },
+        by: { user_id: bob, principal_id: null },
+        at,
+      },
+    })),
+  ];
+
+  const tx = (async (parts: TemplateStringsArray) => {
+    const sql = parts.join('?');
+    if (sql.includes('SELECT stream_id,last_seq')) return [{ stream_id: uid(810), last_seq: 4 }];
+    if (sql.includes('SELECT * FROM swarm.household_todos')) return rows();
+    if (sql.includes('SELECT principal_id,accepts_from')) return [];
+    if (sql.includes('SELECT * FROM swarm.household_comments')) return [];
+    throw new Error(`Unexpected query: ${sql}`);
+  }) as unknown as Parameters<ReturnType<typeof createHouseholdTodoStore>['read']>[0];
+  (tx as unknown as { json: (v: unknown) => unknown }).json = (v: unknown) => v;
+
+  const store = createHouseholdTodoStore({
+    core: { ...todosCore, ...todoPolicy, ...accessPolicy },
+    access: async () => ({ now, facts: access(alice) }),
+    notice: async () => { throw new Error('Read must never invoke notice'); },
+  });
+  const identity = { user_id: alice, principal_id: null, run_id: null, connection: null };
+
+  const readAfter = await store.read(tx, workspace, identity, { kind: 'todo_read', todo_id: afterOfferId }) as { todo: Record<string, unknown> };
+  assert.deepEqual((readAfter.todo.offer as Record<string, unknown>).gate, { kind: 'after', todo_id: prereqId });
+  assert.deepEqual(readAfter.todo.offer_prerequisite, {
+    todo_id: prereqId,
+    title: 'Complete security checklist',
+    state: 'open',
+  });
+  const prereqObj = readAfter.todo.offer_prerequisite as Record<string, unknown>;
+  assert.equal('origin_placement' in prereqObj, false);
+  assert.equal('origin_channel_id' in prereqObj, false);
+  assert.equal('origin_conversation_id' in prereqObj, false);
+
+  // Reflects updated prerequisite title immediately on next todo_read.
+  prereqTitle = 'Updated authoritative checklist';
+  const readUpdated = await store.read(tx, workspace, identity, { kind: 'todo_read', todo_id: afterOfferId }) as { todo: Record<string, unknown> };
+  assert.deepEqual(readUpdated.todo.offer_prerequisite, {
+    todo_id: prereqId,
+    title: 'Updated authoritative checklist',
+    state: 'open',
+  });
+
+  // Non-after offer and missing prerequisite both project offer_prerequisite: null.
+  const readAt = await store.read(tx, workspace, identity, { kind: 'todo_read', todo_id: atOfferId }) as { todo: Record<string, unknown> };
+  assert.equal(readAt.todo.offer_prerequisite, null);
+
+  const readMissing = await store.read(tx, workspace, identity, { kind: 'todo_read', todo_id: missingPrereqOfferId }) as { todo: Record<string, unknown> };
+  assert.equal(readMissing.todo.offer_prerequisite, null);
+});

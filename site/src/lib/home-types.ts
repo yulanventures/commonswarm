@@ -40,6 +40,7 @@ export interface TodoVM { id: Id; workspaceId: Id; title: string; notes: string;
     start: "queue" | "now";
     gate: Gate | null;
     gateKind: "none" | "hold" | "after" | "at";
+    termsAvailable: boolean;
     deciderIsViewer: boolean;
   } | null;
   addedBy: PersonVM | AgentVM; addedAt: string; due: string | null; assignee: Assignee;

@@ -264,23 +264,52 @@ function offerPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: Todo
     terms.append(node(doc, "p", "hm-todo-status-more", `For ${displayName(offer.to, ctx.names)}`));
   }
   terms.append(node(doc, "p", "hm-todo-status-more", offer.start === "now" ? "Start now" : "Queue"));
+  let formattedAt: string | null = null;
   if (offer.gateKind === "at") {
-    const formatted = offer.gate?.kind === "time" ? formatExactOfferAt(offer.gate.at, vm.timeZone) : null;
-    const gateEl = node(doc, "p", "hm-todo-status-more", formatted ? `Scheduled ${formatted}` : "Scheduled time unavailable");
+    formattedAt = offer.termsAvailable && offer.gate?.kind === "time"
+      ? formatExactOfferAt(offer.gate.at, vm.timeZone)
+      : null;
+    const gateEl = node(
+      doc,
+      "p",
+      "hm-todo-status-more",
+      formattedAt ? `Scheduled ${formattedAt}` : "Scheduled time unavailable. Reload to review before deciding.",
+    );
     gateEl.dataset.offerGateTerm = "at";
     terms.append(gateEl);
   } else if (offer.gateKind === "hold") {
-    const holdNote = offer.gate?.kind === "note" ? offer.gate.note : "";
-    const gateEl = node(doc, "p", "hm-todo-status-more", holdNote.trim() ? `Hold: ${holdNote}` : "On hold");
+    const holdNote = offer.termsAvailable && offer.gate?.kind === "note" ? offer.gate.note : "";
+    const gateEl = node(
+      doc,
+      "p",
+      "hm-todo-status-more",
+      holdNote.trim() ? `Hold: ${holdNote}` : "Hold details unavailable. Reload to review before deciding.",
+    );
     gateEl.dataset.offerGateTerm = "hold";
     terms.append(gateEl);
   } else if (offer.gateKind === "after") {
-    const prereqTitle = offer.gate?.kind === "todo" ? offer.gate.todo.title : "another to-do";
-    const gateEl = node(doc, "p", "hm-todo-status-more", `After ‘${prereqTitle}’`);
+    const prereqTitle = offer.termsAvailable && offer.gate?.kind === "todo" && offer.gate.todo.title.trim()
+      ? offer.gate.todo.title
+      : null;
+    const gateEl = node(
+      doc,
+      "p",
+      "hm-todo-status-more",
+      prereqTitle ? `After ‘${prereqTitle}’` : "Prerequisite details unavailable. Reload to review before deciding.",
+    );
     gateEl.dataset.offerGateTerm = "after";
+    terms.append(gateEl);
+  } else if (!offer.termsAvailable) {
+    const gateEl = node(doc, "p", "hm-todo-status-more", "Offer details unavailable. Reload to review before deciding.");
+    gateEl.dataset.offerGateTerm = "unavailable";
     terms.append(gateEl);
   }
   panel.append(terms);
+
+  const canSubmitOffer = offer.termsAvailable
+    && (offer.gateKind !== "at" || formattedAt !== null)
+    && (offer.gateKind !== "after" || (offer.gate?.kind === "todo" && offer.gate.todo.title.trim().length > 0))
+    && (offer.gateKind !== "hold" || (offer.gate?.kind === "note" && offer.gate.note.trim().length > 0));
 
   if (todo.may.answerOffer && !todo.sample && callbacks.answerOffer) {
     const actions = node(doc, "div", "hm-todo-decision-actions");
@@ -288,8 +317,11 @@ function offerPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: Todo
       const btn = button(doc, label, cls);
       btn.dataset.todoOfferAnswer = answer;
       btn.setAttribute("aria-label", `${label} ‘${todo.title}’`);
-      btn.disabled = vm.save === "saving";
-      btn.addEventListener("click", () => callbacks.answerOffer?.(answer));
+      btn.disabled = vm.save === "saving" || !canSubmitOffer;
+      btn.addEventListener("click", () => {
+        if (!canSubmitOffer || vm.save === "saving") return;
+        callbacks.answerOffer?.(answer);
+      });
       actions.append(btn);
     }
     panel.append(actions);

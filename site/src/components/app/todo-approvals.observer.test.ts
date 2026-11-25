@@ -23,6 +23,8 @@ import {
   WAITING_ARCHIVED_OUTCOMES,
 } from "../../lib/home/client.ts";
 import { mapHomePeople, mapHomeTodo } from "../../lib/home-map.ts";
+import { tagOptions } from "../../lib/home-pickers.ts";
+import { routeHref } from "../../lib/home-route.ts";
 import { buildOfferCard, pendingOfferCards } from "../../lib/home-stream-approvals.ts";
 import { todoView } from "../../lib/home-todo.ts";
 import { evaluateInlineOfferTerms, formatExactOfferAt, TODO_CONFLICT_MESSAGE } from "../../lib/todo-offer-terms.ts";
@@ -1054,7 +1056,7 @@ test("To-do detail view renders pending approval, pending offer full terms, and 
     { decision: "decline", note: "Looks solid" },
   ]);
 
-  // B) Pending offer with full terms (by, to, start, after prerequisite)
+  // B) Pending offer with full terms (by, to, start, authoritative after prerequisite)
   const offerRow: Todo = {
     ...pendingApprovalRow,
     todo_id: TODO_2,
@@ -1068,6 +1070,11 @@ test("To-do detail view renders pending approval, pending offer full terms, and 
       gate: { kind: "after", todo_id: TODO_3 },
       by: { user_id: OTHER_USER, principal_id: null },
       at: "2026-11-25T14:00:00Z",
+    },
+    offer_prerequisite: {
+      todo_id: TODO_3,
+      title: "Finish QA checklist",
+      state: "open",
     },
   };
   const prereqSummary = makeOfferSummary({ todo_id: TODO_3, title: "Finish QA checklist", offer: null });
@@ -1629,4 +1636,563 @@ test("Waiting Archived tab renders Approved (positive tone) and Declined (muted 
   assert.equal(approvedCard.querySelectorAll("script").length, 0);
   assert.equal(declinedCard.querySelectorAll("img").length, 0);
   assert.equal(declinedCard.querySelectorAll("script").length, 0);
+});
+
+// ---------- 8. Mounted HezSec R1 witnesses (Fixes 1, 2, 3) ----------
+
+function makePeopleForDetail() {
+  return mapHomePeople({
+    workspaceId: WS,
+    viewerId: OWNER,
+    members: [
+      { userId: OWNER, name: "Alex Owner", role: "owner" },
+      { userId: OTHER_USER, name: "Nikki Member", role: "member" },
+    ],
+    agents: [{ principalId: AGENT, name: "Claude", ownerUserId: OWNER }],
+    access: [],
+    signals: [],
+    now: NOW,
+    sample: false,
+  });
+}
+
+async function mountLiveDetailHarness(options: {
+  initialRead: { todo: Todo; comments: [] };
+  initialRows?: TodoSummary[];
+  onDecideTodo?: (ws: string, input: Record<string, unknown>, reqId: string) => Promise<unknown>;
+  onAnswerRequest?: (ws: string, input: Record<string, unknown>, reqId: string) => Promise<unknown>;
+}) {
+  const code = await extractDashboardFunctions([
+    "homeRefusalCopy",
+    "homeWrite",
+    "completeHomeTodo",
+    "steerHomeTodo",
+    "renderHomeObjectPane",
+  ]);
+  const doc = new FakeDocument();
+  const slot = new FakeElement(doc, "div");
+  slot.dataset.homeRoutePane = "";
+  doc.body.append(slot);
+  const people = makePeopleForDetail();
+
+  const calls: Array<{ method: string; workspaceId: string; input: Record<string, unknown> }> = [];
+  const serverStub = {
+    decideTodo: async (ws: string, input: Record<string, unknown>, reqId: string) => {
+      calls.push({ method: "decideTodo", workspaceId: ws, input: { ...input } });
+      if (options.onDecideTodo) return await options.onDecideTodo(ws, input, reqId);
+      return {
+        status: "committed",
+        value: { ...options.initialRead.todo, version: Number(input.base_version) + 1, state: "done", decision_status: "approved" },
+        notices: [],
+        replayed: false,
+      };
+    },
+    answerRequest: async (ws: string, input: Record<string, unknown>, reqId: string) => {
+      calls.push({ method: "answerRequest", workspaceId: ws, input: { ...input } });
+      if (options.onAnswerRequest) return await options.onAnswerRequest(ws, input, reqId);
+      return {
+        status: "committed",
+        value: { ...options.initialRead.todo, version: Number(input.base_version) + 1, offer: null },
+        notices: [],
+        replayed: false,
+      };
+    },
+    assignTodo: async (ws: string, input: Record<string, unknown>) => {
+      calls.push({ method: "assignTodo", workspaceId: ws, input: { ...input } });
+      return { status: "committed", value: options.initialRead.todo, notices: [], replayed: false };
+    },
+    setTodoState: async (ws: string, input: Record<string, unknown>) => {
+      calls.push({ method: "setTodoState", workspaceId: ws, input: { ...input } });
+      return { status: "committed", value: options.initialRead.todo, notices: [], replayed: false };
+    },
+    steerQueue: async (ws: string, input: Record<string, unknown>) => {
+      calls.push({ method: "steerQueue", workspaceId: ws, input: { ...input } });
+      return { status: "committed", value: options.initialRead.todo, notices: [], replayed: false };
+    },
+    comment: async (ws: string, input: Record<string, unknown>) => {
+      calls.push({ method: "comment", workspaceId: ws, input: { ...input } });
+      return { status: "committed", value: {}, notices: [], replayed: false };
+    },
+  };
+
+  const ctx = createContext({
+    TODO_CONFLICT_MESSAGE,
+    TODO_SAVE_FAILED: "Not saved.",
+    TODO_RESULT_UNKNOWN: "Unknown.",
+    HomeCommandRefused,
+    HomeOperationRetired,
+    HomeToolsUnavailable,
+    CommandOutcomeUnknown: class extends Error {},
+    crypto: { randomUUID: () => `cmd-${calls.length + 1}` },
+    sampleMode: false,
+    activeWorkspaceId: WS,
+    workspaces: [{ id: WS, name: "Home" }],
+    homeWorkspaceGeneration: 1,
+    homeNavigation: 1,
+    homeTodoSave: "idle",
+    homeTodoReceipt: "",
+    homeTodoNotice: null,
+    homeTodoRead: options.initialRead,
+    homeDetailKey: "k",
+    homeTodosState: "ready",
+    homeTodoRows: options.initialRows ?? [],
+    homeQueue: null,
+    homeQueueRead: "ready",
+    homeRoute: { view: "todo", workspaceId: WS, todoId: options.initialRead.todo.todo_id },
+    homePolicies: new Map(),
+    homeGateEditorId: null,
+    waitingAuthGeneration: 1,
+    waitingActionGuard: () => () => true,
+    homeViewerId: () => OWNER,
+    homeServer: () => serverStub,
+    homeTodoContext: () => ({ workspaceId: WS, people, viewerId: OWNER, editor: true, sample: false, now: NOW }),
+    mapHomeTodo,
+    todoView,
+    routeHref,
+    tagOptions,
+    peopleDialogModel: () => ({ agents: [] }),
+    parkPeopleHosts: () => {},
+    homePaneMessage: () => {},
+    homeBack: () => {},
+    replaceHomeRegion: (host: FakeElement, _kind: string, nodes: FakeElement[]) => {
+      host.replaceChildren(...nodes);
+    },
+    one: (sel: string) => (sel === "[data-home-route-pane]" ? slot : slot.querySelector(sel)),
+    all: () => [],
+    document: doc,
+    renderHomeSide: () => {},
+    renderHomeShell: () => {},
+    renderFeed: () => {},
+    invalidateWaitingArchived: () => {},
+    loadHomeWorkspace: async () => {},
+  });
+  runInContext(code, ctx);
+  runInContext("renderHomeObjectPane()", ctx);
+  return { ctx, slot, calls };
+}
+
+test("Witness 1 (Fix 1): mounted detail withholds after-offer decisions when offer_prerequisite is absent even if todo_list is missing or stale, and enables with exact rendered offer_id/version once authoritative detail arrives", async () => {
+  const baseAfterTodo: Todo = {
+    workspace_id: WS,
+    todo_id: TODO_2,
+    version: 7,
+    kind: "task",
+    title: "Run production migration",
+    notes: "Needs review first.",
+    state: "open",
+    due_on: "2026-12-01",
+    created_by: { user_id: OTHER_USER, principal_id: null },
+    created_at: "2026-11-25T13:00:00Z",
+    assignee: null,
+    assigned_by: null,
+    assigned_at: null,
+    offer: {
+      offer_id: OFFER_2,
+      to: { kind: "agent", id: AGENT },
+      decider_user_id: OWNER,
+      start: "queue",
+      gate: { kind: "after", todo_id: TODO_3 },
+      by: { user_id: OTHER_USER, principal_id: null },
+      at: "2026-11-25T14:00:00Z",
+    },
+    offer_prerequisite: null,
+    gate: { kind: "none" },
+    gate_clear: true,
+    queue_position: null,
+    state_by: { user_id: OTHER_USER, principal_id: null },
+    state_at: "2026-11-25T14:00:00Z",
+    comment_count: 0,
+  };
+
+  // Case 1a: Prerequisite absent from todo_list AND offer_prerequisite: null on todo_read
+  {
+    const { slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: baseAfterTodo, comments: [] },
+      initialRows: [],
+    });
+    const gateEl = slot.querySelector(`[data-offer-gate-term="after"]`) as unknown as FakeElement;
+    assert.ok(gateEl);
+    assert.equal(gateEl.textContent, "Prerequisite details unavailable. Reload to review before deciding.");
+    assert.equal(slot.textContent.includes("another to-do"), false, "must never render placeholder with offer panel");
+    const acceptBtn = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    const declineBtn = slot.querySelector(`[data-todo-offer-answer="decline"]`) as unknown as FakeElement;
+    assert.ok(acceptBtn && declineBtn);
+    assert.equal(acceptBtn.disabled, true);
+    assert.equal(declineBtn.disabled, true);
+    acceptBtn.click();
+    declineBtn.click();
+    // Even if click listener were invoked directly, guard blocks submission.
+    for (const fn of acceptBtn.listeners.get("click") ?? []) fn({});
+    for (const fn of declineBtn.listeners.get("click") ?? []) fn({});
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 0, "0 household_todo_answer commands emitted when prerequisite unavailable");
+  }
+
+  // Case 1b: todo_list has a STALE prerequisite title, while todo_read has offer_prerequisite: null
+  const staleListRow = makeOfferSummary({ todo_id: TODO_3, title: "Stale list title", offer: null });
+  {
+    const { slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: baseAfterTodo, comments: [] },
+      initialRows: [staleListRow],
+    });
+    const gateEl = slot.querySelector(`[data-offer-gate-term="after"]`) as unknown as FakeElement;
+    assert.ok(gateEl);
+    assert.equal(gateEl.textContent, "Prerequisite details unavailable. Reload to review before deciding.");
+    assert.equal(slot.textContent.includes("Stale list title"), false, "must never fall back to stale list title");
+    const acceptBtn = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    const declineBtn = slot.querySelector(`[data-todo-offer-answer="decline"]`) as unknown as FakeElement;
+    assert.equal(acceptBtn.disabled, true);
+    assert.equal(declineBtn.disabled, true);
+    acceptBtn.click();
+    declineBtn.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 0, "0 household_todo_answer commands emitted when only stale list has title");
+  }
+
+  // Case 1c: authoritative todo_read provides offer_prerequisite while todo_list is missing OR stale
+  for (const listRows of [[], [staleListRow]]) {
+    const authTodo: Todo = {
+      ...baseAfterTodo,
+      offer_prerequisite: {
+        todo_id: TODO_3,
+        title: "Authoritative prerequisite title",
+        state: "open",
+      },
+    };
+    const { slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: authTodo, comments: [] },
+      initialRows: listRows,
+    });
+    const gateEl = slot.querySelector(`[data-offer-gate-term="after"]`) as unknown as FakeElement;
+    assert.ok(gateEl);
+    assert.equal(gateEl.textContent, "After ‘Authoritative prerequisite title’");
+    assert.equal(slot.textContent.includes("Stale list title"), false, "authoritative detail overrides stale list");
+    const acceptBtn = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    const declineBtn = slot.querySelector(`[data-todo-offer-answer="decline"]`) as unknown as FakeElement;
+    assert.equal(acceptBtn.disabled, false);
+    assert.equal(declineBtn.disabled, false);
+    acceptBtn.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "answerRequest");
+    assert.equal(calls[0]!.workspaceId, WS);
+    assert.deepEqual(calls[0]!.input, {
+      todo_id: TODO_2,
+      offer_id: OFFER_2,
+      base_version: 7,
+      answer: "accept",
+    });
+  }
+});
+
+test("Witness 2 (Fix 2): mounted detail handlers pin rendered todo_id, base_version, and offer_id across superseded projections for both answerOffer and decide, plus unchanged controls", async () => {
+  // --- A) answerOffer: superseded projection vs unchanged control ---
+  {
+    const offerV3: Todo = {
+      workspace_id: WS,
+      todo_id: TODO_2,
+      version: 3,
+      kind: "task",
+      title: "Run export v3",
+      notes: "Original terms",
+      state: "open",
+      due_on: null,
+      created_by: { user_id: OTHER_USER, principal_id: null },
+      created_at: "2026-11-25T13:00:00Z",
+      assignee: null,
+      assigned_by: null,
+      assigned_at: null,
+      offer: {
+        offer_id: OFFER_1,
+        to: { kind: "agent", id: AGENT },
+        decider_user_id: OWNER,
+        start: "queue",
+        gate: { kind: "none" },
+        by: { user_id: OTHER_USER, principal_id: null },
+        at: "2026-11-25T14:00:00Z",
+      },
+      offer_prerequisite: null,
+      gate: { kind: "none" },
+      gate_clear: true,
+      queue_position: null,
+      state_by: { user_id: OTHER_USER, principal_id: null },
+      state_at: "2026-11-25T14:00:00Z",
+      comment_count: 0,
+    };
+    const offerV4: Todo = {
+      ...offerV3,
+      version: 4,
+      title: "Run export v4 (superseded)",
+      offer: {
+        ...offerV3.offer!,
+        offer_id: OFFER_2,
+        start: "now",
+      },
+    };
+    const { ctx, slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: offerV3, comments: [] },
+      onAnswerRequest: async (_ws, input) => {
+        if (input.base_version !== 4 || input.offer_id !== OFFER_2) {
+          return { status: "conflict", current: offerV4 };
+        }
+        return {
+          status: "committed",
+          value: { ...offerV4, version: 5, offer: null },
+          notices: [],
+          replayed: false,
+        };
+      },
+    });
+    const retainedV3Accept = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    assert.ok(retainedV3Accept);
+
+    // Supersede mutable homeTodoRead to v4 / OFFER_2 WITHOUT clicking v4's button
+    (ctx as Record<string, unknown>)._v4Read = { todo: offerV4, comments: [] };
+    runInContext("homeTodoRead = _v4Read; renderHomeObjectPane();", ctx);
+
+    // Click the retained v3 button -> MUST dispatch base_version: 3 and offer_id: OFFER_1 (never 4 / OFFER_2)
+    retainedV3Accept.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "answerRequest");
+    assert.deepEqual(calls[0]!.input, {
+      todo_id: TODO_2,
+      offer_id: OFFER_1,
+      base_version: 3,
+      answer: "accept",
+    });
+    assert.equal(runInContext("homeTodoReceipt", ctx), TODO_CONFLICT_MESSAGE);
+
+    // Unchanged control: click the live v4 button -> dispatches base_version: 4 / OFFER_2 and commits
+    const liveV4Accept = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    assert.ok(liveV4Accept);
+    liveV4Accept.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.method, "answerRequest");
+    assert.deepEqual(calls[1]!.input, {
+      todo_id: TODO_2,
+      offer_id: OFFER_2,
+      base_version: 4,
+      answer: "accept",
+    });
+    assert.equal(runInContext("homeTodoReceipt", ctx), "Accepted.");
+  }
+
+  // --- B) decide: superseded projection vs unchanged control ---
+  {
+    const approvalV3: Todo = {
+      workspace_id: WS,
+      todo_id: TODO_1,
+      version: 3,
+      kind: "approval",
+      title: "Approve budget v3",
+      notes: "Spend $100",
+      state: "open",
+      due_on: null,
+      created_by: { user_id: OWNER, principal_id: AGENT },
+      created_at: "2026-11-25T13:00:00Z",
+      assignee: { kind: "user", id: OWNER },
+      assigned_by: { user_id: OWNER, principal_id: AGENT },
+      assigned_at: "2026-11-25T13:00:00Z",
+      offer: null,
+      offer_prerequisite: null,
+      gate: { kind: "none" },
+      gate_clear: true,
+      queue_position: null,
+      state_by: { user_id: OWNER, principal_id: AGENT },
+      state_at: "2026-11-25T13:00:00Z",
+      comment_count: 0,
+      decision_status: null,
+      decision: null,
+    };
+    const approvalV4: Todo = {
+      ...approvalV3,
+      version: 4,
+      title: "Approve budget v4",
+      notes: "Spend $900",
+    };
+    const { ctx, slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: approvalV3, comments: [] },
+      onDecideTodo: async (_ws, input) => {
+        if (input.base_version !== 4) {
+          return { status: "conflict", current: approvalV4 };
+        }
+        return {
+          status: "committed",
+          value: { ...approvalV4, version: 5, state: "done", decision_status: "approved" },
+          notices: [],
+          replayed: false,
+        };
+      },
+    });
+    const retainedV3Approve = slot.querySelector("[data-todo-approve]") as unknown as FakeElement;
+    assert.ok(retainedV3Approve);
+
+    // Supersede mutable homeTodoRead to v4
+    (ctx as Record<string, unknown>)._v4ApprovalRead = { todo: approvalV4, comments: [] };
+    runInContext("homeTodoRead = _v4ApprovalRead; renderHomeObjectPane();", ctx);
+
+    // Click retained v3 Approve button -> MUST dispatch base_version: 3 (never 4)
+    retainedV3Approve.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "decideTodo");
+    assert.deepEqual(calls[0]!.input, {
+      todo_id: TODO_1,
+      base_version: 3,
+      decision: "approve",
+    });
+    assert.equal(runInContext("homeTodoReceipt", ctx), TODO_CONFLICT_MESSAGE);
+
+    // Unchanged control: click live v4 Approve button -> dispatches base_version: 4 and commits
+    const liveV4Approve = slot.querySelector("[data-todo-approve]") as unknown as FakeElement;
+    assert.ok(liveV4Approve);
+    liveV4Approve.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.method, "decideTodo");
+    assert.deepEqual(calls[1]!.input, {
+      todo_id: TODO_1,
+      base_version: 4,
+      decision: "approve",
+    });
+    assert.equal(runInContext("homeTodoReceipt", ctx), "Approved.");
+  }
+});
+
+test("Witness 3 (Fix 3): two accepted scheduled times in the same displayed minute render distinct exact instants (seconds, milliseconds, explicit offset) on mounted Detail, Chat OfferCard, and Waiting views before Accept", () => {
+  const t1 = "2026-11-30T15:00:05.120Z";
+  const t2 = "2026-11-30T15:00:45.789Z";
+  const people = makePeopleForDetail();
+  const ctx = { workspaceId: WS, people, viewerId: OWNER, editor: true, sample: false, now: NOW };
+  const doc = makeDoc();
+
+  // 1) Mounted Detail view
+  const renderDetailAt = (atIso: string) => {
+    const row: Todo = {
+      workspace_id: WS,
+      todo_id: TODO_2,
+      version: 5,
+      kind: "task",
+      title: "Scheduled offer",
+      notes: "",
+      state: "open",
+      due_on: null,
+      created_by: { user_id: OTHER_USER, principal_id: null },
+      created_at: "2026-11-25T13:00:00Z",
+      assignee: null,
+      assigned_by: null,
+      assigned_at: null,
+      offer: {
+        offer_id: OFFER_1,
+        to: { kind: "agent", id: AGENT },
+        decider_user_id: OWNER,
+        start: "queue",
+        gate: { kind: "at", at: atIso },
+        by: { user_id: OTHER_USER, principal_id: null },
+        at: "2026-11-25T14:00:00Z",
+      },
+      offer_prerequisite: null,
+      gate: { kind: "none" },
+      gate_clear: true,
+      queue_position: null,
+      state_by: { user_id: OTHER_USER, principal_id: null },
+      state_at: "2026-11-25T14:00:00Z",
+      comment_count: 0,
+    };
+    const vm = mapHomeTodo(row, ctx, [], []);
+    const answers: string[] = [];
+    const el = todoView(doc, {
+      workspace: { name: "Home", todosHref: `/app?w=${WS}&v=todos`, homeHref: `/app?w=${WS}` },
+      view: { kind: "ready", todo: vm },
+      now: NOW,
+      timeZone: "UTC",
+      people,
+      openTodos: [],
+      save: "idle",
+    }, {
+      complete: () => {},
+      assign: () => {},
+      setStart: () => {},
+      comment: () => {},
+      answerOffer: ans => answers.push(ans),
+    }) as unknown as FakeElement;
+    return { el, answers };
+  };
+
+  const detail1 = renderDetailAt(t1);
+  const detail2 = renderDetailAt(t2);
+  const term1 = (detail1.el.querySelector(`[data-offer-gate-term="at"]`) as unknown as FakeElement).textContent;
+  const term2 = (detail2.el.querySelector(`[data-offer-gate-term="at"]`) as unknown as FakeElement).textContent;
+  assert.notEqual(term1, term2, "detail view must distinguish two accepted times in the same minute");
+  assert.equal(term1, "Scheduled Nov 30, 2026, 3:00:05.120 pm GMT");
+  assert.equal(term2, "Scheduled Nov 30, 2026, 3:00:45.789 pm GMT");
+  (detail1.el.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement).click();
+  assert.deepEqual(detail1.answers, ["accept"]);
+
+  // 2) Mounted Chat OfferCard
+  const cardFor = (atIso: string) => {
+    const cards = pendingOfferCards(
+      [makeOfferSummary({
+        offer: {
+          offer_id: OFFER_1,
+          to: { kind: "agent", id: AGENT },
+          decider_user_id: OWNER,
+          start: "queue",
+          gate: { kind: "at", at: atIso },
+          by: { user_id: OTHER_USER, principal_id: null },
+          at: "2026-11-25T14:00:00Z",
+        },
+      })],
+      OWNER,
+      p => p.kind === "agent" ? "Claude" : "Nikki",
+    );
+    return buildOfferCard(doc, cards[0]!, { answer: () => {}, timeZone: "UTC" }) as unknown as FakeElement;
+  };
+  const chatTerm1 = (cardFor(t1).querySelector(`[data-offer-gate-term="at"]`) as unknown as FakeElement).textContent;
+  const chatTerm2 = (cardFor(t2).querySelector(`[data-offer-gate-term="at"]`) as unknown as FakeElement).textContent;
+  assert.notEqual(chatTerm1, chatTerm2);
+  assert.equal(chatTerm1, "Scheduled Nov 30, 2026, 3:00:05.120 pm GMT");
+  assert.equal(chatTerm2, "Scheduled Nov 30, 2026, 3:00:45.789 pm GMT");
+
+  // 3) Mounted Waiting on you panel
+  const waitingTermFor = (atIso: string) => {
+    const host = doc.createElement("div");
+    renderWaitingPanel(host, makeWaitingVM([{
+      id: TODO_1,
+      workspaceId: WS,
+      workspaceName: "Home",
+      title: "Scheduled offer",
+      state: "open",
+      dueOn: null,
+      reason: "request",
+      href: `/app?w=${WS}&v=todo&t=${TODO_1}`,
+      canMarkDone: false,
+      version: 5,
+      kind: "task",
+      notesTruncated: false,
+      offerId: OFFER_1,
+      offerTo: { kind: "agent", id: AGENT, name: "Claude" },
+      offerStart: "queue",
+      offerGate: { kind: "at", at: atIso },
+      placement: "workspace",
+    }]), {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onAnswerTodoOffer: () => {},
+      onOpenTodo: () => {},
+      onDismissTodo: () => {},
+    });
+    return (host.querySelector(`[data-offer-gate-term="at"]`) as unknown as FakeElement).textContent;
+  };
+  const waitTerm1 = waitingTermFor(t1);
+  const waitTerm2 = waitingTermFor(t2);
+  assert.notEqual(waitTerm1, waitTerm2, "waiting view must distinguish two accepted times in the same minute");
+  assert.ok(waitTerm1.includes(":05.120") && waitTerm1.includes("GMT"), `expected exact ms + offset, got ${waitTerm1}`);
+  assert.ok(waitTerm2.includes(":45.789") && waitTerm2.includes("GMT"), `expected exact ms + offset, got ${waitTerm2}`);
 });

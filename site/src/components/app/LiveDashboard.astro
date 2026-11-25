@@ -6028,14 +6028,20 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (live()) { renderHomeObjectPane(); renderHomeSide(); }
     };
-    const completeHomeTodo = async (id: string, done: boolean): Promise<void> => {
-      const row = homeTodoRead?.todo.todo_id === id ? homeTodoRead.todo : homeTodoRows.find(row => row.todo_id === id);
-      if (!row) return;
-      await homeWrite((server, requestId) => server.setTodoState(activeWorkspaceId, { todo_id: id, base_version: row.version, state: done ? "done" : "open" }, requestId));
+    const completeHomeTodo = async (id: string, done: boolean, pinnedVersion?: number, pinnedWorkspaceId?: string): Promise<void> => {
+      const version = pinnedVersion !== undefined
+        ? pinnedVersion
+        : (homeTodoRead?.todo.todo_id === id ? homeTodoRead.todo.version : homeTodoRows.find(row => row.todo_id === id)?.version);
+      if (version === undefined) return;
+      const targetWorkspaceId = pinnedWorkspaceId ?? activeWorkspaceId;
+      await homeWrite((server, requestId) => server.setTodoState(targetWorkspaceId, { todo_id: id, base_version: version, state: done ? "done" : "open" }, requestId));
     };
-    const steerHomeTodo = (id: string, action: SteerAction): void => {
-      const row = homeTodoRead?.todo.todo_id === id ? homeTodoRead.todo : homeTodoRows.find(row => row.todo_id === id);
-      if (row) void homeWrite((server, requestId) => server.steerQueue(activeWorkspaceId, { todo_id: id, base_version: row.version, action }, requestId), (value, notices) => {
+    const steerHomeTodo = (id: string, action: SteerAction, pinnedVersion?: number, pinnedWorkspaceId?: string): void => {
+      const version = pinnedVersion !== undefined
+        ? pinnedVersion
+        : (homeTodoRead?.todo.todo_id === id ? homeTodoRead.todo.version : homeTodoRows.find(row => row.todo_id === id)?.version);
+      const targetWorkspaceId = pinnedWorkspaceId ?? activeWorkspaceId;
+      if (version !== undefined) void homeWrite((server, requestId) => server.steerQueue(targetWorkspaceId, { todo_id: id, base_version: version, action }, requestId), (value, notices) => {
         if (action.kind !== "start_now") return "Saved.";
         const ctx = homeTodoContext(), todo = mapHomeTodo(value, ctx, homeTodoRows);
         if (todo.start) todo.start.mode = "now";
@@ -6622,40 +6628,66 @@ import "../../styles/kylon-image-viewer.css";
           homeTodoReceipt === "Could not load this page. Reload to try again." ? () => { homeDetailKey = ""; homeTodoReceipt = ""; void loadHomeObject(); } : undefined);
         return;
       }
-      const todo = homeTodoRead ? mapHomeTodo(homeTodoRead.todo, ctx, homeTodoRows, homeTodoRead.comments) : null;
-      replaceHomeRegion(slot, "todo", [todoView(document, { workspace: { name: workspace.name, todosHref: routeHref({ view: "todos", workspaceId: workspace.id }), homeHref: routeHref({ view: "chat", workspaceId: workspace.id }) },
+      const renderedRead = homeTodoRead;
+      const renderedWorkspaceId = workspace.id;
+      const renderedTodoId = renderedRead?.todo.todo_id ?? null;
+      const renderedVersion = renderedRead?.todo.version ?? null;
+      const renderedOfferId = renderedRead?.todo.offer?.offer_id ?? null;
+      const todo = renderedRead ? mapHomeTodo(renderedRead.todo, ctx, homeTodoRows, renderedRead.comments) : null;
+      replaceHomeRegion(slot, "todo", [todoView(document, { workspace: { name: workspace.name, todosHref: routeHref({ view: "todos", workspaceId: renderedWorkspaceId }), homeHref: routeHref({ view: "chat", workspaceId: renderedWorkspaceId }) },
         view: todo ? { kind: "ready", todo } : homeTodoReceipt === "not-found" ? { kind: "not-found" } : { kind: "loading" }, now: ctx.now,
         people: ctx.people, openTodos: homeTodoRows.filter(row => row.state === "open" || row.state === "doing").map(row => ({ id: row.todo_id, title: row.title })),
         facts: { goesAsRequest: id => (homePolicies.get(id) ?? "owner") === "owner",
           lineCount: id => homeQueue?.principal_id === id ? homeQueue.up_next.length : null }, save: homeTodoSave, notice: homeTodoNotice,
         receive: todo?.assignee?.kind === "agent" ? peopleDialogModel().agents.find(row => row.id === (todo.assignee?.kind === "agent" ? todo.assignee.agent.id : ""))?.receive : null }, {
-        back: event => { event.preventDefault(); homeBack(); }, complete: done => { if (todo) void completeHomeTodo(todo.id, done); },
-        assign: option => { if (todo && homeTodoRead) void homeWrite((server, requestId) => server.assignTodo(workspace.id, { todo_id: todo.id, base_version: homeTodoRead!.todo.version,
-          to: { kind: option.kind === "person" ? "user" : "agent", id: option.value } }, requestId)); },
-        setStart: input => { if (!todo) return;
+        back: event => { event.preventDefault(); homeBack(); },
+        complete: done => {
+          if (!todo || !renderedTodoId || renderedVersion === null) return;
+          void completeHomeTodo(renderedTodoId, done, renderedVersion, renderedWorkspaceId);
+        },
+        assign: option => {
+          if (!todo || !renderedTodoId || renderedVersion === null) return;
+          void homeWrite((server, requestId) => server.assignTodo(
+            renderedWorkspaceId,
+            { todo_id: renderedTodoId, base_version: renderedVersion, to: { kind: option.kind === "person" ? "user" : "agent", id: option.value } },
+            requestId,
+          ));
+        },
+        setStart: input => {
+          if (!todo || !renderedTodoId || renderedVersion === null) return;
           let action: SteerAction;
           if (input.mode === "now") action = { kind: "start_now" };
           else if (input.mode === "queue") action = { kind: "gate", gate: { kind: "none" } };
           else if (input.mode === "at") action = { kind: "gate", gate: { kind: "at", at: new Date(`${input.date}T${input.time}`).toISOString() } };
           else action = { kind: "gate", gate: input.gate.kind === "todo" ? { kind: "after", todo_id: input.gate.todoId }
             : input.gate.kind === "note" ? { kind: "hold", note: input.gate.note } : { kind: "at", at: new Date(`${input.gate.date}T${input.gate.time}`).toISOString() } };
-          steerHomeTodo(todo.id, action);
-        }, comment: (body, tags) => { if (!todo) return;
+          steerHomeTodo(renderedTodoId, action, renderedVersion, renderedWorkspaceId);
+        },
+        comment: (body, tags) => {
+          if (!todo || !renderedTodoId) return;
           const options = tagOptions(ctx.people);
           const mentions: Party[] = tags.flatMap(tag => { const option = options.find(option => option.value === tag.id); return option ? [{ kind: option.kind === "person" ? "user" as const : "agent" as const, id: option.value }] : []; });
-          void homeWrite((server, requestId) => server.comment(workspace.id, { target: { kind: "todo", id: todo.id }, body, mentions }, requestId));
-        }, decide: (decision, note) => {
-          if (!todo || !homeTodoRead) return;
-          const id = homeTodoRead.todo.todo_id, baseVersion = homeTodoRead.todo.version;
+          void homeWrite((server, requestId) => server.comment(renderedWorkspaceId, { target: { kind: "todo", id: renderedTodoId }, body, mentions }, requestId));
+        },
+        decide: (decision, note) => {
+          if (!todo || !renderedTodoId || renderedVersion === null) return;
           void homeWrite(
-            (server, requestId) => server.decideTodo(workspace.id, { todo_id: id, base_version: baseVersion, decision, ...(note !== null ? { note } : {}) }, requestId),
+            (server, requestId) => server.decideTodo(
+              renderedWorkspaceId,
+              { todo_id: renderedTodoId, base_version: renderedVersion, decision, ...(note !== null ? { note } : {}) },
+              requestId,
+            ),
             () => decision === "approve" ? "Approved." : "Declined.",
           );
-        }, answerOffer: answer => {
-          if (!todo || !homeTodoRead?.todo.offer) return;
-          const offer = homeTodoRead.todo.offer, id = homeTodoRead.todo.todo_id, baseVersion = homeTodoRead.todo.version;
+        },
+        answerOffer: answer => {
+          if (!todo || !renderedTodoId || !renderedOfferId || renderedVersion === null) return;
           void homeWrite(
-            (server, requestId) => server.answerRequest(workspace.id, { todo_id: id, offer_id: offer.offer_id, base_version: baseVersion, answer }, requestId),
+            (server, requestId) => server.answerRequest(
+              renderedWorkspaceId,
+              { todo_id: renderedTodoId, offer_id: renderedOfferId, base_version: renderedVersion, answer },
+              requestId,
+            ),
             () => answer === "accept" ? "Accepted." : "Declined.",
           );
         } })]);

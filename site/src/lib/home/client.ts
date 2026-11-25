@@ -503,6 +503,24 @@ function parseTodoDecision(value: unknown): TodoDecision | null {
   return { status: value.status, by: value.by, at: value.at, note: value.note ?? null };
 }
 
+const TODO_STATES = new Set<TodoState>(['open', 'doing', 'done', 'dropped']);
+
+function parseOfferPrerequisite(value: unknown): Todo['offer_prerequisite'] {
+  if (!record(value)) return null;
+  if (
+    typeof value.todo_id !== 'string' || !value.todo_id.trim()
+    || typeof value.title !== 'string' || !value.title.trim()
+    || typeof value.state !== 'string' || !TODO_STATES.has(value.state as TodoState)
+  ) {
+    return null;
+  }
+  return {
+    todo_id: value.todo_id,
+    title: value.title,
+    state: value.state as TodoState,
+  };
+}
+
 function parseReadTodo(value: unknown): Todo {
   if (!record(value) || typeof value.todo_id !== 'string') throw new Error('home_read_malformed');
   if (value.kind !== undefined && value.kind !== 'task' && value.kind !== 'approval') {
@@ -527,11 +545,13 @@ function parseReadTodo(value: unknown): Todo {
   const decisionStatus: TodoDecisionStatus | null = value.decision_status === 'approved' || value.decision_status === 'declined'
     ? value.decision_status
     : decision?.status ?? null;
+  const offerPrerequisite = parseOfferPrerequisite(value.offer_prerequisite);
   return {
     ...(value as unknown as Todo),
     kind,
     decision_status: decisionStatus,
     decision,
+    offer_prerequisite: offerPrerequisite,
   };
 }
 

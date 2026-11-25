@@ -2153,6 +2153,60 @@ test(
       assert.equal(listedHold.has_notes, false);
       assert.deepEqual((listedHold.offer as Row).gate, { kind: "hold", note: holdGateNote });
 
+      // todo_read on an after-gated offer projects authoritative offer_prerequisite without origin_* keys,
+      // reflects updated prerequisite titles immediately, and returns offer_prerequisite: null for non-after offers.
+      const prereqCreateResp = await sendTodoTool(alice.jwt, fx.wsId, "todo_create", {
+        title: "Initial prerequisite title",
+        origin_placement: "channel",
+        origin_channel_id: privateChannelId,
+      });
+      assert.equal(prereqCreateResp.body.status, "committed", respDiag("prereqCreateResp", prereqCreateResp));
+      const prereqTodo = prereqCreateResp.body.value as Row;
+
+      const afterOfferResp = await sendTodoTool(bob.jwt, fx.wsId, "todo_create", {
+        title: "After-gated offer task",
+        assign: {
+          to: { kind: "agent", id: aliceAgent.id },
+          start: "queue",
+          gate: { kind: "after", todo_id: prereqTodo.todo_id },
+        },
+      });
+      assert.equal(afterOfferResp.body.status, "committed", respDiag("afterOfferResp", afterOfferResp));
+      const afterOfferTodo = afterOfferResp.body.value as Row;
+
+      const afterRead1 = await sendTodoTool(alice.jwt, fx.wsId, "todo_read", { todo_id: afterOfferTodo.todo_id }, randomUUID(), true);
+      assert.equal(afterRead1.body.status, "ok", respDiag("afterRead1", afterRead1));
+      const afterDetail1 = afterRead1.body.todo as Row;
+      assert.deepEqual((afterDetail1.offer as Row).gate, { kind: "after", todo_id: prereqTodo.todo_id });
+      assert.deepEqual(afterDetail1.offer_prerequisite, {
+        todo_id: prereqTodo.todo_id,
+        title: "Initial prerequisite title",
+        state: "open",
+      });
+      const prereqProj1 = afterDetail1.offer_prerequisite as Row;
+      assert.equal("origin_placement" in prereqProj1, false);
+      assert.equal("origin_channel_id" in prereqProj1, false);
+      assert.equal("origin_conversation_id" in prereqProj1, false);
+
+      const prereqUpdateResp = await sendTodoTool(alice.jwt, fx.wsId, "todo_update", {
+        todo_id: prereqTodo.todo_id,
+        base_version: prereqTodo.version,
+        title: "Updated prerequisite title",
+      });
+      assert.equal(prereqUpdateResp.body.status, "committed", respDiag("prereqUpdateResp", prereqUpdateResp));
+
+      const afterRead2 = await sendTodoTool(alice.jwt, fx.wsId, "todo_read", { todo_id: afterOfferTodo.todo_id }, randomUUID(), true);
+      assert.equal(afterRead2.body.status, "ok", respDiag("afterRead2", afterRead2));
+      assert.deepEqual((afterRead2.body.todo as Row).offer_prerequisite, {
+        todo_id: prereqTodo.todo_id,
+        title: "Updated prerequisite title",
+        state: "open",
+      });
+
+      const atRead = await sendTodoTool(alice.jwt, fx.wsId, "todo_read", { todo_id: atOfferTodo.todo_id }, randomUUID(), true);
+      assert.equal(atRead.body.status, "ok", respDiag("atRead", atRead));
+      assert.equal((atRead.body.todo as Row).offer_prerequisite, null);
+
       // todo_update on pending offer returns offer_pending_frozen.
       const frozenOfferUpdate = await sendTodoTool(bob.jwt, fx.wsId, "todo_update", {
         todo_id: atOfferTodo.todo_id,

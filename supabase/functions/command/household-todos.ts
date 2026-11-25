@@ -323,7 +323,13 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const decision = decisionStatus !== null && todo.decision_by_user && todo.decision_at
       ? { status: decisionStatus, by: todo.decision_by_user, at: todo.decision_at, note: todo.decision_note ?? null }
       : null;
-    return { ...fields, kind, decision_status: decisionStatus, decision, gate_clear: core.evaluateGate(todo.gate, current.todos, now), queue_position: upNext.findIndex(t => t.todo_id === todo.todo_id) + 1 || null };
+    const offerPrereq = todo.offer?.gate.kind === 'after' && Object.hasOwn(current.todos, todo.offer.gate.todo_id)
+      ? current.todos[todo.offer.gate.todo_id]!
+      : null;
+    const offer_prerequisite = todo.offer?.gate.kind === 'after' && offerPrereq
+      ? { todo_id: offerPrereq.todo_id, title: offerPrereq.title, state: offerPrereq.state }
+      : null;
+    return { ...fields, kind, decision_status: decisionStatus, decision, offer_prerequisite, gate_clear: core.evaluateGate(todo.gate, current.todos, now), queue_position: upNext.findIndex(t => t.todo_id === todo.todo_id) + 1 || null };
   }
   function summary(todo: Todo, current: HouseholdTodoState, now: number) {
     const v = view(todo, current, now);

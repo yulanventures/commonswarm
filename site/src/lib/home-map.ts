@@ -465,6 +465,7 @@ import type { TodoVM, ObjectCardVM, QueueRowVM } from './home-types';
 import type { AgentFoundVM } from './home-agent';
 import { ownershipLine, notYetTodoGate, notYetNoteGate, setTimeCopy, quotedTitle } from './home-agent-copy';
 import { todoSubline } from './home-todo-copy';
+import { formatExactOfferAt, TODO_GATE_NOTE_LIMIT } from './todo-offer-terms';
 export interface HomeTodoContext { workspaceId: string; people: HomePeople; viewerId: string | null; editor: boolean; sample: boolean; now: number; details?: ReadonlyMap<string, Todo>; tagDelivers?: boolean }
 export function homeParty(party: Party | null, people: HomePeople): PersonVM | AgentVM | null {
   if (!party) return null;
@@ -517,19 +518,60 @@ export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known
   let pendingOffer: TodoVM['pendingOffer'] = null;
   if (row.offer) {
     const offerGate = row.offer.gate;
-    const offerGateKind = offerGate?.kind ?? 'none';
-    const offerAfterId = offerGate?.kind === 'after' ? offerGate.todo_id : null;
-    const offerPrereq = offerAfterId ? known.find(todo => todo.todo_id === offerAfterId) : undefined;
-    const mappedOfferGate: TodoVM['pendingOffer'] extends infer _ ? NonNullable<TodoVM['pendingOffer']>['gate'] : never =
-      offerGate?.kind === 'after'
-        ? { kind: 'todo', todo: { id: offerGate.todo_id, title: offerPrereq?.title ?? 'another to-do',
+    const rawKind = offerGate && typeof offerGate === 'object' ? offerGate.kind : null;
+    let offerGateKind: NonNullable<TodoVM['pendingOffer']>['gateKind'] = 'none';
+    let mappedOfferGate: NonNullable<TodoVM['pendingOffer']>['gate'] = null;
+    let termsAvailable = false;
+    if (rawKind === 'none') {
+      offerGateKind = 'none';
+      mappedOfferGate = null;
+      termsAvailable = true;
+    } else if (rawKind === 'after' && offerGate?.kind === 'after') {
+      offerGateKind = 'after';
+      const prereq = full?.offer_prerequisite ?? null;
+      if (prereq && prereq.todo_id === offerGate.todo_id && typeof prereq.title === 'string' && prereq.title.trim().length > 0) {
+        mappedOfferGate = {
+          kind: 'todo',
+          todo: {
+            id: offerGate.todo_id,
+            title: prereq.title,
             href: routeHref({ view: 'todo', workspaceId: ctx.workspaceId, todoId: offerGate.todo_id }),
-            done: offerPrereq?.state === 'done' } }
-        : offerGate?.kind === 'at'
-          ? { kind: 'time', at: offerGate.at }
-          : offerGate?.kind === 'hold'
-            ? { kind: 'note', note: offerGate.note ?? '' }
-            : null;
+            done: prereq.state === 'done',
+          },
+        };
+        termsAvailable = true;
+      } else {
+        mappedOfferGate = null;
+        termsAvailable = false;
+      }
+    } else if (rawKind === 'at' && offerGate?.kind === 'at') {
+      offerGateKind = 'at';
+      if (typeof offerGate.at === 'string' && formatExactOfferAt(offerGate.at) !== null) {
+        mappedOfferGate = { kind: 'time', at: offerGate.at };
+        termsAvailable = true;
+      } else {
+        mappedOfferGate = null;
+        termsAvailable = false;
+      }
+    } else if (rawKind === 'hold' && offerGate?.kind === 'hold') {
+      offerGateKind = 'hold';
+      if (
+        typeof offerGate.note === 'string'
+        && offerGate.note.trim().length > 0
+        && Array.from(offerGate.note).length <= TODO_GATE_NOTE_LIMIT
+        && (offerGate as { truncated?: unknown }).truncated !== true
+      ) {
+        mappedOfferGate = { kind: 'note', note: offerGate.note };
+        termsAvailable = true;
+      } else {
+        mappedOfferGate = null;
+        termsAvailable = false;
+      }
+    } else {
+      offerGateKind = 'none';
+      mappedOfferGate = null;
+      termsAvailable = false;
+    }
     const offerByActor = full?.offer?.by ?? ('by' in row.offer ? row.offer.by ?? null : null);
     pendingOffer = {
       offerId: row.offer.offer_id,
@@ -538,6 +580,7 @@ export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known
       start: row.offer.start,
       gate: mappedOfferGate,
       gateKind: offerGateKind,
+      termsAvailable,
       deciderIsViewer: row.offer.decider_user_id === ctx.viewerId,
     };
   }

@@ -33,31 +33,62 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Formats an ISO timestamp into an unambiguous exact date and time (never a vague placeholder). */
-export function formatExactOfferAt(iso: string, timeZone?: string): string | null {
-  if (typeof iso !== "string") return null;
-  const trimmed = iso.trim();
-  if (!trimmed) return null;
-  const ms = Date.parse(trimmed);
-  if (!Number.isFinite(ms)) return null;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  }).formatToParts(new Date(ms));
+const OFFER_AT_ISO_RE = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+
+function formatExactParts(
+  ms: number,
+  timeZone: string | undefined,
+  includeZoneName: boolean,
+): { month: string; day: string; year: string; hour: string; minute: string; second: string; period: string; zone: string } | null {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+      ...(includeZoneName ? { timeZoneName: "shortOffset" as const } : {}),
+    }).formatToParts(new Date(ms));
+  } catch {
+    return null;
+  }
   const get = (type: string) => parts.find(part => part.type === type)?.value ?? "";
   const month = get("month");
   const day = get("day");
   const year = get("year");
   const hour = get("hour");
   const minute = get("minute");
+  const second = get("second");
   const period = get("dayPeriod").toLocaleLowerCase();
-  if (!month || !day || !year || !hour || !minute) return null;
-  return `${month} ${day}, ${year}, ${hour}:${minute}${period ? ` ${period}` : ""}`;
+  const rawZone = includeZoneName ? get("timeZoneName").trim() : "UTC";
+  const zone = /^GMT[+-]0(?::00)?$/u.test(rawZone) ? "GMT" : rawZone;
+  if (!month || !day || !year || !hour || !minute || !second || !period) return null;
+  return { month, day, year, hour, minute, second, period, zone };
+}
+
+/** Formats an accepted ISO timestamp into an unambiguous exact instant (seconds, non-zero ms, and explicit zone/offset). */
+export function formatExactOfferAt(iso: string, timeZone?: string): string | null {
+  if (typeof iso !== "string") return null;
+  const trimmed = iso.trim();
+  if (!OFFER_AT_ISO_RE.test(trimmed)) return null;
+  const ymd = trimmed.slice(0, 10);
+  const ymdMs = Date.parse(`${ymd}T00:00:00.000Z`);
+  if (!Number.isFinite(ymdMs) || new Date(ymdMs).toISOString().slice(0, 10) !== ymd) return null;
+  const ms = Date.parse(trimmed);
+  if (!Number.isFinite(ms)) return null;
+  const fracMs = ((ms % 1000) + 1000) % 1000;
+  const fracText = fracMs !== 0 ? `.${String(fracMs).padStart(3, "0")}` : "";
+  const formatted = formatExactParts(ms, timeZone, true);
+  if (formatted && formatted.zone) {
+    return `${formatted.month} ${formatted.day}, ${formatted.year}, ${formatted.hour}:${formatted.minute}:${formatted.second}${fracText} ${formatted.period} ${formatted.zone}`;
+  }
+  const utcFallback = formatExactParts(ms, "UTC", false);
+  if (!utcFallback) return null;
+  return `${utcFallback.month} ${utcFallback.day}, ${utcFallback.year}, ${utcFallback.hour}:${utcFallback.minute}:${utcFallback.second}${fracText} ${utcFallback.period} UTC`;
 }
 
 /**

@@ -26,6 +26,11 @@ export interface TodoOffer {
   offer_id: Uuid; to: Party; decider_user_id: Uuid;
   start: TodoStart; gate: TodoGate; by: Actor; at: IsoTime;
 }
+export interface TodoOfferPrerequisite {
+  todo_id: Uuid;
+  title: string;
+  state: TodoState;
+}
 export interface Todo {
   workspace_id: Uuid; todo_id: Uuid; version: number;
   kind?: TodoKind;
@@ -33,6 +38,7 @@ export interface Todo {
   created_by: Actor; created_at: IsoTime;
   assignee: Party | null; assigned_by: Actor | null; assigned_at: IsoTime | null;
   offer: TodoOffer | null;
+  offer_prerequisite?: TodoOfferPrerequisite | null;
   gate: TodoGate; gate_clear: boolean;   // evaluated with the server clock at read time
   queue_position: number | null;         // 1-based within the agent's up_next; else null
   state_by: Actor; state_at: IsoTime; comment_count: number;
