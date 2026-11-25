@@ -32,6 +32,7 @@ import {
   isFollowCredentialFailure,
   isRestartableReadError,
   isRetryableFollowError,
+  ListenerCredentialStateMismatchError,
   nextFollowBackoffMs,
   readAgentSignalPage,
   SIGNAL_READ_TIMEOUT_MS,
@@ -506,6 +507,43 @@ export function isRestartableListenerStop(stop: ListenerRuntimeStop): boolean {
  * That is the safe direction: a missed restart is a stopped listener an
  * operator can see, while a wrong restart is work repeated against a server.
  */
+const TRANSIENT_NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function isTransientNetworkError(
+  error: unknown,
+  depth = 0,
+  seen = new Set<unknown>(),
+): boolean {
+  if (!error || typeof error !== "object" || depth > 4 || seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as { code?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof record.code === "string" && TRANSIENT_NETWORK_ERROR_CODES.has(record.code)) {
+    return true;
+  }
+  if (Array.isArray(record.errors) && record.errors.length > 0) {
+    if (record.errors.every((inner) => isTransientNetworkError(inner, depth + 1, seen))) {
+      return true;
+    }
+  }
+  if (record.cause !== undefined) {
+    return isTransientNetworkError(record.cause, depth + 1, seen);
+  }
+  return false;
+}
+
 function isRestartableRuntimeError(error: unknown): boolean {
   if (
     error instanceof ListenerH0SeatError ||
@@ -549,13 +587,19 @@ function isRestartableRuntimeError(error: unknown): boolean {
 
   if (
     error instanceof RenewalReauthorisationRequired ||
-    error instanceof RenewalRevoked
+    error instanceof RenewalRevoked ||
+    error instanceof ListenerCredentialStateMismatchError
   ) {
     return false;
   }
 
-  return !fatalReadRefusal(error) &&
-    (isRestartableReadError(error) || isForeignReadResponseFailure(error));
+  if (fatalReadRefusal(error)) {
+    return false;
+  }
+
+  return isRestartableReadError(error) ||
+    isForeignReadResponseFailure(error) ||
+    isTransientNetworkError(error);
 }
 
 function isForeignReadResponseFailure(error: unknown): boolean {

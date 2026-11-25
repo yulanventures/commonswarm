@@ -1,6 +1,7 @@
 import { fetchRestReadRetrying } from "./rest-read-retry.js";
 import type { CloudTarget } from "./config.js";
 import type { AgentPresenceRow } from "./agent-presence.js";
+import type { SeatStatus } from "../protocol/seat-status.js";
 import { sanitizeDisplayLabel } from "./invite-link.js";
 import {
   describeRenewalGrant,
@@ -86,6 +87,8 @@ export interface WorkspaceAgent {
   revoked: boolean;
   this_machine: boolean;
   renewal_grant?: RenewalGrantStatus;
+  seat_status?: SeatStatus;
+  local_listener_failure?: string | null;
 }
 
 export interface WorkspaceHolder {
@@ -453,6 +456,84 @@ export async function readWorkspaceAgentPresence(
     };
   });
   return { available: true, rows: presenceRows };
+}
+
+export interface WorkspaceAgentWakePath {
+  principal_id: string;
+  oldest_unobserved_at: string | null;
+  unseen_count: number;
+}
+
+export interface WorkspaceAgentWakePathRead {
+  available: boolean;
+  rows: WorkspaceAgentWakePath[];
+}
+
+export async function readWorkspaceAgentWakePath(
+  target: CloudTarget,
+  bearer: string,
+  workspaceId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<WorkspaceAgentWakePathRead> {
+  const selected = checkedUuid(workspaceId, "workspace_id");
+  const url = new URL("/rest/v1/agent_wake_path", target.url);
+  url.searchParams.set("select", "workspace_id,principal_id,oldest_unobserved_at,unseen_count");
+  url.searchParams.set("workspace_id", `eq.${selected}`);
+  url.searchParams.set("order", "principal_id.asc");
+  let response: Response;
+  try {
+    response = await fetchRestReadRetrying(fetcher, url, {
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        apikey: target.anonKey,
+        "accept-profile": "swarm_read",
+      },
+    });
+  } catch {
+    throw new Error("agent wake path read could not reach the cloud service");
+  }
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    if (missingAgentPresenceView(response.status, body)) {
+      return { available: false, rows: [] };
+    }
+    throw new Error(`agent wake path read failed (HTTP ${response.status})`);
+  }
+  if (
+    !Array.isArray(body) ||
+    body.some((entry) => !entry || typeof entry !== "object" || Array.isArray(entry))
+  ) {
+    throw new Error("agent wake path read returned malformed JSON");
+  }
+  const seen = new Set<string>();
+  const wakeRows = body.map((value): WorkspaceAgentWakePath => {
+    const row = value as Record<string, unknown>;
+    if (checkedUuid(row.workspace_id, "workspace_id") !== selected) {
+      throw new Error("agent wake path read returned a cross-workspace row");
+    }
+    const principalId = checkedUuid(row.principal_id, "principal_id");
+    if (seen.has(principalId)) {
+      throw new Error("agent wake path read returned a duplicate principal");
+    }
+    seen.add(principalId);
+    const unseenRaw = row.unseen_count;
+    const unseenCount = typeof unseenRaw === "number" && Number.isSafeInteger(unseenRaw) && unseenRaw >= 0
+      ? unseenRaw
+      : typeof unseenRaw === "string" && /^\d+$/.test(unseenRaw)
+      ? Number.parseInt(unseenRaw, 10)
+      : (() => {
+        throw new Error("agent wake path read returned a malformed unseen_count");
+      })();
+    return {
+      principal_id: principalId,
+      oldest_unobserved_at: checkedNullableTimestamp(
+        row.oldest_unobserved_at,
+        "oldest_unobserved_at",
+      ),
+      unseen_count: unseenCount,
+    };
+  });
+  return { available: true, rows: wakeRows };
 }
 
 export interface WorkspaceDirectory {
@@ -1027,8 +1108,14 @@ export function renderStatus(options: RenderStatusOptions): string {
       const owner = agent.owner_name === null
         ? agent.owner_user_id
         : `${agent.owner_name} (${agent.owner_user_id})`;
+      const seatLabel = agent.seat_status
+        ? agent.seat_status.line
+        : (agent.revoked ? "revoked" : "live");
+      const localFailureSuffix = agent.local_listener_failure
+        ? ` (local listener failed: ${agent.local_listener_failure})`
+        : "";
       lines.push(
-        `- ${agent.name} (${agent.principal_id}) — ${agent.revoked ? "revoked" : "live"} — belongs to ${owner}${
+        `- ${agent.name} (${agent.principal_id}) — ${seatLabel}${localFailureSuffix} — belongs to ${owner}${
           agent.this_machine ? " — this machine" : ""
         }`,
       );

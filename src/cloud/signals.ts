@@ -38,6 +38,7 @@ import { normalizeReactionEmoji } from "../protocol/signal-reactions.js";
 import type { ReplyTarget } from "../protocol/reply-placement.js";
 import type { MentionRosterEntry } from "../protocol/mention-address.js";
 import type { SeatWakeInput } from "../protocol/seat-status.js";
+import type { AgentPresenceRow } from "./agent-presence.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1504,6 +1505,8 @@ export interface SignalAgent {
   principal_id: string;
   name: string;
   owner_user_id?: string;
+  /** Coarse wake/presence timestamps projected from swarm_read.agent_presence when present. */
+  presence?: AgentPresenceRow;
 }
 
 /** The principal proven by the bearer credential, not by client-held metadata. */
@@ -1558,6 +1561,51 @@ function parseAgentMemberRow(value: unknown): SignalAgent {
     (typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 1)) {
     throw new SignalMalformedError("member read returned a malformed agent generation");
   }
+  const hasPresenceProjection =
+    "last_command_at" in row &&
+    "client_build" in row &&
+    "watcher_at" in row &&
+    "channel_at" in row &&
+    "listener_at" in row &&
+    "turn_at" in row &&
+    "last_ack_via" in row &&
+    "last_ack_at" in row &&
+    "current_client_build" in row;
+  let presence: AgentPresenceRow | undefined;
+  if (hasPresenceProjection) {
+    const ackVia = row.last_ack_via;
+    if (ackVia !== null && ackVia !== "leased" && ackVia !== "unclaimed") {
+      throw new SignalMalformedError("member read returned a malformed agent last_ack_via");
+    }
+    const nullablePresenceTimestamp = (candidate: unknown, field: string): string | null => {
+      if (candidate === null) return null;
+      if (typeof candidate !== "string" || !Number.isFinite(Date.parse(candidate))) {
+        throw new SignalMalformedError(`member read returned a malformed agent ${field}`);
+      }
+      return candidate;
+    };
+    const nullablePresenceString = (candidate: unknown, field: string): string | null => {
+      if (candidate === null) return null;
+      if (typeof candidate !== "string") {
+        throw new SignalMalformedError(`member read returned a malformed agent ${field}`);
+      }
+      return candidate;
+    };
+    presence = {
+      last_command_at: nullablePresenceTimestamp(row.last_command_at, "last_command_at"),
+      client_build: nullablePresenceString(row.client_build, "client_build"),
+      watcher_at: nullablePresenceTimestamp(row.watcher_at, "watcher_at"),
+      channel_at: nullablePresenceTimestamp(row.channel_at, "channel_at"),
+      listener_at: nullablePresenceTimestamp(row.listener_at, "listener_at"),
+      turn_at: nullablePresenceTimestamp(row.turn_at, "turn_at"),
+      last_ack_via: ackVia,
+      last_ack_at: nullablePresenceTimestamp(row.last_ack_at, "last_ack_at"),
+      current_client_build: nullablePresenceString(
+        row.current_client_build,
+        "current_client_build",
+      ),
+    };
+  }
   return {
     ...(row.model === undefined ? {} : { model: row.model as string | null }),
     ...(row.transport === undefined
@@ -1570,6 +1618,7 @@ function parseAgentMemberRow(value: unknown): SignalAgent {
     ...(row.owner_user_id === undefined
       ? {}
       : { owner_user_id: checkedUuid(row.owner_user_id, "agent owner_user_id") }),
+    ...(presence === undefined ? {} : { presence }),
   };
 }
 

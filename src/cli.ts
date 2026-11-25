@@ -151,7 +151,7 @@ import {
   type StreamRoute,
 } from "./cloud/command-client.js";
 import { normalizeReactionEmoji, SIGNAL_REACTION_EMOJI_RULE } from "./protocol/signal-reactions.js";
-import { classifyRosterSeatStatus } from "./protocol/seat-status.js";
+import { classifyRosterSeatStatus, classifySeatStatus } from "./protocol/seat-status.js";
 import {
   isReplyStatus,
   REPLY_STATUSES,
@@ -327,6 +327,7 @@ import {
   renderStatus,
   renderWorkspaces,
   readWorkspaceAgentPresence,
+  readWorkspaceAgentWakePath,
   resolveWorkspace,
   resolveWorkspaceSelector,
   selectWorkspace,
@@ -480,6 +481,10 @@ import {
   stopListener,
   queryListenerControl,
   readListenerStatusIfPresent,
+  checkLocalSeatWakeHealth,
+  writeAttendedCanaryStatus,
+  type AttendedCanaryPersistedState,
+  type CheckLocalSeatWakeHealthOptions,
   waitForListenerReady,
   LISTENER_PROMPT_TIMEOUT_MS,
   ListenerRenewalUnavailableError,
@@ -765,7 +770,7 @@ export const KNOWN_FLAGS = new Set([
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "github-api-url", "github-token-file", "github-token-stdin", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel", "before", "grant-id",
   "help", "input-file", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
-  "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out", "policy-file", "source", "suite",
+  "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "exit-on-arrival", "take-over", "opencode-executable", "out", "policy-file", "source", "suite",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
   "parent", "supersedes", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
@@ -803,6 +808,7 @@ export const BOOLEAN_FLAGS = new Set([
   "mentions",
   "ndjson",
   "notify",
+  "exit-on-arrival",
   "take-over",
   "no-browser",
   "reveal-anon-key",
@@ -958,6 +964,15 @@ export class Arguments {
     this.expandedProfileInputPath = path;
     this.expandedProfilePath = agentWorkspaceStatePath(path,profile.workspace_id,selectedProfile.workspace_id);
     this.expandedProfileHostSessionId = this.optional("host-session-id");
+    recordResolvedAgentSeat({
+      profileId: profileTarget(selectedProfile).profileId,
+      workspaceId: selectedProfile.workspace_id,
+      principalId: selectedProfile.principal_id,
+      profilePath: path,
+      ...(this.expandedProfileHostSessionId !== undefined
+        ? { hostSessionId: this.expandedProfileHostSessionId }
+        : {}),
+    });
     if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(selectedProfile, this.required("host-session-id"));
       const fallback=selected ?? (selectedProfile.workspace_id!==profile.workspace_id ? await profileSessionContext(profile,this.required('host-session-id')) : null);
@@ -1011,7 +1026,7 @@ function requireProfileWithHostSessionId(args: Arguments): void {
 const SESSION_CONTEXT_FLAGS = ["session-context"] as const;
 const NOTIFY_PATH_FLAGS = new Set(["agent-token-file", "profile", "session-context"]);
 export const NOTIFY_ACCEPTED_FLAGS = [
-  ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, NOTIFY_FLAG, "take-over", "json", ...SESSION_CONTEXT_FLAGS,
+  ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, NOTIFY_FLAG, "exit-on-arrival", "take-over", "json", ...SESSION_CONTEXT_FLAGS,
 ] as const;
 
 export function notifyRestartOptions(args: Arguments): NotifyRestartOptions {
@@ -2224,7 +2239,7 @@ async function runStatus(args: Arguments): Promise<void> {
     (project) => project.workspace_id === selectedWorkspaceId,
   );
   if (!selected) throw new WorkspaceUnavailableError();
-  const [baseStatus, signalStatus, renewalGrants] = await Promise.all([
+  const [baseStatus, signalStatus, renewalGrants, presenceRead, wakePathRead] = await Promise.all([
     directory.status(human, selectedWorkspaceId),
     settleSignalStatus(
       readSignals(cloud, {
@@ -2253,18 +2268,81 @@ async function runStatus(args: Arguments): Promise<void> {
       selectedWorkspaceId,
       human.fetcher,
     ),
+    readWorkspaceAgentPresence(
+      cloud,
+      human.accessToken,
+      selectedWorkspaceId,
+      human.fetcher,
+    ).catch(() => ({ available: false, rows: [] })),
+    readWorkspaceAgentWakePath(
+      cloud,
+      human.accessToken,
+      selectedWorkspaceId,
+      human.fetcher,
+    ).catch(() => ({ available: false, rows: [] })),
   ]);
   const grantsByPrincipal = new Map(
     renewalGrants.map((grant) => [grant.principal_id, grant]),
   );
+  const presenceByPrincipal = new Map(
+    presenceRead.rows.map((row) => [row.principal_id, row]),
+  );
+  const wakePathByPrincipal = new Map(
+    wakePathRead.rows.map((row) => [row.principal_id, row]),
+  );
+  const now = Date.now();
+  const enrichedAgents = await Promise.all(
+    baseStatus.agents.map(async (agent) => {
+      const grant = grantsByPrincipal.get(agent.principal_id);
+      const localHealth = agent.transport === "local"
+        ? await checkLocalSeatWakeHealth({
+            profileId: cloud.profileId,
+            workspaceId: selectedWorkspaceId,
+            principalId: agent.principal_id,
+            now,
+          }).catch(() => null)
+        : null;
+      const localListenerFailure =
+        localHealth !== null && localHealth.listener.effective_state === "failed"
+          ? (localHealth.listener.error_code ?? "unknown")
+          : null;
+      const connection = agent.revoked
+        ? "removed"
+        : grant?.revoked_at != null
+        ? "key_off"
+        : grant?.suspended_at != null
+        ? "paused"
+        : grant?.connection_expired_at != null
+        ? "key_ended"
+        : "live";
+      const wakePath = wakePathByPrincipal.get(agent.principal_id);
+      const seatStatus = presenceRead.available || wakePathRead.available
+        ? classifySeatStatus({
+            transport: agent.transport,
+            turnOnly: agent.turn_only,
+            connection,
+            revoked: agent.revoked,
+            suspended: grant?.suspended_at != null,
+            ...(presenceRead.available
+              ? { presence: presenceByPrincipal.get(agent.principal_id) ?? null }
+              : {}),
+            waitingSince: wakePath?.oldest_unobserved_at ?? null,
+            unseenCount: wakePath?.unseen_count ?? null,
+          }, now)
+        : undefined;
+      return {
+        ...agent,
+        ...(grant !== undefined ? { renewal_grant: grant } : {}),
+        ...(seatStatus !== undefined ? { seat_status: seatStatus } : {}),
+        ...(localListenerFailure !== null
+          ? { local_listener_failure: localListenerFailure }
+          : {}),
+      };
+    }),
+  );
   const status: WorkspaceStatus = {
     ...baseStatus,
-    agents: baseStatus.agents.map((agent) => ({
-      ...agent,
-      ...(grantsByPrincipal.has(agent.principal_id)
-        ? { renewal_grant: grantsByPrincipal.get(agent.principal_id)! }
-        : {}),
-    })),
+    agents: enrichedAgents,
   };
   const statusWarnings: Array<
     WorkspaceWarning | { code: "signal_status_unavailable"; message: string }
@@ -3517,6 +3595,19 @@ async function commandWorkspaceAndCredential(
       );
     }
     const agent = await agentCredential(args);
+    if (agent.principalId !== null) {
+      recordResolvedAgentSeat({
+        profileId: cloud.profileId,
+        workspaceId: override,
+        principalId: agent.principalId,
+        ...(args.expandedProfileInputPath !== undefined
+          ? { profilePath: args.expandedProfileInputPath }
+          : {}),
+        ...(args.expandedProfileHostSessionId !== undefined
+          ? { hostSessionId: args.expandedProfileHostSessionId }
+          : {}),
+      });
+    }
     /* With --session-context the silent token renewal below is an agent write
        too (spec section 8: renewal is fenced), so the context is read first and
        local identity is checked BEFORE the session is opened. Opening can
@@ -5889,6 +5980,42 @@ async function runWhoami(args: Arguments): Promise<void> {
       host_session_id: null,
     };
   }
+  const ownSeatStatus = principal.presence !== undefined
+    ? classifySeatStatus({
+        transport: principal.transport ?? "local",
+        turnOnly: principal.turn_only === true,
+        connection: renewalGrantStatus === "revoked"
+          ? "key_off"
+          : renewalGrantStatus === "suspended"
+          ? "paused"
+          : renewalGrantStatus === "expired"
+          ? "key_ended"
+          : "live",
+        presence: principal.presence,
+      })
+    : null;
+  const localHealth = await checkLocalSeatWakeHealth({
+    profileId: cloud.profileId,
+    workspaceId: identity.workspace_id,
+    principalId: identity.principal_id,
+    ...(args.expandedProfileInputPath !== undefined
+      ? { profilePath: args.expandedProfileInputPath }
+      : {}),
+    ...(args.expandedProfileHostSessionId !== undefined
+      ? { hostSessionId: args.expandedProfileHostSessionId }
+      : {}),
+  });
+  recordResolvedAgentSeat({
+    profileId: cloud.profileId,
+    workspaceId: identity.workspace_id,
+    principalId: identity.principal_id,
+    ...(args.expandedProfileInputPath !== undefined
+      ? { profilePath: args.expandedProfileInputPath }
+      : {}),
+    ...(args.expandedProfileHostSessionId !== undefined
+      ? { hostSessionId: args.expandedProfileHostSessionId }
+      : {}),
+  });
   const output = {
     credential_valid: identity.credential_valid,
     principal_id: identity.principal_id,
@@ -5907,6 +6034,8 @@ async function runWhoami(args: Arguments): Promise<void> {
     wake_route: wakeRoute,
     ...(wakeRouteReason !== null ? { wake_route_reason: wakeRouteReason } : {}),
     wake_verified: wakeVerified,
+    ...(ownSeatStatus !== null ? { seat_status: ownSeatStatus } : {}),
+    listener_health: localHealth,
     renewal_grant: activeGrant,
     workspace: {
       workspace_id: identity.workspace_id,
@@ -5918,6 +6047,8 @@ async function runWhoami(args: Arguments): Promise<void> {
       principal_id: identity.principal_id,
       display_name: displayName,
       status: "active" as const,
+      ...(ownSeatStatus !== null ? { seat_status: ownSeatStatus } : {}),
+      listener_health: localHealth,
       owner_user_id: identity.owner_user_id,
       owner_display_name: ownerName,
       renewal_grant_status: renewalGrantStatus,
@@ -5943,7 +6074,13 @@ async function runWhoami(args: Arguments): Promise<void> {
         ? "Role: workspace lead (untagged channel messages route to you).\n"
         : "") +
       `Owner: ${ownerName} (${identity.owner_user_id}).\n` +
+      (ownSeatStatus !== null ? `Seat status: ${ownSeatStatus.line}.\n` : "") +
       `${formatWakeRouteLine(wakeRoute, wakeVerified, wakeRouteReason)}\n` +
+      (!localHealth.healthy
+        ? localHealth.warnings
+            .map((warning) => `Listener health: ${warning.replace(/^cswarm: warning: /, "")}\n`)
+            .join("")
+        : "") +
       (output.renewal_grant === null
         ? "Grant: no current renewal grant is visible. Next step: ask a workspace owner to mint a new credential.\n"
         : `${describeRenewalGrant(output.renewal_grant).join("\n")}\n`),
@@ -6545,6 +6682,21 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       lost: (error) => { watchFailure = error; if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error); controller.abort(); },
       failed: (error) => { watchFailure = error; controller.abort(); },
     });
+    const exitOnArrival = args.has("exit-on-arrival");
+    const stdoutConsumer = systemStdoutConsumer(
+      Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2)),
+      testProcRoot === undefined ? {} : { procRoot: testProcRoot },
+    );
+    try {
+      const initialStdoutState = await stdoutConsumer.inspect(process.pid, controller.signal);
+      if (!controller.signal.aborted && initialStdoutState === "not_pipe") {
+        process.stderr.write(
+          "cswarm: warning: stdout is redirected to a file or sink rather than a live pipe, so arrivals will not wake this session unless a reader watches the output.\n",
+        );
+      }
+    } catch {
+      // Startup stdout check is advisory only.
+    }
     const retryNotices = createArrivalRetryNoticePolicy();
     const cursorStore = fileArrivalCursorStore({
       target: cloud,
@@ -6557,13 +6709,10 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       store: cursorStore,
       signal: controller.signal,
       wake,
-      stdoutConsumer: systemStdoutConsumer(
-        Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2)),
-        testProcRoot === undefined ? {} : { procRoot: testProcRoot },
-      ),
+      stdoutConsumer,
       stdoutCheckIntervalMs,
       onReady: async () => {
-        if (attendedCanaryTask !== null) return;
+        if (exitOnArrival || attendedCanaryTask !== null) return;
         attendedCanaryTask = (async () => {
           const canaryPaths = listenerPaths({
             profileId: cloud.profileId,
@@ -6589,6 +6738,23 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
             },
           });
           if (controller.signal.aborted) return;
+          const persistedCanaryState: AttendedCanaryPersistedState | null =
+            canary.wakeLeaseReadError !== null ||
+            (canary.receiptReadErrorCode !== null && canary.observedAt === null)
+              ? null
+              : canary.stalledAt === "observed"
+              ? "stalled_observed"
+              : canary.stalledAt === "watcher_polled"
+              ? "stalled_watcher"
+              : "proved";
+          if (persistedCanaryState !== null) {
+            await writeAttendedCanaryStatus(canaryPaths, {
+              state: persistedCanaryState,
+              updated_at: new Date().toISOString(),
+              workspace_id: selected.selectedWorkspace,
+              principal_id: principalId,
+            }).catch(() => undefined);
+          }
           // stdout is the Monitor wake surface. The self-note notification is
           // the one intentional wake; report the result on stderr, not twice.
           process.stderr.write(`${args.has("json")
@@ -6635,7 +6801,11 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
             ? JSON.stringify(notification)
             : formatArrivalNotification(notification),
         );
-        if (signal.id === attendedCanarySignalId) markAttendedCanaryEmitted();
+        if (signal.id === attendedCanarySignalId) {
+          markAttendedCanaryEmitted();
+        } else if (exitOnArrival) {
+          controller.abort();
+        }
       },
       /* No acknowledgement here. The watcher writes arrival lines to its own stdout, which runs in the
        * background: nothing proves the agent's session read them (a host can keep a background task
@@ -12151,7 +12321,7 @@ const acceptVariants = {
 };
 const inboxVariants = {
   read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]"]),
-  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),
+  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--exit-on-arrival] [--json]"]),
   follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]"]),
 };
 
@@ -13054,10 +13224,40 @@ let selectedCommandContext: {
   args: Arguments;
 } | null = null;
 
+let lastResolvedAgentSeat: CheckLocalSeatWakeHealthOptions | null = null;
+
+function recordResolvedAgentSeat(seat: CheckLocalSeatWakeHealthOptions): void {
+  lastResolvedAgentSeat = seat;
+}
+
+function currentResolvedAgentSeat(): CheckLocalSeatWakeHealthOptions | null {
+  return lastResolvedAgentSeat;
+}
+
+function shouldSkipLocalWakeHealthNotice(verb: string, args: Arguments): boolean {
+  if (
+    verb === "listen" ||
+    verb === "hook" ||
+    verb === "receive" ||
+    verb === "mcp" ||
+    verb === "__listen-supervisor"
+  ) {
+    return true;
+  }
+  if (verb === "inbox" && (args.has(NOTIFY_FLAG) || args.has("follow"))) {
+    return true;
+  }
+  if (verb === "check" && args.has("hook")) {
+    return true;
+  }
+  return false;
+}
+
 export const MAIN_1_ACCEPTED_FLAGS = [] as const;
 
 async function main(): Promise<void> {
   selectedCommandContext = null;
+  lastResolvedAgentSeat = null;
   /*
    * Meta-command rule, copied from the conditions below: a leading --version
    * or -v; args.has("help"); the bare verb help; or !verb (no POSITIONAL).
@@ -13097,6 +13297,36 @@ async function main(): Promise<void> {
   selectedCommandContext = { entry, variant, args };
   await args.expandAgentProfile(entry.profile, entry.hostSessionId);
   await variant.handler(args);
+  if (!shouldSkipLocalWakeHealthNotice(verb, args)) {
+    let seat: CheckLocalSeatWakeHealthOptions | null = currentResolvedAgentSeat();
+    if (seat === null && verb === "check" && args.optional("profile") !== undefined) {
+      try {
+        const profilePath = args.required("profile");
+        const hostSessionId = args.optional("host-session-id");
+        const homeProfile = await readAgentProfile(profilePath, hostSessionId);
+        const selectedProfile = selectAgentWorkspace(homeProfile, args.optional("workspace-id"));
+        seat = {
+          profileId: profileTarget(selectedProfile).profileId,
+          workspaceId: selectedProfile.workspace_id,
+          principalId: selectedProfile.principal_id,
+          profilePath,
+          ...(hostSessionId !== undefined ? { hostSessionId } : {}),
+        };
+      } catch {
+        seat = null;
+      }
+    }
+    if (seat !== null) {
+      try {
+        const localHealth = await checkLocalSeatWakeHealth(seat);
+        for (const warning of localHealth.warnings) {
+          process.stderr.write(`${warning}\n`);
+        }
+      } catch {
+        // Advisory local wake health check must never break a succeeded command.
+      }
+    }
+  }
 }
 
 /**
