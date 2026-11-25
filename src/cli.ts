@@ -4973,9 +4973,10 @@ export function formatOpenAsksTable(page: MyOpenAsksPage, nowMs: number = Date.n
   });
   if (page.truncated && page.asks.length > 0) {
     const last = page.asks[page.asks.length - 1]!;
-    lines.push(
-      `Showing ${page.asks.length} of ${page.total} open asks. Pass --after-created-at ${last.created_at} --after-id ${last.signal_id} for more.`,
-    );
+    const summary =
+      `Showing ${page.asks.length} of ${page.total} open asks. Pass --after-created-at ${last.created_at} --after-id ${last.signal_id} for more.`;
+    lines.unshift(summary);
+    lines.push(summary);
   }
   return `${lines.join("\n")}\n`;
 }

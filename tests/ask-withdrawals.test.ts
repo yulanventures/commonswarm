@@ -467,7 +467,71 @@ test("formatOpenAsksTable renders empty state and compact open-asks table withou
   assert.match(rendered, /to:Owner/);
   assert.match(rendered, /#general/);
   assert.match(rendered, /Should we ship the release today\?/);
+  assert.doesNotMatch(rendered, /Showing /);
+  assert.equal(rendered.trimEnd().split("\n").length, 1);
   assert.doesNotMatch(rendered, /dismiss/i, "CLI open-asks row must never mention dismissals");
+});
+
+test("formatOpenAsksTable prints truncation summary first and last only when truncated", () => {
+  const nowMs = Date.parse("2026-11-23T12:00:00Z");
+  const truncatedOut = formatOpenAsksTable(
+    {
+      workspace_id: WS_ID,
+      generated_at: "2026-11-23T12:00:00Z",
+      total: 77,
+      truncated: true,
+      asks: [
+        {
+          signal_id: ASK_ID,
+          created_at: "2026-11-23T10:00:00Z",
+          until: "2026-11-30T10:00:00Z",
+          addressees: ["Owner"],
+          where: "#general",
+          body_preview: "First open ask?",
+        },
+        {
+          signal_id: NEW_ASK_ID,
+          created_at: "2026-11-23T11:00:00Z",
+          until: "2026-11-30T11:00:00Z",
+          addressees: [],
+          where: "DM",
+          body_preview: "Second open ask?",
+        },
+      ],
+    },
+    nowMs,
+  );
+  const expectedSummary =
+    `Showing 2 of 77 open asks. Pass --after-created-at 2026-11-23T11:00:00Z --after-id ${NEW_ASK_ID} for more.`;
+  const truncatedLines = truncatedOut.trimEnd().split("\n");
+  assert.equal(truncatedLines.length, 4);
+  assert.equal(truncatedLines[0], expectedSummary);
+  assert.match(truncatedLines[1]!, new RegExp(`^${ASK_ID}\\s+2h\\s+to:Owner\\s+#general\\s+First open ask\\?$`));
+  assert.match(truncatedLines[2]!, new RegExp(`^${NEW_ASK_ID}\\s+1h\\s+to:everyone\\s+DM\\s+Second open ask\\?$`));
+  assert.equal(truncatedLines[truncatedLines.length - 1], expectedSummary);
+
+  // Final page after cursor pagination (total > page.asks.length, truncated: false) must not emit a truncation header.
+  const finalPageOut = formatOpenAsksTable(
+    {
+      workspace_id: WS_ID,
+      generated_at: "2026-11-23T12:00:00Z",
+      total: 77,
+      truncated: false,
+      asks: [
+        {
+          signal_id: NEW_ASK_ID,
+          created_at: "2026-11-23T11:00:00Z",
+          until: "2026-11-30T11:00:00Z",
+          addressees: ["Owner"],
+          where: "DM",
+          body_preview: "Last page ask?",
+        },
+      ],
+    },
+    nowMs,
+  );
+  assert.doesNotMatch(finalPageOut, /Showing /);
+  assert.equal(finalPageOut.trimEnd().split("\n").length, 1);
 });
 
 test("ask help gives accurate descriptions for withdraw and open without --attach text", () => {

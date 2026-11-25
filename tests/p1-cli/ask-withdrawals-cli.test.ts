@@ -112,11 +112,12 @@ test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against m
           });
         }
         if (body.resource === "my_open_asks") {
+          const isTruncated = body.limit === 1;
           return send(200, {
             workspace_id: WS_ID,
             generated_at: "2026-11-23T12:02:00Z",
-            total: 1,
-            truncated: false,
+            total: isTruncated ? 3 : 1,
+            truncated: isTruncated,
             asks: [
               {
                 signal_id: NEW_ASK_ID,
@@ -199,20 +200,43 @@ test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against m
     assert.match(supOut.stdout, /Updated question|Sent|55555555-5555-4555-8555-555555555555/);
     assert.equal((commands.at(-1)?.command as Record<string, unknown>).supersedes, ASK_ID);
 
-    // 3. cswarm ask open (table) and cswarm ask open --json
+    // 3. cswarm ask open (table, truncated table, and --json)
     const openTable = await runCli(root, ["ask", "open", "--profile", profilePath]);
     assert.equal(openTable.code, 0, openTable.stderr);
     assert.match(openTable.stdout, /55555555-5555-4555-8555-555555555555/);
     assert.match(openTable.stdout, /Updated question\?/);
+    assert.doesNotMatch(openTable.stdout, /Showing /);
+    assert.equal(openTable.stdout.trimEnd().split("\n").length, 1);
     assert.doesNotMatch(openTable.stdout, /dismiss/i);
+
+    const openTruncated = await runCli(root, ["ask", "open", "--limit", "1", "--profile", profilePath]);
+    assert.equal(openTruncated.code, 0, openTruncated.stderr);
+    const expectedSummary =
+      `Showing 1 of 3 open asks. Pass --after-created-at 2026-11-23T12:01:00Z --after-id ${NEW_ASK_ID} for more.`;
+    const openTruncatedLines = openTruncated.stdout.trimEnd().split("\n");
+    assert.equal(openTruncatedLines.length, 3);
+    assert.equal(openTruncatedLines[0], expectedSummary);
+    assert.match(openTruncatedLines[1]!, /55555555-5555-4555-8555-555555555555/);
+    assert.equal(openTruncatedLines[openTruncatedLines.length - 1], expectedSummary);
 
     const openJson = await runCli(root, ["ask", "open", "--json", "--profile", profilePath]);
     assert.equal(openJson.code, 0, openJson.stderr);
     assert.doesNotMatch(openJson.stdout, /dismiss/i);
-    const parsed = JSON.parse(openJson.stdout) as { asks: Array<{ signal_id: string }> };
+    const parsed = JSON.parse(openJson.stdout) as { total: number; truncated: boolean; asks: Array<{ signal_id: string }> };
+    assert.equal(parsed.total, 1);
+    assert.equal(parsed.truncated, false);
     assert.equal(parsed.asks.length, 1);
     assert.equal(parsed.asks[0]!.signal_id, NEW_ASK_ID);
     assert.ok(reads.some((r) => r.resource === "my_open_asks"));
+
+    const openTruncatedJson = await runCli(root, ["ask", "open", "--limit", "1", "--json", "--profile", profilePath]);
+    assert.equal(openTruncatedJson.code, 0, openTruncatedJson.stderr);
+    assert.doesNotMatch(openTruncatedJson.stdout, /Showing /);
+    const parsedTruncated = JSON.parse(openTruncatedJson.stdout) as { total: number; truncated: boolean; asks: Array<{ signal_id: string }> };
+    assert.equal(parsedTruncated.total, 3);
+    assert.equal(parsedTruncated.truncated, true);
+    assert.equal(parsedTruncated.asks.length, 1);
+    assert.equal(parsedTruncated.asks[0]!.signal_id, NEW_ASK_ID);
 
     // 4. cswarm ask withdraw --help and cswarm ask open --help
     const wdHelp = await runCli(root, ["ask", "withdraw", "--help"]);
