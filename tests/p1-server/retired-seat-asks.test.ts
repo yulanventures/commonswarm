@@ -2729,7 +2729,10 @@ test(
     const wsB = await createServedWorkspace({
       name: "RSA-3-B",
       owner,
-      members: [{ user: addressee, role: "member" }],
+      members: [
+        { user: adminDemote, role: "admin" },
+        { user: addressee, role: "member" },
+      ],
       sameOrgAsWorkspaceId: wsA,
     });
     const wsArchive = await createServedWorkspace({
@@ -2940,12 +2943,12 @@ test(
         },
       );
 
-      step("Suite 3.3: concurrent reconnect Outcome B (clear holds Step 17 at audit_log -> sibling-W2 mint waits, then succeeds)");
+      step("Suite 3.3: concurrent reconnect Outcome B (wsB clear holds Step 17 at audit_log -> home-wsA mint waits on wsB Step 17, then succeeds)");
       const raceB = await createLocalAgent({ wsId: wsA, owner, name: "RaceReconB" });
       assert.equal((await sendCommand(owner.jwt, wsB, { kind: "add_agent_to_workspace", principal_id: raceB.principalId })).status, 200);
       const raceBPreAsk = postedSignalId(
         "raceBPreAsk",
-        await sendCommand(raceB.token, wsA, {
+        await sendCommand(raceB.token, wsB, {
           kind: "post_signal",
           signal_kind: "ask",
           to_user_id: addressee.id,
@@ -2963,16 +2966,19 @@ test(
           await tx`LOCK TABLE swarm.audit_log IN EXCLUSIVE MODE`;
         },
         async ({ holderPid, rollbackHolder, trackPending }) => {
-          // Real HTTP clear (by adminDemote so owner's users row only takes FOR KEY SHARE, letting owner's
-          // sibling-wsB mint reach Step 17!) acquires Step 3/5/17 locks, writes cutoff & bumps epoch, then blocks on audit_log!
+          // Real HTTP clear in wsB (by adminDemote so owner's users row only takes FOR KEY SHARE, letting
+          // owner's home-wsA mint reach Step 17!) acquires Step 3/5/17 locks on wsB, writes cutoff & bumps
+          // wsB epoch, then blocks on audit_log!
           const pendingClear = trackPending(
-            sendCommand(adminDemote.jwt, wsA, { kind: "clear_retired_seat_asks", principal_id: raceB.principalId }),
+            sendCommand(adminDemote.jwt, wsB, { kind: "clear_retired_seat_asks", principal_id: raceB.principalId }),
           );
           const clearPid = await waitForBlockedOnPid(holderPid, "clear parked at audit_log");
 
-          // Fire REAL HTTP mint_agent_token from sibling workspace wsB -> blocks on clearPid's Step 17 agent_ask_lifecycle(wsA, raceB)!
+          // Fire REAL HTTP mint_agent_token on home workspace wsA (disjoint from wsB!) -> inserts renewal_grant
+          // & agent_token, then calls advance_seat_lifecycle_epoch(raceB, NULL) across all live memberships
+          // (wsA, wsB), blocking deterministically on clearPid's Step 17 agent_ask_lifecycle(wsB, raceB)!
           const pendingMint = trackPending(
-            sendCommand(owner.jwt, wsB, {
+            sendCommand(owner.jwt, wsA, {
               kind: "mint_agent_token",
               principal_id: raceB.principalId,
               run_id: randomUUID(),
@@ -2982,13 +2988,13 @@ test(
               scopes: ["post_signal"],
             }),
           );
-          await waitForBlockedOnPid(clearPid, "sibling-wsB mint waits on clearPid Step 17 lock");
+          await waitForBlockedOnPid(clearPid, "home-wsA mint waits on clearPid wsB Step 17 lock");
 
-          // Release audit_log -> clear commits -> mint wakes up, advances epoch > cutoff, and commits!
+          // Release audit_log -> clear commits -> mint wakes up, advances wsB epoch > cutoff, and commits!
           await rollbackHolder();
           const [clearRes, mintRes] = await raceWithTimeout(
             Promise.all([pendingClear, pendingMint]),
-            "clear + sibling-W2 mint complete",
+            "clear + home-wsA mint complete",
           );
           assert.equal(clearRes.status, 200, respDiag("raceB clearRes", clearRes));
           assert.equal(mintRes.status, 200, respDiag("raceB mintRes", mintRes));
@@ -2996,7 +3002,7 @@ test(
 
           const raceBPostAsk = postedSignalId(
             "raceBPostAsk",
-            await sendCommand(freshToken, wsA, {
+            await sendCommand(freshToken, wsB, {
               kind: "post_signal",
               signal_kind: "ask",
               to_user_id: addressee.id,
@@ -3006,7 +3012,7 @@ test(
               body: "Race B post-reconnect ask?",
             }),
           );
-          const dqAsks = (((await readWaitingViewsAs(wsA, addressee.id)).dq.asks as Array<Row>) ?? []).map((a) => a.signal_id);
+          const dqAsks = (((await readWaitingViewsAs(wsB, addressee.id)).dq.asks as Array<Row>) ?? []).map((a) => a.signal_id);
           assert.equal(dqAsks.includes(raceBPreAsk), false, "pre-clear ask stays cleared");
           assert.equal(dqAsks.includes(raceBPostAsk), true, "post-reconnect ask stays open");
         },
