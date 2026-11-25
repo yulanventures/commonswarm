@@ -189,6 +189,9 @@ Local agents get these tools in `cswarm mcp` and as `cswarm object <tool>
 
 Shared to-dos have their own CLI verbs, over the same tools: `cswarm todo ls`, `queue`,
 `read`, `create`, `start`, `done`, `drop`, `reopen` and `comment` (`cswarm todo --help`).
+For an item needing a person's approval, use `cswarm todo create "<title>" --assign <person> --approval`
+(or `todo_create` with `kind: "approval"`) instead of a plain to-do so it shows Approve
+and Decline controls.
 
 Channels and direct messages use `cswarm conversations`, `cswarm conversation read|open|join|leave|mark-read`,
 `cswarm dm <member|agent>...`, and `cswarm channel ls|read|join|leave|invite|remove|members`
