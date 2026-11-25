@@ -793,12 +793,23 @@ async function createServedWorkspace(opts: {
   name: string;
   owner: Person;
   members?: Array<{ user: Person; role: "admin" | "member" }>;
+  orgId?: string;
+  sameOrgAsWorkspaceId?: string;
 }) {
+  let resolvedOrgId = opts.orgId;
+  if (resolvedOrgId === undefined && opts.sameOrgAsWorkspaceId !== undefined) {
+    const [orgRow] = await sql<{ org_id: string }[]>`
+      SELECT org_id FROM swarm.workspaces WHERE workspace_id = ${opts.sameOrgAsWorkspaceId}::uuid
+    `;
+    assert.ok(orgRow?.org_id, `sameOrgAsWorkspaceId(${opts.sameOrgAsWorkspaceId}) missing org_id`);
+    resolvedOrgId = orgRow.org_id;
+  }
   const wsId = randomUUID();
   const created = await sendCommandRaw(opts.owner.jwt, null, {
     kind: "create_workspace",
     workspace_id: wsId,
     name: opts.name,
+    ...(resolvedOrgId !== undefined ? { org_id: resolvedOrgId } : {}),
   });
   assert.equal(created.status, 200, respDiag(`create_workspace(${opts.name})`, created));
 
@@ -999,9 +1010,32 @@ async function cleanupFixture(workspaceIds: string[], userIds: string[]): Promis
       await tx`DELETE FROM swarm.agent_presence WHERE workspace_id = ANY(${workspaceIds}::uuid[])`;
       await tx`DELETE FROM swarm.agent_workspace_memberships WHERE workspace_id = ANY(${workspaceIds}::uuid[])`;
       await tx`DELETE FROM swarm.agent_principals WHERE workspace_id = ANY(${workspaceIds}::uuid[])`;
+      const orgRows = await tx<{ org_id: string }[]>`
+        SELECT DISTINCT org_id
+        FROM swarm.workspaces
+        WHERE workspace_id = ANY(${workspaceIds}::uuid[])
+          AND org_id IS NOT NULL
+      `;
+      const orgIds = orgRows.map((row) => row.org_id);
       await tx`DELETE FROM swarm.memberships WHERE workspace_id = ANY(${workspaceIds}::uuid[])`;
       await tx`DELETE FROM swarm.streams WHERE workspace_id = ANY(${workspaceIds}::uuid[])`;
       await tx`DELETE FROM swarm.workspaces WHERE workspace_id = ANY(${workspaceIds}::uuid[])`;
+      if (orgIds.length > 0) {
+        await tx`
+          DELETE FROM swarm.org_memberships
+          WHERE org_id = ANY(${orgIds}::uuid[])
+            AND NOT EXISTS (
+              SELECT 1 FROM swarm.workspaces w WHERE w.org_id = swarm.org_memberships.org_id
+            )
+        `;
+        await tx`
+          DELETE FROM swarm.organizations
+          WHERE id = ANY(${orgIds}::uuid[])
+            AND NOT EXISTS (
+              SELECT 1 FROM swarm.workspaces w WHERE w.org_id = swarm.organizations.id
+            )
+        `;
+      }
     }
     if (userIds.length > 0) {
       await tx`DELETE FROM swarm.seat_admin_grants WHERE owner_user_id = ANY(${userIds}::uuid[])`;
@@ -1184,6 +1218,7 @@ test(
           RAISE EXCEPTION 'role ${role} must not EXECUTE swarm.seat_is_disconnected_for_ask_clear';
         EXCEPTION WHEN insufficient_privilege THEN NULL;
         END;
+        RESET ROLE;
         -- All five trigger functions denied to all runtime/client roles
         IF has_function_privilege('${role}', 'swarm.agent_ask_lifecycle_validate_refs()', 'EXECUTE')
            OR has_function_privilege('${role}', 'swarm.agent_workspace_memberships_seed_ask_lifecycle()', 'EXECUTE')
@@ -1192,7 +1227,6 @@ test(
            OR has_function_privilege('${role}', 'swarm.signals_bind_seat_lifecycle_epoch()', 'EXECUTE') THEN
           RAISE EXCEPTION 'role ${role} must not hold EXECUTE on retired-seat-asks trigger functions';
         END IF;
-        RESET ROLE;
       END $deny$;
     `,
       )
@@ -1783,6 +1817,7 @@ test(
       name: "RSA-1b-B",
       owner,
       members: [{ user: addressee, role: "member" }],
+      sameOrgAsWorkspaceId: wsA,
     });
 
     let primaryFailed = false;
@@ -2166,22 +2201,35 @@ test(
       ],
     });
 
-    const readFnCalls = async (sig: string): Promise<number> => {
-      await sql`SELECT pg_stat_clear_snapshot()`;
-      const [row] = await sql<{ calls: string }[]>`
-        SELECT COALESCE(pg_stat_get_function_calls(${sig}::regprocedure), 0)::text AS calls
-      `;
-      return Number(row!.calls);
+    const readFnCalls = async (sig: string): Promise<number> =>
+      sql.begin(async (tx) => {
+        await tx`SELECT pg_stat_clear_snapshot()`;
+        const [row] = await tx<{ calls: string }[]>`
+          SELECT COALESCE(pg_stat_get_function_calls(${sig}::regprocedure), 0)::text AS calls
+        `;
+        return Number(row!.calls);
+      });
+
+    const flushCommandBackendStats = async (targetWsId: string, jwt: string): Promise<void> => {
+      // PG 15+ flushes per-backend pg_stat function counters on the next transaction end once
+      // PGSTAT_MIN_INTERVAL (500ms) has elapsed, or on backend exit (command's pool has idle_timeout: 3s).
+      // Send a lightweight command transaction that does not call ask_answered or ask_complete_for_withdrawal.
+      await sendCommand(jwt, targetWsId, {
+        kind: "signals_seen",
+        signal_ids: [randomUUID()],
+      });
     };
 
-    const settleFnCalls = async (sig: string, maxWaitMs = 1_500): Promise<number> => {
+    const settleFnCalls = async (sig: string, maxWaitMs = 2_000, minWaitMs = 600): Promise<number> => {
       try {
         await sql`SELECT pg_stat_force_next_flush()`;
       } catch {
         /* PG version without pg_stat_force_next_flush */
       }
       let prev = await readFnCalls(sig);
-      const deadline = Date.now() + maxWaitMs;
+      const start = Date.now();
+      const minDeadline = start + minWaitMs;
+      const deadline = start + Math.max(maxWaitMs, minWaitMs);
       while (Date.now() < deadline) {
         await delay(150);
         try {
@@ -2190,19 +2238,34 @@ test(
           /* PG version without pg_stat_force_next_flush */
         }
         const curr = await readFnCalls(sig);
-        if (curr === prev) return curr;
+        if (curr === prev && Date.now() >= minDeadline) return curr;
         prev = curr;
       }
       return prev;
     };
 
-    const waitForFnCallsIncrement = async (sig: string, baseline: number, timeoutMs = 3_000): Promise<number> => {
-      const deadline = Date.now() + timeoutMs;
+    const waitForFnCallsIncrement = async (
+      sig: string,
+      baseline: number,
+      timeoutMs = 8_000,
+    ): Promise<number> => {
+      const start = Date.now();
+      const deadline = start + timeoutMs;
       let latest = baseline;
+      let nudged = false;
       while (Date.now() < deadline) {
         latest = await readFnCalls(sig);
         if (latest > baseline) return latest;
-        await delay(50);
+        // Once past PGSTAT_MIN_INTERVAL (500ms), send one benign command request to flush
+        // command's pooled backend stats; stop nudging afterward so any second idle pooled
+        // backend still hits idle_timeout (3s) and force-flushes well within timeoutMs (8s).
+        if (!nudged && Date.now() - start >= 700) {
+          nudged = true;
+          await flushCommandBackendStats(wsId, owner.jwt);
+          latest = await readFnCalls(sig);
+          if (latest > baseline) return latest;
+        }
+        await delay(150);
       }
       return latest;
     };
@@ -2248,8 +2311,16 @@ test(
     try {
       await adminSql`ALTER SYSTEM SET track_functions = 'all'`;
       await adminSql`SELECT pg_reload_conf()`;
-      // Brief pause so pooled backends observe SIGHUP before probing.
-      await delay(150);
+      // Confirm SIGHUP has applied track_functions = 'all' before provisioning Suite 2 fixtures.
+      const reloadDeadline = Date.now() + 2_000;
+      let trackFunctions = "";
+      while (Date.now() < reloadDeadline) {
+        const [tf] = await adminSql<{ track_functions: string }[]>`SHOW track_functions`;
+        trackFunctions = tf?.track_functions ?? "";
+        if (trackFunctions === "all") break;
+        await delay(50);
+      }
+      assert.equal(trackFunctions, "all", `track_functions reload failed: got ${JSON.stringify(trackFunctions)}`);
 
       const sharedSlug = `shared-${randomBytes(3).toString("hex")}`;
       const sharedChResp = await sendCommand(owner.jwt, wsId, {
@@ -2354,7 +2425,7 @@ test(
           'note', 'Public readable answer from A', ${sharedChId}::uuid, '9999-12-31T23:59:59Z'
         )
       `;
-      const aaBeforeF3Choice = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+      const aaBeforeF3Choice = await settleFnCalls("swarm.ask_answered(uuid,uuid)");
       const f3ChoiceAnsCmdId = randomUUID();
       const f3ChoiceAns = await sendCommand(
         addrA.jwt,
@@ -2364,7 +2435,7 @@ test(
       );
       assert.equal(f3ChoiceAns.status, 200, respDiag("f3ChoiceAns", f3ChoiceAns));
       // Wait for f3ChoiceAns's backend stats to flush before negative probes start (also proves track_functions='all' is live).
-      const aaAfterF3Choice = await waitForFnCallsIncrement("swarm.ask_answered(uuid,uuid)", aaBeforeF3Choice);
+      const aaAfterF3Choice = await waitForFnCallsIncrement("swarm.ask_answered(uuid,uuid)", aaBeforeF3Choice, 8_000);
       assert.ok(
         aaAfterF3Choice > aaBeforeF3Choice,
         `track_functions='all' warmup must flush ask_answered (${aaBeforeF3Choice} -> ${aaAfterF3Choice})`,
@@ -2659,6 +2730,7 @@ test(
       name: "RSA-3-B",
       owner,
       members: [{ user: addressee, role: "member" }],
+      sameOrgAsWorkspaceId: wsA,
     });
     const wsArchive = await createServedWorkspace({
       name: "RSA-3-Arch",
