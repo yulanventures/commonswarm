@@ -673,7 +673,7 @@ test("inbox --notify --exit-on-arrival exits 0 cleanly after first post-baseline
   }
 });
 
-test("inbox --notify emits a stderr warning at startup when stdout is redirected to a file (not_pipe)", { timeout: 15_000 }, async () => {
+test("inbox --notify emits a stderr warning at startup when stdout is redirected to a regular file and stays silent on a pipe", { timeout: 15_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "cswarm-not-pipe-"));
   chmodSync(dir, 0o700);
   const outFile = join(dir, "stdout.log");
@@ -698,7 +698,7 @@ test("inbox --notify emits a stderr warning at startup when stdout is redirected
         readCalls += 1;
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
-          signals: readCalls === 1
+          signals: readCalls % 2 === 1
             ? []
             : [{
                 id: SIG_NEW,
@@ -736,8 +736,7 @@ test("inbox --notify emits a stderr warning at startup when stdout is redirected
       agent_token: TOKEN,
       expires_at: "2099-01-01T00:00:00.000Z",
     });
-    const child = spawn(process.execPath, [
-      CLI_PATH,
+    const notifyArgs = [
       "inbox",
       "--notify",
       "--exit-on-arrival",
@@ -748,11 +747,12 @@ test("inbox --notify emits a stderr warning at startup when stdout is redirected
       ANON_KEY,
       "--workspace-id",
       WS,
-    ], {
+    ];
+    const child = spawn(process.execPath, [CLI_PATH, ...notifyArgs], {
       env: {
         ...process.env,
         HOME: dir,
-        XDG_STATE_HOME: join(dir, "xdg-state"),
+        XDG_STATE_HOME: join(dir, "xdg-state-file"),
         SWARM_CLOUD_URL: "",
         SWARM_CLOUD_ANON_KEY: "",
         SWARM_CLOUD_WORKSPACE_ID: "",
@@ -770,6 +770,14 @@ test("inbox --notify emits a stderr warning at startup when stdout is redirected
     assert.equal(code, 0, stderr);
     assert.match(stderr, /stdout is redirected to a file or sink rather than a live pipe/);
     assert.match(readFileSync(outFile, "utf8"), /Arrived/);
+
+    const piped = await runCli(dir, notifyArgs, {
+      stdin: credential,
+      extraEnv: { XDG_STATE_HOME: join(dir, "xdg-state-pipe") },
+    });
+    assert.equal(piped.code, 0, piped.stderr);
+    assert.doesNotMatch(piped.stderr, /stdout is redirected to a file or sink/);
+    assert.match(piped.stdout, /Arrived/);
   } finally {
     closeSync(outFd);
     await new Promise<void>((r) => server.close(() => r()));

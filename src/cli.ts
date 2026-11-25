@@ -106,7 +106,7 @@ import {
 } from "./cloud/native-wake.js";
 import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
 import { ClaudeSocketAdapter } from "./cloud/native-wake-claude.js";
-import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createReadStream, fstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -6688,8 +6688,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       testProcRoot === undefined ? {} : { procRoot: testProcRoot },
     );
     try {
-      const initialStdoutState = await stdoutConsumer.inspect(process.pid, controller.signal);
-      if (!controller.signal.aborted && initialStdoutState === "not_pipe") {
+      if (!controller.signal.aborted && !process.stdout.isTTY && fstatSync(1).isFile()) {
         process.stderr.write(
           "cswarm: warning: stdout is redirected to a file or sink rather than a live pipe, so arrivals will not wake this session unless a reader watches the output.\n",
         );
