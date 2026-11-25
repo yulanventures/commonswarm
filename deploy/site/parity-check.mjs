@@ -236,6 +236,7 @@ while (fingerprintedQueue.length > 0) {
 let checkedNextHtmlCount = 0;
 let checkedNextAssetsCount = 0;
 if (checkNext) {
+  const nextHtmlContentTypePattern = /^text\/html(?:[ \t]*;[ \t]*charset=(?:utf-8|"utf-8"))?$/i;
   const nextSecurityHeaders = {
     "content-security-policy": "frame-ancestors 'none'",
     "x-content-type-options": "nosniff",
@@ -291,7 +292,7 @@ if (checkNext) {
         differences.push(`${nextPath}: status expected 200, got ${nextResponse.statusCode}`);
       }
       const ct = nextResponse.headers["content-type"] ?? "";
-      if (!ct.startsWith("text/html")) {
+      if (!nextHtmlContentTypePattern.test(ct.replace(/^[ \t]+|[ \t]+$/g, ""))) {
         differences.push(`${nextPath}: content-type expected text/html, got ${JSON.stringify(ct)}`);
       }
       checkNextHeaders(nextPath, nextResponse.headers, "no-cache");

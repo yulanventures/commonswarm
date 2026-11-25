@@ -752,6 +752,7 @@ test("parity omits /next by default, and --check-next walks /next, /next/, and /
   let omitCspPath: string | null = null;
   let injectThirdPartyPath: string | null = null;
   let badStatusPath: string | null = null;
+  let overrideNextContentType: { path: string; value: string } | null = null;
   let missingNext = false;
   const requestedPaths: string[] = [];
   const seenUserAgents = new Map<string, string | undefined>();
@@ -776,7 +777,8 @@ test("parity omits /next by default, and --check-next walks /next, /next/, and /
     };
     if (url === "/next" || url === "/next/" || url === "/next/index.html") {
       const status = badStatusPath === url ? 503 : 200;
-      response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", ...nextSec });
+      const contentType = overrideNextContentType?.path === url ? overrideNextContentType.value : "text/html; charset=utf-8";
+      response.writeHead(status, { "content-type": contentType, "cache-control": "no-cache", ...nextSec });
       const extra = injectThirdPartyPath === url ? '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' : "";
       response.end(`<!doctype html><head>${extra}<script type="module" src="/next/assets/index-abc.js"></script><link rel="stylesheet" href="/next/assets/index-abc.css"></head>`);
       return;
@@ -864,6 +866,29 @@ test("parity omits /next by default, and --check-next walks /next, /next/, and /
       },
     );
     injectThirdPartyPath = null;
+
+    for (const validCt of ["text/html", "TEXT/HTML; CHARSET=UTF-8", 'text/html; charset="utf-8"']) {
+      overrideNextContentType = { path: "/next", value: validCt };
+      const validCtPassed = await execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
+      assert.match(validCtPassed.stdout, /Parity passed for 7 routes/);
+      overrideNextContentType = null;
+    }
+
+    for (const badCt of [
+      "text/html; charset=utf-8, text/plain",
+      "text/html, text/plain",
+      "text/html; charset=iso-8859-1",
+    ]) {
+      overrideNextContentType = { path: "/next", value: badCt };
+      await assert.rejects(
+        execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 }),
+        (error: unknown) => {
+          assert.match((error as { stderr?: string }).stderr ?? "", /\/next: content-type expected text\/html/);
+          return true;
+        },
+      );
+      overrideNextContentType = null;
+    }
   } finally {
     await new Promise<void>((resolveClose, rejectClose) => {
       server.close((error) => error ? rejectClose(error) : resolveClose());

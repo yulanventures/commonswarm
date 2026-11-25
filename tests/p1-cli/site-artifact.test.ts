@@ -832,9 +832,12 @@ test('refresh-site.py --check-next-html-headers and probe-next-ingress.sh --expe
   const makeDump = (statusLine: string, lines: string[], prefix = '') =>
     `${prefix}${statusLine}\r\n${lines.join('\r\n')}\r\n\r\n`;
 
-  // Direct parser pass cases: HTTP/1.1, HTTP/2, OWS, case-insensitive non-CSP values, and 103 + valid 200.
+  // Direct parser pass cases: HTTP/1.1, HTTP/2, OWS, case-insensitive non-CSP values, quoted charset, and 103 + valid 200.
   for (const [label, payload] of [
     ['http11-valid', makeDump('HTTP/1.1 200 OK', validFinalLines)],
+    ['ct-bare-html', makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html', ...validFinalLines.slice(1)])],
+    ['ct-upper-charset', makeDump('HTTP/1.1 200 OK', ['Content-Type: TEXT/HTML; CHARSET=UTF-8', ...validFinalLines.slice(1)])],
+    ['ct-quoted-charset', makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset="utf-8"', ...validFinalLines.slice(1)])],
     ['http2-valid', makeDump('HTTP/2 200 ', [
       'content-type:  TEXT/HTML ; charset=utf-8 \t',
       "content-security-policy: \tframe-ancestors 'none' ",
@@ -850,7 +853,7 @@ test('refresh-site.py --check-next-html-headers and probe-next-ingress.sh --expe
     assert.ok(label);
   }
 
-  // Direct parser rejection cases: interim-only, duplicates, wrong values, obs-fold, control/non-ASCII, malformed lines.
+  // Direct parser rejection cases: interim-only, duplicates, combined Content-Type, wrong values, obs-fold, control/non-ASCII, malformed lines.
   const directFailures: Array<{ name: string; bytes: Buffer; reason: RegExp }> = [
     { name: 'interim-103-only', bytes: Buffer.from(`${valid103Block}\r\n`, 'binary'), reason: /^invalid-http-headers$/m },
     { name: 'no-colon', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'MalformedLine']), 'binary'), reason: /^invalid-http-headers$/m },
@@ -861,6 +864,10 @@ test('refresh-site.py --check-next-html-headers and probe-next-ingress.sh --expe
     { name: 'control-vtab', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html\x0b; charset=utf-8', ...validFinalLines.slice(1)]), 'binary'), reason: /^invalid-http-headers$/m },
     { name: 'embedded-cr', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Cache-Control: no-cache\r', ...validFinalLines.slice(0, 4)]), 'binary'), reason: /^invalid-http-headers$/m },
     { name: 'non-ascii-nbsp', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html;\u00a0charset=utf-8', ...validFinalLines.slice(1)]), 'utf8'), reason: /^invalid-http-headers$/m },
+    { name: 'combined-ct-with-charset', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset=utf-8, text/plain', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'combined-ct-bare', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html, text/plain', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'wrong-ct-charset', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset=iso-8859-1', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
+    { name: 'extra-ct-param', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html; charset=utf-8; foo=bar', ...validFinalLines.slice(1)]), 'binary'), reason: /^content-type-mismatch$/m },
     { name: 'wrong-nosniff', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', validFinalLines.map(l => l.startsWith('X-Content-Type-Options:') ? 'X-Content-Type-Options: sniff' : l)), 'binary'), reason: /^nosniff-mismatch$/m },
     { name: 'wrong-referrer', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', validFinalLines.map(l => l.startsWith('Referrer-Policy:') ? 'Referrer-Policy: origin' : l)), 'binary'), reason: /^referrer-policy-mismatch$/m },
     { name: 'dup-content-type', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Content-Type: text/plain']), 'binary'), reason: /^multiple-content-type$/m },
@@ -983,6 +990,24 @@ test('refresh-site.py --check-next-html-headers and probe-next-ingress.sh --expe
         const stderr = (error as { stderr: string }).stderr;
         assert.match(stderr, /FAIL path=\/next\/index\.html /, row.name);
         assert.match(stderr, row.reason, row.name);
+        return true;
+      });
+    }
+
+    // Combined or non-UTF-8 Content-Type on a final 200 OK with exact body and valid sibling headers must fail.
+    const combinedCtCases: Array<{ name: string; path: string; header: string }> = [
+      { name: 'combined-ct-with-charset', path: '/next', header: 'Content-Type: text/html; charset=utf-8, text/plain' },
+      { name: 'combined-ct-bare', path: '/next/', header: 'Content-Type: text/html, text/plain' },
+      { name: 'wrong-ct-charset', path: '/next/index.html', header: 'Content-Type: text/html; charset=iso-8859-1' },
+    ];
+    for (const row of combinedCtCases) {
+      finalHeaderOverride = (urlPath) => urlPath === row.path
+        ? validFinalLines.map(l => l.startsWith('Content-Type:') ? row.header : l)
+        : [...validFinalLines];
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        const stderr = (error as { stderr: string }).stderr;
+        assert.match(stderr, new RegExp(`FAIL path=${row.path.replace(/\./g, '\\.')} `), row.name);
+        assert.match(stderr, /reason=content-type-mismatch/, row.name);
         return true;
       });
     }

@@ -109,7 +109,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 payload = gzip.compress(body) if use_gzip else body
                 bad_here = self.postflip_bad_header_path == self.path
                 dup_here = self.postflip_dup_header_path == self.path
-                ct = 'text/plain; charset=utf-8' if (bad_here and self.postflip_bad_header in ('content-type', 'all-four')) else 'text/html; charset=utf-8'
+                if bad_here and self.postflip_bad_header == 'combined-content-type':
+                    ct = 'text/html; charset=utf-8, text/plain'
+                elif bad_here and self.postflip_bad_header in ('content-type', 'all-four'):
+                    ct = 'text/plain; charset=utf-8'
+                else:
+                    ct = 'text/html; charset=utf-8'
                 final_headers = [('Content-Type', ct)]
                 if dup_here and self.postflip_dup_header == 'content-type':
                     final_headers.append(('Content-Type', 'text/plain; charset=utf-8'))
@@ -254,6 +259,7 @@ def scenario(
                     assert 'assertion=next-html-headers' in log, log
                     reason_map = {
                         'content-type': 'content-type-mismatch',
+                        'combined-content-type': 'content-type-mismatch',
                         'nosniff': 'missing-nosniff',
                         'referrer': 'missing-referrer-policy',
                         'cache': 'cache-control-mismatch',
@@ -360,7 +366,7 @@ for bad_path in ['/next/', '/next/index.html']:
 scenario(include_next=True, inject_html_mode='browser-ua', inject_html_path='/next')
 scenario(include_next=True, inject_html_mode='compressed', inject_html_path='/next/')
 scenario(include_next=True, inject_html_mode='identity', inject_html_path='/next/index.html')
-for bad_header, bad_path in [('content-type', '/next/'), ('nosniff', '/next/'), ('referrer', '/next/index.html'), ('cache', '/next/index.html')]:
+for bad_header, bad_path in [('content-type', '/next/'), ('combined-content-type', '/next'), ('nosniff', '/next/'), ('referrer', '/next/index.html'), ('cache', '/next/index.html')]:
     scenario(include_next=True, postflip_bad_header=bad_header, postflip_bad_header_path=bad_path)
 scenario(include_next=True, send_interim_103=True)
 for bad_header, bad_path in [('content-type', '/next/'), ('nosniff', '/next/'), ('referrer', '/next/index.html'), ('cache', '/next/index.html'), ('all-four', '/next')]:

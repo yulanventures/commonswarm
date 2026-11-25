@@ -89,7 +89,7 @@ def prepare(live, target):
 
 EXPECTED_NEXT_CSP = b"frame-ancestors 'none'"
 _FINAL_STATUS_RE = re.compile(rb'HTTP/[0-9]+(?:\.[0-9]+)? [2-5][0-9]{2}(?:[ \t][\x20-\x7e\t]*)?')
-_CONTENT_TYPE_HTML_RE = re.compile(rb'text/html(?:[ \t]*;.*)?', re.IGNORECASE)
+_CONTENT_TYPE_HTML_RE = re.compile(rb'text/html(?:[ \t]*;[ \t]*charset=(?:utf-8|"utf-8"))?', re.IGNORECASE)
 _HEADER_NAME_BYTES = frozenset(
     b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
