@@ -445,7 +445,7 @@ export type WorkspaceDecision = WorkspaceDecisionAccepted | WorkspaceDecisionRej
 /** Workspace-reducer commands a seat admin agent executes in 2b (see SEAT_ADMIN_EXECUTED_KINDS). */
 export const SEAT_ADMIN_REDUCER_KINDS = new Set<string>(['rename_workspace', 'remove_member', 'revoke_invitation']);
 
-export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead' | 'rename_organization' | 'create_agent_seat' | 'mark_channel_read' | 'set_channel_lead' | 'dismiss_waiting_item' | 'restore_waiting_item'>([
+export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead' | 'rename_organization' | 'create_agent_seat' | 'mark_channel_read' | 'set_channel_lead' | 'dismiss_waiting_item' | 'restore_waiting_item' | 'clear_retired_seat_asks'>([
   'add_agent_to_workspace',
   // A seat admin agent creates a seat for its grantor through its own handler, never the reducer.
   'create_agent_seat',
@@ -479,6 +479,8 @@ export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent
   // Per-person Waiting on you dismissals (its own command module, never available to agents).
   'dismiss_waiting_item',
   'restore_waiting_item',
+  // Blind retired/disconnected seat ask clearing (human-only, never available to agents or seat admins).
+  'clear_retired_seat_asks',
 ]);
 
 /**

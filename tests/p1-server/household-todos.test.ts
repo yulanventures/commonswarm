@@ -114,9 +114,9 @@ function store(post: HouseholdTodoNoticePort) {
 }
 const postNotice: HouseholdTodoNoticePort = async (tx, workspace, identity, intent) => {
   const signal = randomUUID(), first = intent.to[0]!;
-  await tx`INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until)
+  await tx`INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until,sender_lifecycle_epoch)
     VALUES (${signal}::uuid,${workspace}::uuid,${identity.principal_id ?? identity.user_id}::uuid,${identity.principal_id ? 'agent' : 'user'},
-      ${first.kind === 'user' ? first.id : null}::uuid,${first.kind === 'agent' ? first.id : null}::uuid,${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day')`;
+      ${first.kind === 'user' ? first.id : null}::uuid,${first.kind === 'agent' ? first.id : null}::uuid,${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day',${identity.principal_id && intent.kind === 'ask' ? 1 : null}::bigint)`;
   for (const [position, to] of intent.to.entries()) await tx`INSERT INTO swarm.signal_recipients(signal_id,workspace_id,recipient_user_id,recipient_agent_principal_id,position)
     VALUES (${signal}::uuid,${workspace}::uuid,${to.kind === 'user' ? to.id : null}::uuid,${to.kind === 'agent' ? to.id : null}::uuid,${position})`;
   return { to: intent.to, status: 'sent', signal_id: signal };

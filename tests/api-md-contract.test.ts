@@ -12,7 +12,7 @@ const doc = read("site/public/api.md");
 const commandDir = "supabase/functions/command";
 const commandSources = ["index.ts", "file-artifacts.ts", "household-integration.ts", "human-receipts.ts",
   "durable-delivery.ts", "signal-reactions.ts", "channel-reads.ts", "conversations.ts", "review-checks.ts",
-  "waiting-dismissals.ts", "ask-withdrawals.ts"].map((file) => read(`${commandDir}/${file}`));
+  "waiting-dismissals.ts", "ask-withdrawals.ts", "retired-seat-asks.ts"].map((file) => read(`${commandDir}/${file}`));
 const commandIndex = commandSources[0]!;
 const readIndex = read("supabase/functions/read/index.ts");
 
@@ -68,6 +68,7 @@ const UNDOCUMENTED_COMMANDS: Record<string, string> = {
   rename_workspace: "web app workspace settings",
   change_role: "web app member management",
   revoke_agent_principal: "web app agent management",
+  clear_retired_seat_asks: "web app human-only retired-seat ask clearing (never available to agents)",
   resolve_system_alert: "lead system alerts (cswarm alert resolve); api.md updated in follow-up",
 };
 

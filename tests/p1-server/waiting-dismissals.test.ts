@@ -357,12 +357,12 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
     VALUES ('${privChId}'::uuid, '${wsId}'::uuid, 'parity-secret', 'private', '${aliceId}'::uuid, 'user');
     INSERT INTO swarm.channel_members (channel_id, workspace_id, member_kind, user_id, added_by_principal, added_by_kind)
     VALUES ('${privChId}'::uuid, '${wsId}'::uuid, 'user', '${aliceId}'::uuid, '${aliceId}'::uuid, 'user');
-    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
+    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, sender_lifecycle_epoch)
     VALUES
-      ('${generalAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity general ask?', NULL, '9999-12-31T23:59:59Z'),
-      ('${privAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity private ask?', '${privChId}'::uuid, '9999-12-31T23:59:59Z'),
-      ('${dmAskId}'::uuid, '${wsId}'::uuid, '${bobId}'::uuid, 'user', '${aliceId}'::uuid, 'ask', 'Parity DM ask?', NULL, '9999-12-31T23:59:59Z'),
-      ('${answeredAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity answered ask?', NULL, '9999-12-31T23:59:59Z');
+      ('${generalAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity general ask?', NULL, '9999-12-31T23:59:59Z', 1),
+      ('${privAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity private ask?', '${privChId}'::uuid, '9999-12-31T23:59:59Z', 1),
+      ('${dmAskId}'::uuid, '${wsId}'::uuid, '${bobId}'::uuid, 'user', '${aliceId}'::uuid, 'ask', 'Parity DM ask?', NULL, '9999-12-31T23:59:59Z', NULL),
+      ('${answeredAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity answered ask?', NULL, '9999-12-31T23:59:59Z', 1);
     INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until)
     VALUES ('${randomUUID()}'::uuid, '${wsId}'::uuid, '${aliceId}'::uuid, 'user', '${answeredAskId}'::uuid, 'note', 'Answered!', '9999-12-31T23:59:59Z');
     SET CONSTRAINTS ALL IMMEDIATE;
@@ -548,8 +548,8 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
 
       // Shared ask addressed to BOTH Alice and Bob in #general
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
-        VALUES (${sharedAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Should we ship Slice 1?', '9999-12-31T23:59:59Z')
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
+        VALUES (${sharedAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Should we ship Slice 1?', '9999-12-31T23:59:59Z', 1)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
@@ -559,8 +559,8 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
       `;
       // Private-channel ask addressed to Alice (Bob is NOT in #secret-room)
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
-        VALUES (${privAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Private question', ${privChannelId}::uuid, '9999-12-31T23:59:59Z')
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, sender_lifecycle_epoch)
+        VALUES (${privAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Private question', ${privChannelId}::uuid, '9999-12-31T23:59:59Z', 1)
       `;
       // Settle deferred conversation filing triggers so read models see canonical conversation_signals rows.
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;

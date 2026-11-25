@@ -420,6 +420,12 @@ export async function applyAdminRoutine(
       },${hash},${date(ctx.now)},${
         date(c.expires_at)
       },${c.worker_lineage_id}::uuid,${c.renewal_grant_id}::uuid,${predecessor}::uuid,${c.parent_admin_grant_id}::uuid,${c.recipient_connection_id}::uuid)`;
+      if (
+        command.kind === "admin_renew_seat" ||
+        command.kind === "admin_replace_undelivered_seat_credential"
+      ) {
+        await tx`SELECT swarm.advance_seat_lifecycle_epoch(${c.principal_id}::uuid, NULL::uuid)`;
+      }
       delivery = {
         credential: secret,
         credential_id: c.credential_id,

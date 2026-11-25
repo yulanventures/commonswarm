@@ -228,13 +228,13 @@ test("20261124000002 rolls back cleanly, re-applies with proofs, and all 5 read 
     SELECT swarm.conversation_for_channel('${wsId}'::uuid, '${privChId}'::uuid);
     SELECT swarm.conversation_open('${wsId}'::uuid, 'user', '${bobId}'::uuid, ARRAY['${aliceId}']::uuid[], ARRAY[]::uuid[], false);
     SET CONSTRAINTS ALL DEFERRED;
-    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
+    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, sender_lifecycle_epoch)
     VALUES
-      ('${generalAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity general ask?', NULL, '9999-12-31T23:59:59Z'),
-      ('${dismissedAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity dismissed ask?', NULL, '9999-12-31T23:59:59Z'),
-      ('${privAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity private ask?', '${privChId}'::uuid, '9999-12-31T23:59:59Z'),
-      ('${dmAskId}'::uuid, '${wsId}'::uuid, '${bobId}'::uuid, 'user', '${aliceId}'::uuid, 'ask', 'Parity DM ask?', NULL, '9999-12-31T23:59:59Z'),
-      ('${answeredAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity answered ask?', NULL, '9999-12-31T23:59:59Z');
+      ('${generalAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity general ask?', NULL, '9999-12-31T23:59:59Z', 1),
+      ('${dismissedAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity dismissed ask?', NULL, '9999-12-31T23:59:59Z', 1),
+      ('${privAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity private ask?', '${privChId}'::uuid, '9999-12-31T23:59:59Z', 1),
+      ('${dmAskId}'::uuid, '${wsId}'::uuid, '${bobId}'::uuid, 'user', '${aliceId}'::uuid, 'ask', 'Parity DM ask?', NULL, '9999-12-31T23:59:59Z', NULL),
+      ('${answeredAskId}'::uuid, '${wsId}'::uuid, '${scoutId}'::uuid, 'agent', '${aliceId}'::uuid, 'ask', 'Parity answered ask?', NULL, '9999-12-31T23:59:59Z', 1);
     INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until)
     VALUES ('${randomUUID()}'::uuid, '${wsId}'::uuid, '${aliceId}'::uuid, 'user', '${answeredAskId}'::uuid, 'note', 'Answered!', '9999-12-31T23:59:59Z');
     SET CONSTRAINTS ALL IMMEDIATE;
@@ -464,24 +464,24 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
       await tx`SET CONSTRAINTS ALL DEFERRED`;
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until, sender_lifecycle_epoch)
         VALUES
-          (${liveAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Live agent still here?', NULL, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${selfFollowupAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Self follow-up ask?', NULL, ${ts(-590)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${answeredByBobAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Answered by Bob?', NULL, ${ts(-580)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${answeredByBobAgentAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Answered by BobBot?', NULL, ${ts(-570)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${revokedAgentAskId}::uuid, ${wsId}::uuid, ${revokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'From revoked agent?', NULL, ${ts(-560)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${dismissedThenRevokedAskId}::uuid, ${wsId}::uuid, ${revokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Dismissed then revoked?', NULL, ${ts(-550)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${seatRemovedAskId}::uuid, ${wsId}::uuid, ${seatRemovedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'From seat-removed agent?', NULL, ${ts(-540)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${ownerLeftAskId}::uuid, ${wsId}::uuid, ${ownerLeftAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'From CarolBot whose owner leaves?', NULL, ${ts(-530)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${senderLeftAskId}::uuid, ${wsId}::uuid, ${carolId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'From Carol who leaves?', NULL, ${ts(-520)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${archivedOpenChAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'In archived open channel?', ${openChId}::uuid, ${ts(-510)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${archivedPrivReadableAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'In archived readable private channel?', ${privChReadableId}::uuid, ${ts(-500)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${archivedPrivUnreadableAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET archived private ask?', ${privChUnreadableId}::uuid, ${ts(-490)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${lostPrivChAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET lost private ask?', ${privChLostId}::uuid, ${ts(-480)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${leftDmAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET left DM ask?', NULL, ${ts(-470)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${leftDmRevokedAskId}::uuid, ${wsId}::uuid, ${leftDmRevokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'SECRET left DM revoked agent ask?', NULL, ${ts(-465)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${expiredAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Explicit short horizon ask?', NULL, ${ts(-460)}::timestamptz, ${ts(-400)}::timestamptz)
+          (${liveAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Live agent still here?', NULL, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${selfFollowupAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Self follow-up ask?', NULL, ${ts(-590)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${answeredByBobAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Answered by Bob?', NULL, ${ts(-580)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${answeredByBobAgentAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Answered by BobBot?', NULL, ${ts(-570)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${revokedAgentAskId}::uuid, ${wsId}::uuid, ${revokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'From revoked agent?', NULL, ${ts(-560)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${dismissedThenRevokedAskId}::uuid, ${wsId}::uuid, ${revokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Dismissed then revoked?', NULL, ${ts(-550)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${seatRemovedAskId}::uuid, ${wsId}::uuid, ${seatRemovedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'From seat-removed agent?', NULL, ${ts(-540)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${ownerLeftAskId}::uuid, ${wsId}::uuid, ${ownerLeftAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'From CarolBot whose owner leaves?', NULL, ${ts(-530)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${senderLeftAskId}::uuid, ${wsId}::uuid, ${carolId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'From Carol who leaves?', NULL, ${ts(-520)}::timestamptz, '9999-12-31T23:59:59Z', NULL),
+          (${archivedOpenChAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'In archived open channel?', ${openChId}::uuid, ${ts(-510)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${archivedPrivReadableAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'In archived readable private channel?', ${privChReadableId}::uuid, ${ts(-500)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${archivedPrivUnreadableAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET archived private ask?', ${privChUnreadableId}::uuid, ${ts(-490)}::timestamptz, '9999-12-31T23:59:59Z', NULL),
+          (${lostPrivChAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET lost private ask?', ${privChLostId}::uuid, ${ts(-480)}::timestamptz, '9999-12-31T23:59:59Z', NULL),
+          (${leftDmAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET left DM ask?', NULL, ${ts(-470)}::timestamptz, '9999-12-31T23:59:59Z', NULL),
+          (${leftDmRevokedAskId}::uuid, ${wsId}::uuid, ${leftDmRevokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'SECRET left DM revoked agent ask?', NULL, ${ts(-465)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+          (${expiredAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Explicit short horizon ask?', NULL, ${ts(-460)}::timestamptz, ${ts(-400)}::timestamptz, 1)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
@@ -925,13 +925,13 @@ test("private directed reply or private completed choice never alters another ad
     await tx`SET CONSTRAINTS ALL DEFERRED`;
     await tx`SET LOCAL ROLE swarm_command`;
     await tx`
-      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until)
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until, sender_lifecycle_epoch)
       VALUES
-        (${expDirectedAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired ask with directed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-300)}::timestamptz),
-        (${senderLeftDirectedAskId}::uuid, ${wsId}::uuid, ${departingAskerId}::uuid, 'user', ${addresseeAId}::uuid, 'ask', 'Sender-left ask with directed DM reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z'),
-        (${expHiddenChoiceAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired choice ask with directed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-250)}::timestamptz),
-        (${archivedChHiddenChoiceAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Archived-channel choice ask with DM reply?', ${archivedChId}::uuid, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z'),
-        (${visibleAnswerExpiredAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired ask with visible unaddressed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-150)}::timestamptz)
+        (${expDirectedAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired ask with directed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-300)}::timestamptz, 1),
+        (${senderLeftDirectedAskId}::uuid, ${wsId}::uuid, ${departingAskerId}::uuid, 'user', ${addresseeAId}::uuid, 'ask', 'Sender-left ask with directed DM reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z', NULL),
+        (${expHiddenChoiceAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired choice ask with directed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-250)}::timestamptz, 1),
+        (${archivedChHiddenChoiceAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Archived-channel choice ask with DM reply?', ${archivedChId}::uuid, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z', 1),
+        (${visibleAnswerExpiredAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired ask with visible unaddressed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-150)}::timestamptz, 1)
     `;
     for (const askId of [
       expDirectedAskId,
@@ -1190,11 +1190,11 @@ test("private directed reply or private completed choice never alters another ad
       await tx`SET CONSTRAINTS ALL DEFERRED`;
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until, sender_lifecycle_epoch)
         VALUES (
           ${liveDirectedAskId}::uuid, ${priv.wsId}::uuid, ${priv.liveAgentId}::uuid, 'agent',
           ${priv.addresseeAId}::uuid, 'ask', 'Unexpired ask with directed reply?', ${priv.openChId}::uuid,
-          ${ts(-100)}::timestamptz, '9999-12-31T23:59:59Z'
+          ${ts(-100)}::timestamptz, '9999-12-31T23:59:59Z', 1
         )
       `;
       await tx`

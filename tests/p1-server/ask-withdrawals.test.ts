@@ -1051,7 +1051,7 @@ test(
       step("T2.6: withdrawn ask cannot be answered, dismissed, restored, or re-raised");
       const expiredAskId = randomUUID();
       await sql`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, created_at, until)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, created_at, until, sender_lifecycle_epoch)
         VALUES (
           ${expiredAskId}::uuid,
           ${wsId}::uuid,
@@ -1061,7 +1061,8 @@ test(
           'ask',
           'Expired control ask?',
           statement_timestamp() - interval '2 minutes',
-          statement_timestamp() - interval '1 minute'
+          statement_timestamp() - interval '1 minute',
+          1
         )
       `;
       const [signalsBeforeWithdrawnReply] = await sql<{ cnt: string }[]>`

@@ -60,11 +60,12 @@ async function signal(ws: string, from: { kind: "user" | "agent"; id: string }, 
   const toUser = opts.toUser ?? opts.recipients?.[0] ?? null;
   // Recipients can be added only in the transaction that creates the signal.
   await sql.begin(async (tx) => {
-  await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to, kind, body, until, created_at)
+  await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to, kind, body, until, created_at, sender_lifecycle_epoch)
     VALUES (${id}::uuid, ${ws}::uuid, ${from.id}::uuid, ${from.kind}, ${toUser}, ${opts.toAgent ?? null}, ${opts.replyTo ?? null},
       ${kind}, ${body},
       ${opts.expired ? tx`statement_timestamp() - ${ago}::interval + interval '1 second'` : tx`statement_timestamp() + interval '1 day'`},
-      statement_timestamp() - ${ago}::interval)`;
+      statement_timestamp() - ${ago}::interval,
+      ${from.kind === "agent" && kind === "ask" ? 1 : null}::bigint)`;
   for (const [position, user] of (opts.recipients ?? []).entries()) {
     await tx`INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
       VALUES (${id}::uuid, ${ws}::uuid, ${user}::uuid, ${position})`;
@@ -413,9 +414,9 @@ test("decision_queue_page: keyset-pages past 100 asks oldest first and enforces 
     for (let i = 1; i <= 101; i++) {
       const id = randomUUID();
       ids.push(id);
-      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at)
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at, sender_lifecycle_epoch)
         VALUES (${id}::uuid, ${ws}::uuid, ${asker}::uuid, 'agent', ${owner}::uuid, 'ask', ${"ASK-" + i},
-          statement_timestamp() + interval '1 day', statement_timestamp() - interval '2 hours' + (${i} * interval '1 second'))`;
+          statement_timestamp() + interval '1 day', statement_timestamp() - interval '2 hours' + (${i} * interval '1 second'), 1)`;
     }
   });
 

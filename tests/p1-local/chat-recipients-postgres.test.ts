@@ -154,7 +154,8 @@ async function insertSignal(
       id, workspace_id, from_principal, from_kind,
       to_user_id, to_agent_principal_id, in_reply_to,
       about, kind, body, until, created_at,
-      channel_id, thread_root_id, broadcast_to_channel
+      channel_id, thread_root_id, broadcast_to_channel,
+      sender_lifecycle_epoch
     ) VALUES (
       ${row.id}::uuid, ${row.workspaceId}::uuid, ${row.from}::uuid,
       ${row.fromKind ?? "user"},
@@ -164,7 +165,8 @@ async function insertSignal(
         + (${row.untilHours ?? 24} * interval '1 hour'),
       statement_timestamp()
         + (${row.createdAtHours ?? 0} * interval '1 hour'),
-      ${row.channelId ?? null}::uuid, NULL, false
+      ${row.channelId ?? null}::uuid, NULL, false,
+      ${(row.fromKind ?? "user") === "agent" && row.kind === "ask" ? 1 : null}::bigint
     )
   `;
 }

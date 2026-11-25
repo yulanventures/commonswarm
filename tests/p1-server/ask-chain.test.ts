@@ -394,11 +394,11 @@ test("every invalid-parent reason has one response and writes no signal graph ro
   await sql`
     INSERT INTO swarm.signals (
       id, workspace_id, from_principal, from_kind, to_agent_principal_id,
-      about, kind, body, until, created_at
+      about, kind, body, until, created_at, sender_lifecycle_epoch
     ) VALUES (
       ${expired}::uuid, ${fixture.workspace}::uuid, ${a!.principal}::uuid, 'agent',
       ${b!.principal}::uuid, NULL, 'ask', 'expired legacy parent',
-      statement_timestamp() - interval '1 hour', statement_timestamp() - interval '2 hours'
+      statement_timestamp() - interval '1 hour', statement_timestamp() - interval '2 hours', 1
     )
   `;
   const otherParent = randomUUID();
@@ -502,11 +502,11 @@ test("a legacy parent is a root and idempotency binds the declared parent", asyn
   await sql`
     INSERT INTO swarm.signals (
       id, workspace_id, from_principal, from_kind, to_agent_principal_id,
-      about, kind, body, until, created_at
+      about, kind, body, until, created_at, sender_lifecycle_epoch
     ) VALUES (
       ${legacy}::uuid, ${fixture.workspace}::uuid, ${a!.principal}::uuid, 'agent',
       ${b!.principal}::uuid, NULL, 'ask', 'legacy live parent',
-      statement_timestamp() + interval '1 hour', statement_timestamp()
+      statement_timestamp() + interval '1 hour', statement_timestamp(), 1
     )
   `;
   const child = await sendAsk(b!, c!.principal, { parent: legacy });
