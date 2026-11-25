@@ -552,10 +552,14 @@ async function sendCommandRaw(
   const payload: Row = {
     command_id: opts.commandId ?? randomUUID(),
     client_version: "0.1.93",
-    stream: opts.stream ?? { kind: "workspace" },
     command,
   };
-  if (workspaceId !== null) payload.workspace_id = workspaceId;
+  if (workspaceId !== null) {
+    payload.workspace_id = workspaceId;
+    payload.stream = opts.stream ?? { kind: "workspace" };
+  } else if (opts.stream !== undefined) {
+    payload.stream = opts.stream;
+  }
   if (opts.resource !== undefined) payload.resource = opts.resource;
 
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
@@ -625,6 +629,7 @@ function runHostedSteps(steps: HostedStep[]): Array<{ status: number; body: Row 
         PATH: process.env.PATH ?? "",
         ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
         SWARM_ENV: "test",
+        SWARM_MCP_PUBLIC_ENABLED: "1",
         SWARM_DATABASE_URL: local.DB_URL,
         SUPABASE_DB_URL: local.DB_URL,
         SUPABASE_URL: local.API_URL,
@@ -682,11 +687,17 @@ async function readConnectionKind(wsId: string, principalId: string): Promise<st
 async function readOverviewAgentConnection(wsId: string, viewerUserId: string, principalId: string): Promise<string | null> {
   const { wsOverview } = await readWaitingViewsAs(wsId, viewerUserId);
   if (!wsOverview) return null;
-  const people = (wsOverview.people as Array<{ agents?: Array<{ principal_id: string; connection?: string; status?: { connection?: string } }> }>) ?? [];
+  const people = (wsOverview.people as Array<{
+    agents?: Array<{
+      principal_id: string;
+      connection?: string;
+      status?: { connection?: string; facts?: { connection?: string } };
+    }>;
+  }>) ?? [];
   for (const person of people) {
     for (const agent of person.agents ?? []) {
       if (agent.principal_id === principalId) {
-        return agent.connection ?? agent.status?.connection ?? null;
+        return agent.status?.facts?.connection ?? agent.connection ?? agent.status?.connection ?? null;
       }
     }
   }
@@ -712,7 +723,7 @@ async function createServedWorkspace(opts: {
       email: member.user.email,
     });
     assert.equal(invited.status, 200, respDiag(`invite_member(${member.user.email})`, invited));
-    const accepted = await sendCommandRaw(member.user.jwt, wsId, {
+    const accepted = await sendCommandRaw(member.user.jwt, null, {
       kind: "accept_invitation",
       token: String(invited.body.invitation_token),
     });
@@ -1016,8 +1027,19 @@ after(async () => {
 test(
   "Suite 6: 20261125000002 & 20261125000003 pass catalog/functional proofs, deny direct role access, roll back cleanly, and re-apply",
   { timeout: TEST_TIMEOUT_MS },
-  () => {
-    step("Suite 6: catalog + functional + direct-deny + rollback + reapply");
+  async () => {
+    step("Suite 6: verify live migrated database passes Phase 1 & Phase 2 proofs");
+    await sql.begin(async (tx) => {
+      await tx.unsafe(
+        catalogAssertPrep(false) +
+          "\n" +
+          catalogAssertEnable() +
+          "\n" +
+          repoSql(`${proofRoot}/20261125000002-functional.sql`),
+      );
+    });
+
+    step("Suite 6: isolated catalog + functional + direct-deny + rollback + reapply drill");
     const directRoleDenyChecks = ["anon", "authenticated", "swarm_read", "swarm_command"]
       .map(
         (role) => `
@@ -1104,15 +1126,24 @@ test(
       )
       .join("\n");
 
+    // runSql() uses emptyApplicationSchema() (pg_dump --schema-only, zero data rows),
+    // so seed the Phase 2 rollout flag in swarm.config at the start of the isolated drill.
+    const seedRolloutConfig = `
+      INSERT INTO swarm.config (key, value)
+      VALUES ('retired_seat_ask_clear_enabled', 'true'::jsonb)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+    `;
+
     runSql(
-      sqlPhase(
-        "rsa-initial-proofs",
-        catalogAssertPrep(false) +
-          "\n" +
-          catalogAssertEnable() +
-          "\n" +
-          repoSql(`${proofRoot}/20261125000002-functional.sql`),
-      ) +
+      sqlPhase("rsa-seed-config", seedRolloutConfig) +
+        sqlPhase(
+          "rsa-initial-proofs",
+          catalogAssertPrep(false) +
+            "\n" +
+            catalogAssertEnable() +
+            "\n" +
+            repoSql(`${proofRoot}/20261125000002-functional.sql`),
+        ) +
         sqlPhase("rsa-direct-role-denial", directRoleDenyChecks + "\n" + nonCommandDefinerDenyChecks) +
         sqlPhase(
           "rsa-rollback-phase2",
@@ -1237,8 +1268,8 @@ test(
         WHERE id = ANY(${[livePlainAskId, liveChoiceAskId, liveNoteId, humanAskId]}::uuid[])
       `;
       const epochById = new Map(epochRows.map((r) => [r.id, r.sender_lifecycle_epoch]));
-      assert.equal(epochById.get(livePlainAskId), "1", "runtime local post_signal ask stamps explicit epoch");
-      assert.equal(epochById.get(liveChoiceAskId), "1", "runtime local ask_choice stamps explicit epoch");
+      assert.equal(epochById.get(livePlainAskId), "2", "runtime local post_signal ask stamps explicit epoch");
+      assert.equal(epochById.get(liveChoiceAskId), "2", "runtime local ask_choice stamps explicit epoch");
       assert.equal(epochById.get(liveNoteId), null, "runtime local note keeps sender_lifecycle_epoch NULL");
       assert.equal(epochById.get(humanAskId), null, "runtime human ask keeps sender_lifecycle_epoch NULL");
 
@@ -1260,8 +1291,7 @@ test(
       const addPriv = await sendCommand(owner.jwt, wsId, {
         kind: "channel_member_add",
         channel_id: privChId,
-        member_kind: "agent",
-        member_id: liveLocal.principalId,
+        members: [{ kind: "agent", id: liveLocal.principalId }],
       });
       assert.equal(addPriv.status, 200, respDiag("addPriv", addPriv));
       const privAskResp = await sendCommand(liveLocal.token, wsId, {
@@ -1353,8 +1383,7 @@ test(
       `;
       await sql`
         UPDATE swarm.renewal_grants
-        SET horizon_expires_at = clock_timestamp() - interval '1 minute',
-            connection_expires_at = clock_timestamp() - interval '1 minute'
+        SET connection_expires_at = clock_timestamp() - interval '1 minute'
         WHERE principal_id = ${endedLocal.principalId}::uuid
       `;
       assert.equal(await readConnectionKind(wsId, endedLocal.principalId), "key_ended");
@@ -1391,8 +1420,7 @@ test(
       `;
       await sql`
         UPDATE swarm.renewal_grants
-        SET suspension_active = true,
-            suspended_at = clock_timestamp() - interval '1 minute'
+        SET suspended_at = clock_timestamp() - interval '1 minute'
         WHERE principal_id = ${pausedLocal.principalId}::uuid
       `;
       assert.equal(await readConnectionKind(wsId, pausedLocal.principalId), "paused");
@@ -1926,7 +1954,7 @@ test(
         WHERE principal_id = ${multiBot.principalId}::uuid
       `;
       const epBeforeMap = new Map(epochsBefore.map((r) => [r.workspace_id, Number(r.ask_lifecycle_epoch)]));
-      assert.equal(epBeforeMap.get(wsA), 2);
+      assert.equal(epBeforeMap.get(wsA), 3); // 1 -> 2 on initial mint_agent_token -> 3 on clear
       assert.equal(epBeforeMap.get(wsB), 2); // add_agent_to_workspace bumped B to 2
 
       // Reconnect multiBot via mint_agent_token in Workspace A -> advances epochs in BOTH A and B!
@@ -2019,6 +2047,17 @@ test(
       return Number(row!.calls);
     };
 
+    const waitForFnCallsIncrement = async (sig: string, baseline: number, timeoutMs = 3_000): Promise<number> => {
+      const deadline = Date.now() + timeoutMs;
+      let latest = baseline;
+      while (Date.now() < deadline) {
+        latest = await readFnCalls(sig);
+        if (latest > baseline) return latest;
+        await delay(50);
+      }
+      return latest;
+    };
+
     const readLatestAudit = async (commandKind: string, sinceId: number): Promise<Row | null> => {
       const [row] = await sql<{
         audit_id: string;
@@ -2080,8 +2119,7 @@ test(
         (await sendCommand(addrA.jwt, wsId, {
           kind: "channel_member_add",
           channel_id: privAChId,
-          member_kind: "agent",
-          member_id: bot.principalId,
+          members: [{ kind: "agent", id: bot.principalId }],
         })).status,
         200,
       );
@@ -2152,20 +2190,16 @@ test(
         await tx`SET CONSTRAINTS ALL IMMEDIATE`;
       });
 
-      // Seed F3 readable answer by Addressee A in #shared (visible to both A & B)
-      assert.equal(
-        (await sendCommand(addrA.jwt, wsId, {
-          kind: "post_signal",
-          signal_kind: "note",
-          to_user_id: null,
-          to_agent_principal_id: null,
-          in_reply_to: f3Plain,
-          about: null,
-          channel: sharedSlug,
-          body: "Public readable answer from A",
-        })).status,
-        200,
-      );
+      // Seed F3 readable answer by Addressee A in #shared (undirected conversation reply visible to both A & B)
+      const f3PlainReplyId = randomUUID();
+      await sql`
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, channel_id, until)
+        VALUES (
+          ${f3PlainReplyId}::uuid, ${wsId}::uuid, ${addrA.id}::uuid, 'user', ${f3Plain}::uuid,
+          'note', 'Public readable answer from A', ${sharedChId}::uuid, '9999-12-31T23:59:59Z'
+        )
+      `;
+      const aaBeforeF3Choice = await readFnCalls("swarm.ask_answered(uuid,uuid)");
       const f3ChoiceAnsCmdId = randomUUID();
       const f3ChoiceAns = await sendCommand(
         addrA.jwt,
@@ -2174,6 +2208,12 @@ test(
         f3ChoiceAnsCmdId,
       );
       assert.equal(f3ChoiceAns.status, 200, respDiag("f3ChoiceAns", f3ChoiceAns));
+      // Wait for f3ChoiceAns's backend stats to flush before negative probes start (also proves track_functions='all' is live).
+      const aaAfterF3Choice = await waitForFnCallsIncrement("swarm.ask_answered(uuid,uuid)", aaBeforeF3Choice);
+      assert.ok(
+        aaAfterF3Choice > aaBeforeF3Choice,
+        `track_functions='all' warmup must flush ask_answered (${aaBeforeF3Choice} -> ${aaAfterF3Choice})`,
+      );
 
       // Disconnect bot, clear its asks, then reconnect bot so it can attempt post-cutoff reraise/withdraw/supersedes!
       assert.equal((await sendCommand(owner.jwt, wsId, { kind: "revoke_agent_token", token_id: bot.tokenId })).status, 200);
@@ -2377,7 +2417,7 @@ test(
       });
       assert.equal(bLateLive.status, 409, respDiag("bLateLive", bLateLive));
       assert.equal(bLateLive.body.error, "ask_answered");
-      const aaAfterPos = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+      const aaAfterPos = await waitForFnCallsIncrement("swarm.ask_answered(uuid,uuid)", aaBeforePos);
       assert.ok(aaAfterPos > aaBeforePos, `positive control must increment ask_answered (${aaBeforePos} -> ${aaAfterPos})`);
 
       const wcBeforePos = await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)");
@@ -2386,7 +2426,7 @@ test(
         signal_id: liveChoiceCtrl,
       });
       assert.equal(wdLiveAnswered.status, 404, respDiag("wdLiveAnswered", wdLiveAnswered));
-      const wcAfterPos = await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)");
+      const wcAfterPos = await waitForFnCallsIncrement("swarm.ask_complete_for_withdrawal(uuid,uuid)", wcBeforePos);
       assert.ok(
         wcAfterPos > wcBeforePos,
         `positive control must increment ask_complete_for_withdrawal (${wcBeforePos} -> ${wcAfterPos})`,
@@ -2437,11 +2477,16 @@ test(
       // 1. Mandatory captured-epoch trigger controls (R3 Point 1) under BOTH swarm_command and owner roles.
       step("Suite 3.1: mandatory epoch trigger controls (NULL, delayed-E, current+1, 0, unexpected, Phase 1 gate)");
       const trigBot = await createLocalAgent({ wsId: wsA, owner, name: "TrigBot" });
+      const [trigEpochRow] = await sql<{ e: string }[]>`
+        SELECT swarm.seat_ask_lifecycle_epoch(${wsA}::uuid, ${trigBot.principalId}::uuid)::text AS e
+      `;
+      const trigEpoch = Number(trigEpochRow!.e);
+      assert.equal(trigEpoch, 2, "createLocalAgent starts at epoch 2 after initial mint_agent_token");
 
       for (const role of ["swarm_command", "swarm_admin"] as const) {
         await sql.begin(async (tx) => {
           await tx.unsafe(`SET LOCAL ROLE ${role}`);
-          // Before a clear (current_epoch = 1, enabled = true): NULL rejected 42501 SEAT_LIFECYCLE_EPOCH_REQUIRED
+          // Before a clear (current_epoch = trigEpoch, enabled = true): NULL rejected 42501 SEAT_LIFECYCLE_EPOCH_REQUIRED
           await tx`SAVEPOINT sp_null_before`;
           await assert.rejects(
             () => tx`
@@ -2454,12 +2499,12 @@ test(
           );
           await tx`ROLLBACK TO SAVEPOINT sp_null_before`;
 
-          // Forged future epoch (current + 1 = 2) -> 42501 SEAT_LIFECYCLE_EPOCH_INVALID
+          // Forged future epoch (current + 1) -> 42501 SEAT_LIFECYCLE_EPOCH_INVALID
           await tx`SAVEPOINT sp_future`;
           await assert.rejects(
             () => tx`
               INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Forged future?', '9999-12-31T23:59:59Z', 2)
+              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Forged future?', '9999-12-31T23:59:59Z', ${trigEpoch + 1}::bigint)
             `,
             (err: { code?: string; message?: string }) =>
               err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_INVALID/.test(err?.message ?? ""),
@@ -2528,7 +2573,7 @@ test(
 
         await tx`
           INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-          VALUES (${delayedAskId}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Delayed explicit E=1 ask?', '9999-12-31T23:59:59Z', 1)
+          VALUES (${delayedAskId}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Delayed explicit E ask?', '9999-12-31T23:59:59Z', ${trigEpoch}::bigint)
         `;
         const [withdrawn] = await tx<{ w: boolean }[]>`SELECT swarm.ask_is_withdrawn(${wsA}::uuid, ${delayedAskId}::uuid) AS w`;
         assert.equal(withdrawn!.w, true, "delayed explicit-E ask must fall under cutoff_epoch = E");
@@ -2640,9 +2685,10 @@ test(
           await tx`LOCK TABLE swarm.audit_log IN EXCLUSIVE MODE`;
         },
         async ({ holderPid, rollbackHolder, trackPending }) => {
-          // Real HTTP clear acquires Step 3/5/17 locks, writes cutoff & bumps epoch, then blocks on audit_log!
+          // Real HTTP clear (by adminDemote so owner's users row only takes FOR KEY SHARE, letting owner's
+          // sibling-wsB mint reach Step 17!) acquires Step 3/5/17 locks, writes cutoff & bumps epoch, then blocks on audit_log!
           const pendingClear = trackPending(
-            sendCommand(owner.jwt, wsA, { kind: "clear_retired_seat_asks", principal_id: raceB.principalId }),
+            sendCommand(adminDemote.jwt, wsA, { kind: "clear_retired_seat_asks", principal_id: raceB.principalId }),
           );
           const clearPid = await waitForBlockedOnPid(holderPid, "clear parked at audit_log");
 
@@ -2979,10 +3025,12 @@ test(
       });
       assert.equal(latePlain.status, 403);
 
-      // Verify (b): prior answer stays 'answered' in waiting_archived_page
-      const ordArch = ((await readWaitingViewsAs(wsId, otherAddr.id)).wa.items as Array<Row>) ?? [];
-      assert.equal(ordArch.find((i) => i.item_key === `ask:${ansFirstPlain}`)?.outcome_kind, "answered");
-      assert.equal(ordArch.find((i) => i.item_key === `ask:${clearFirstChoice}`)?.outcome_kind, "seat_cleared");
+      // Verify (b): prior answer stays 'answered' in waiting_archived_page for authorized viewer,
+      // while cleared choice ask shows 'seat_cleared' for addressee.
+      const privOrdArch = ((await readWaitingViewsAs(wsId, privUser.id)).wa.items as Array<Row>) ?? [];
+      assert.equal(privOrdArch.find((i) => i.item_key === `ask:${ansFirstPlain}`)?.outcome_kind, "answered");
+      const otherOrdArch = ((await readWaitingViewsAs(wsId, otherAddr.id)).wa.items as Array<Row>) ?? [];
+      assert.equal(otherOrdArch.find((i) => i.item_key === `ask:${clearFirstChoice}`)?.outcome_kind, "seat_cleared");
 
       // (c) Different-human held private-reply overlap (private channel AND private DM; plain reply AND answer_choice)
       step("Suite 4(c): held different-human private-reply overlap (private channel + private DM; plain + choice)");
@@ -2993,8 +3041,7 @@ test(
             (await sendCommand(privUser.jwt, wsId, {
               kind: "channel_member_add",
               channel_id: privChId,
-              member_kind: "agent",
-              member_id: privBot.principalId,
+              members: [{ kind: "agent", id: privBot.principalId }],
             })).status,
             200,
           );
@@ -3104,8 +3151,7 @@ test(
         `;
         await sql`
           UPDATE swarm.renewal_grants
-          SET horizon_expires_at = clock_timestamp() + interval '1 second',
-              connection_expires_at = clock_timestamp() + interval '1 second'
+          SET connection_expires_at = clock_timestamp() + interval '1 second'
           WHERE principal_id = ${expBot.principalId}::uuid
         `;
         const delayedLocalAskId = randomUUID();
@@ -3125,7 +3171,7 @@ test(
             await tx`SELECT 1 FROM swarm.agent_tokens WHERE principal_id = ${expBot.principalId}::uuid FOR UPDATE`;
             const [ep] = await tx<{ e: string }[]>`SELECT swarm.seat_ask_lifecycle_epoch(${wsId}::uuid, ${expBot.principalId}::uuid)::text AS e`;
             capturedEpoch = Number(ep!.e);
-            assert.equal(capturedEpoch, 1);
+            assert.equal(capturedEpoch, 2);
           },
           async ({ runInHolder, commitHolder, rollbackHolder }) => {
             // Wait for natural clock expiry into key_ended while T_post holds all local credential locks!
