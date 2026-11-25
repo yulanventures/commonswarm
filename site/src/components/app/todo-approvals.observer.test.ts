@@ -2196,3 +2196,249 @@ test("Witness 3 (Fix 3): two accepted scheduled times in the same displayed minu
   assert.ok(waitTerm1.includes(":05.120") && waitTerm1.includes("GMT"), `expected exact ms + offset, got ${waitTerm1}`);
   assert.ok(waitTerm2.includes(":45.789") && waitTerm2.includes("GMT"), `expected exact ms + offset, got ${waitTerm2}`);
 });
+
+test("Witness 4 (R2 HOLD): authoritative hold offers with note: null or blank note route from inline surfaces to Detail and decide cleanly, while incomplete/truncated/over-limit/control-char/non-authoritative holds fail closed", async () => {
+  const detailHref = `/app?w=${WS}&v=todo&t=${TODO_2}`;
+  const doc = makeDoc();
+  const makeHoldTodo = (offerId: string, version: number, gate: unknown): Todo => ({
+    workspace_id: WS,
+    todo_id: TODO_2,
+    version,
+    kind: "task",
+    title: "Hold task offer",
+    notes: "Review hold terms on detail.",
+    state: "open",
+    due_on: "2026-12-01",
+    created_by: { user_id: OTHER_USER, principal_id: null },
+    created_at: "2026-11-25T13:00:00Z",
+    assignee: null,
+    assigned_by: null,
+    assigned_at: null,
+    offer: {
+      offer_id: offerId,
+      to: { kind: "agent", id: AGENT },
+      decider_user_id: OWNER,
+      start: "queue",
+      gate: gate as Todo["gate"],
+      by: { user_id: OTHER_USER, principal_id: null },
+      at: "2026-11-25T14:00:00Z",
+    },
+    offer_prerequisite: null,
+    gate: { kind: "none" },
+    gate_clear: true,
+    queue_position: null,
+    state_by: { user_id: OTHER_USER, principal_id: null },
+    state_at: "2026-11-25T14:00:00Z",
+    comment_count: 0,
+  });
+
+  // 1) Inline -> Detail -> Decide (note: null)
+  {
+    // Waiting on you routes note: null to Detail via "Review & decide"
+    const waitingHost = doc.createElement("div");
+    const waitingOpens: string[] = [];
+    const waitingAnswers: string[] = [];
+    renderWaitingPanel(waitingHost, makeWaitingVM([{
+      id: TODO_2,
+      workspaceId: WS,
+      workspaceName: "Home",
+      title: "Hold task offer",
+      state: "open",
+      dueOn: "2026-12-01",
+      reason: "request",
+      href: detailHref,
+      canMarkDone: false,
+      version: 6,
+      kind: "task",
+      notesPreview: null,
+      notesTruncated: false,
+      requestedBy: { kind: "user", id: OTHER_USER, name: "Member" },
+      offerId: OFFER_1,
+      offerTo: { kind: "agent", id: AGENT, name: "Claude" },
+      offerStart: "queue",
+      offerGate: { kind: "hold", note: null },
+      placement: "workspace",
+    }]), {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onAnswerTodoOffer: (_item, answer) => waitingAnswers.push(answer),
+      onOpenTodo: item => waitingOpens.push(item.id),
+      onDismissTodo: () => {},
+    });
+    const waitingCard = waitingHost.querySelector(`[data-waiting-todo="${TODO_2}"]`) as unknown as FakeElement;
+    assert.ok(waitingCard);
+    assert.equal(waitingCard.querySelector(`[data-waiting-todo-approve="${TODO_2}"]`), null);
+    assert.equal(waitingCard.querySelector(`[data-waiting-todo-decline="${TODO_2}"]`), null);
+    const waitingReview = waitingCard.querySelector(`[data-waiting-todo-review="${TODO_2}"]`) as unknown as FakeElement;
+    assert.ok(waitingReview);
+    assert.equal(waitingReview.textContent, "Review & decide");
+    assert.equal(waitingReview.href, detailHref);
+    waitingReview.click();
+    assert.deepEqual(waitingOpens, [TODO_2]);
+    assert.deepEqual(waitingAnswers, []);
+
+    // Chat OfferCard routes note: null to Detail via "Review & decide"
+    const summary = makeOfferSummary({
+      todo_id: TODO_2,
+      version: 6,
+      has_notes: false,
+      offer: {
+        offer_id: OFFER_1,
+        to: { kind: "agent", id: AGENT },
+        decider_user_id: OWNER,
+        start: "queue",
+        gate: { kind: "hold", note: null },
+        by: { user_id: OTHER_USER, principal_id: null },
+        at: "2026-11-25T14:00:00Z",
+      },
+    });
+    const cards = pendingOfferCards(
+      [summary],
+      OWNER,
+      p => p.kind === "agent" ? "Claude" : "Member",
+      id => `/app?w=${WS}&v=todo&t=${id}`,
+    );
+    assert.equal(cards.length, 1);
+    const chatOpens: string[] = [];
+    const chatAnswers: string[] = [];
+    const chatCard = buildOfferCard(doc, cards[0]!, {
+      answer: (_card, answer) => chatAnswers.push(answer),
+      openDetail: card => chatOpens.push(card.todoId),
+    }) as unknown as FakeElement;
+    assert.equal(chatCard.querySelector(`[data-offer-answer="accept"]`), null);
+    assert.equal(chatCard.querySelector(`[data-offer-answer="decline"]`), null);
+    const chatReview = chatCard.querySelector(`[data-offer-review="${TODO_2}"]`) as unknown as FakeElement;
+    assert.ok(chatReview);
+    assert.equal(chatReview.textContent, "Review & decide");
+    assert.equal(chatReview.href, detailHref);
+    chatReview.click();
+    assert.deepEqual(chatOpens, [TODO_2]);
+    assert.deepEqual(chatAnswers, []);
+
+    // Detail view with authoritative todo_read enables Accept/Decline and submits exact command
+    const { slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: makeHoldTodo(OFFER_1, 6, { kind: "hold", note: null }), comments: [] },
+    });
+    const gateEl = slot.querySelector(`[data-offer-gate-term="hold"]`) as unknown as FakeElement;
+    assert.ok(gateEl);
+    assert.equal(gateEl.textContent, "On hold");
+    const acceptBtn = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    const declineBtn = slot.querySelector(`[data-todo-offer-answer="decline"]`) as unknown as FakeElement;
+    assert.ok(acceptBtn && declineBtn);
+    assert.equal(acceptBtn.disabled, false);
+    assert.equal(declineBtn.disabled, false);
+    acceptBtn.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "answerRequest");
+    assert.equal(calls[0]!.workspaceId, WS);
+    assert.deepEqual(calls[0]!.input, {
+      todo_id: TODO_2,
+      offer_id: OFFER_1,
+      base_version: 6,
+      answer: "accept",
+    });
+  }
+
+  // 2) Authoritative blank-note hold (note: "   ")
+  {
+    const { slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: makeHoldTodo(OFFER_2, 8, { kind: "hold", note: "   " }), comments: [] },
+    });
+    const gateEl = slot.querySelector(`[data-offer-gate-term="hold"]`) as unknown as FakeElement;
+    assert.ok(gateEl);
+    assert.equal(gateEl.textContent, "On hold");
+    const acceptBtn = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    const declineBtn = slot.querySelector(`[data-todo-offer-answer="decline"]`) as unknown as FakeElement;
+    assert.ok(acceptBtn && declineBtn);
+    assert.equal(acceptBtn.disabled, false);
+    assert.equal(declineBtn.disabled, false);
+    declineBtn.click();
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "answerRequest");
+    assert.equal(calls[0]!.workspaceId, WS);
+    assert.deepEqual(calls[0]!.input, {
+      todo_id: TODO_2,
+      offer_id: OFFER_2,
+      base_version: 8,
+      answer: "decline",
+    });
+  }
+
+  // 3) Incomplete, truncated, over-limit, control-char, and non-authoritative hold controls stay fail-closed
+  const failClosedCases: Array<{ name: string; gate: unknown }> = [
+    { name: "missing note property", gate: { kind: "hold" } },
+    { name: "null note with truncated: true", gate: { kind: "hold", note: null, truncated: true } },
+    { name: "non-empty note with truncated: true", gate: { kind: "hold", note: "Wait for permit", truncated: true } },
+    { name: "over-limit note (201 chars)", gate: { kind: "hold", note: "a".repeat(201) } },
+    { name: "invalid control character in note", gate: { kind: "hold", note: "bad\u0000note" } },
+  ];
+  for (const c of failClosedCases) {
+    const { slot, calls } = await mountLiveDetailHarness({
+      initialRead: { todo: makeHoldTodo(OFFER_1, 6, c.gate), comments: [] },
+    });
+    const gateEl = slot.querySelector(`[data-offer-gate-term="hold"]`) as unknown as FakeElement;
+    assert.ok(gateEl, `hold term rendered for ${c.name}`);
+    assert.equal(gateEl.textContent, "Hold details unavailable. Reload to review before deciding.", `fail-closed copy for ${c.name}`);
+    const acceptBtn = slot.querySelector(`[data-todo-offer-answer="accept"]`) as unknown as FakeElement;
+    const declineBtn = slot.querySelector(`[data-todo-offer-answer="decline"]`) as unknown as FakeElement;
+    assert.ok(acceptBtn && declineBtn, `buttons rendered for ${c.name}`);
+    assert.equal(acceptBtn.disabled, true, `accept disabled for ${c.name}`);
+    assert.equal(declineBtn.disabled, true, `decline disabled for ${c.name}`);
+    acceptBtn.click();
+    declineBtn.click();
+    for (const fn of acceptBtn.listeners.get("click") ?? []) fn({});
+    for (const fn of declineBtn.listeners.get("click") ?? []) fn({});
+    await new Promise(r => setImmediate(r));
+    assert.equal(calls.length, 0, `0 commands emitted for ${c.name}`);
+  }
+
+  // Non-authoritative TodoSummary (without created_by) with note: null or blank note stays fail-closed
+  const people = makePeopleForDetail();
+  const mapCtx = { workspaceId: WS, people, viewerId: OWNER, editor: true, sample: false, now: NOW };
+  const summaryNullHold = makeOfferSummary({
+    todo_id: TODO_2,
+    version: 6,
+    offer: {
+      offer_id: OFFER_1,
+      to: { kind: "agent", id: AGENT },
+      decider_user_id: OWNER,
+      start: "queue",
+      gate: { kind: "hold", note: null },
+      by: { user_id: OTHER_USER, principal_id: null },
+      at: "2026-11-25T14:00:00Z",
+    },
+  });
+  const mappedSummaryNull = mapHomeTodo(summaryNullHold, mapCtx, [], []);
+  assert.equal(mappedSummaryNull.pendingOffer?.gateKind, "hold");
+  assert.equal(mappedSummaryNull.pendingOffer?.termsAvailable, false);
+  assert.equal(mappedSummaryNull.pendingOffer?.gate, null);
+
+  const summaryBlankHold = makeOfferSummary({
+    todo_id: TODO_2,
+    version: 6,
+    offer: {
+      offer_id: OFFER_1,
+      to: { kind: "agent", id: AGENT },
+      decider_user_id: OWNER,
+      start: "queue",
+      gate: { kind: "hold", note: "   " },
+      by: { user_id: OTHER_USER, principal_id: null },
+      at: "2026-11-25T14:00:00Z",
+    },
+  });
+  const mappedSummaryBlank = mapHomeTodo(summaryBlankHold, mapCtx, [], []);
+  assert.equal(mappedSummaryBlank.pendingOffer?.gateKind, "hold");
+  assert.equal(mappedSummaryBlank.pendingOffer?.termsAvailable, false);
+  assert.equal(mappedSummaryBlank.pendingOffer?.gate, null);
+
+  const mappedAuthNull = mapHomeTodo(makeHoldTodo(OFFER_1, 6, { kind: "hold", note: null }), mapCtx, [], []);
+  assert.equal(mappedAuthNull.pendingOffer?.gateKind, "hold");
+  assert.equal(mappedAuthNull.pendingOffer?.termsAvailable, true);
+  assert.equal(mappedAuthNull.pendingOffer?.gate, null);
+});

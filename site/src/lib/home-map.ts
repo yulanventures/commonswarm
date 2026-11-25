@@ -555,13 +555,21 @@ export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known
       }
     } else if (rawKind === 'hold' && offerGate?.kind === 'hold') {
       offerGateKind = 'hold';
-      if (
-        typeof offerGate.note === 'string'
-        && offerGate.note.trim().length > 0
-        && Array.from(offerGate.note).length <= TODO_GATE_NOTE_LIMIT
-        && (offerGate as { truncated?: unknown }).truncated !== true
-      ) {
-        mappedOfferGate = { kind: 'note', note: offerGate.note };
+      const hasNoteKey = Object.hasOwn(offerGate, 'note');
+      const rawNote: unknown = hasNoteKey ? offerGate.note : undefined;
+      const truncated = (offerGate as { truncated?: unknown }).truncated === true;
+      const hasInvalidControlChars = typeof rawNote === 'string' && /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(rawNote);
+      const validStringNote = typeof rawNote === 'string'
+        && Array.from(rawNote).length <= TODO_GATE_NOTE_LIMIT
+        && !hasInvalidControlChars;
+      if (!hasNoteKey || truncated) {
+        mappedOfferGate = null;
+        termsAvailable = false;
+      } else if (validStringNote && rawNote.trim().length > 0) {
+        mappedOfferGate = { kind: 'note', note: rawNote };
+        termsAvailable = true;
+      } else if (full !== null && (rawNote === null || validStringNote)) {
+        mappedOfferGate = null;
         termsAvailable = true;
       } else {
         mappedOfferGate = null;

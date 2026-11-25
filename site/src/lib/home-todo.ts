@@ -265,6 +265,8 @@ function offerPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: Todo
   }
   terms.append(node(doc, "p", "hm-todo-status-more", offer.start === "now" ? "Start now" : "Queue"));
   let formattedAt: string | null = null;
+  const validHoldGate = offer.termsAvailable
+    && (offer.gate === null || (offer.gate.kind === "note" && offer.gate.note.trim().length > 0));
   if (offer.gateKind === "at") {
     formattedAt = offer.termsAvailable && offer.gate?.kind === "time"
       ? formatExactOfferAt(offer.gate.at, vm.timeZone)
@@ -278,13 +280,12 @@ function offerPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: Todo
     gateEl.dataset.offerGateTerm = "at";
     terms.append(gateEl);
   } else if (offer.gateKind === "hold") {
-    const holdNote = offer.termsAvailable && offer.gate?.kind === "note" ? offer.gate.note : "";
-    const gateEl = node(
-      doc,
-      "p",
-      "hm-todo-status-more",
-      holdNote.trim() ? `Hold: ${holdNote}` : "Hold details unavailable. Reload to review before deciding.",
-    );
+    const holdText = !validHoldGate
+      ? "Hold details unavailable. Reload to review before deciding."
+      : offer.gate?.kind === "note"
+        ? `Hold: ${offer.gate.note}`
+        : "On hold";
+    const gateEl = node(doc, "p", "hm-todo-status-more", holdText);
     gateEl.dataset.offerGateTerm = "hold";
     terms.append(gateEl);
   } else if (offer.gateKind === "after") {
@@ -309,7 +310,7 @@ function offerPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: Todo
   const canSubmitOffer = offer.termsAvailable
     && (offer.gateKind !== "at" || formattedAt !== null)
     && (offer.gateKind !== "after" || (offer.gate?.kind === "todo" && offer.gate.todo.title.trim().length > 0))
-    && (offer.gateKind !== "hold" || (offer.gate?.kind === "note" && offer.gate.note.trim().length > 0));
+    && (offer.gateKind !== "hold" || validHoldGate);
 
   if (todo.may.answerOffer && !todo.sample && callbacks.answerOffer) {
     const actions = node(doc, "div", "hm-todo-decision-actions");
