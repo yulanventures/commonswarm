@@ -761,7 +761,7 @@ export const KNOWN_FLAGS = new Set([
   ...ONBOARDING_BOOLEAN_FLAGS, ...ONBOARDING_VALUE_FLAGS,
   ...BODY_FLAGS,
   "about", "agent-token-file", "agent-token-stdin", "all-devices", "allow-unattended", "anon-key", "attach", "branch", "capability-id",
-  "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "clear-purpose", "cooldown", "cwd", "defer-over", "device-id", "dry-run", "effort", "email",
+  "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "clear-purpose", "cooldown", "cwd", "defer-over", "device-id", "dry-run", "effort", "email", "harness",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "github-api-url", "github-token-file", "github-token-stdin", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel", "before", "grant-id",
   "help", "input-file", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
@@ -1182,6 +1182,8 @@ also requires an ignored file. Uninstall also
 requires --write and uses the same scope selection.
 
 session start acquires one execution session per agent. Interactive mode never starts an ACP model, factory, or child spawn. The default path only acquires; --foreground claims and surfaces into --host-session-id. There is no worker mode: the listener never starts a model (cswarm 0.1.61), so listen start takes no --session-context. --session-context must be an absolute owned 0600 file in an owned 0700 directory outside a repository. Shell commands that omit it are not bound. session stop returns progress until cswarm session status confirms teardown. principal create --allow-duplicate-name is off by default and is never sent as false.
+
+engine run (preview) owns one managed seat's headless harness; live runs are disabled unless CSWARM_ENGINE_ALLOW_LIVE=1 is set (exits 3 before locking or calling the network). engine status inspects the seat lock, journal counts, and last stop reason without starting anything.
 
 Invite, legacy token accept, principal create/revoke, human token mint/revoke, link, new, and workspace close require a
 stored human login. Agent self-surrender of a token uses --agent-token-file or --agent-token-stdin and never takes the secret on argv. Invite-link accept signs in when needed, then accepts and
@@ -12474,6 +12476,50 @@ async function runTodoComment(args: Arguments): Promise<void> {
 }
 
 const TODO_HELP_TAIL = "[--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]";
+export const ENGINE_RUN_ACCEPTED_FLAGS = ["harness", "cwd", "profile", "host-session-id", "json"] as const;
+export const ENGINE_STATUS_ACCEPTED_FLAGS = ["profile", "host-session-id", "json"] as const;
+
+async function runEngineCli(args: Arguments): Promise<void> {
+  args.assertShape(ENGINE_RUN_ACCEPTED_FLAGS, 2);
+  const profileOpt = args.optional("profile");
+  const hostSessionId = args.optional("host-session-id");
+  if (profileOpt !== undefined) {
+    try {
+      await readAgentProfile(privatePath(profileOpt), hostSessionId);
+    } catch (error) {
+      if (
+        error instanceof AgentSetupError &&
+        (error.code === "profile_other_session" || error.code === "host_session_required")
+      ) {
+        throw error;
+      }
+    }
+  }
+  const { isEngineHarness, runEngine } = await import("./engine/run.js");
+  const harness = args.optional("harness");
+  if (harness === undefined || !isEngineHarness(harness)) {
+    throw new UsageError("--harness is required and must be claude or codex");
+  }
+  const result = await runEngine({
+    harness,
+    profilePath: profileOpt,
+    hostSessionId,
+    cwd: args.optional("cwd"),
+    json: args.has("json"),
+  });
+  process.exitCode = result.exitCode;
+}
+
+async function runEngineStatusCli(args: Arguments): Promise<void> {
+  args.assertShape(ENGINE_STATUS_ACCEPTED_FLAGS, 2);
+  const { inspectEngineStatus, renderEngineStatus } = await import("./engine/run.js");
+  const report = await inspectEngineStatus({
+    profilePath: args.optional("profile"),
+    hostSessionId: args.optional("host-session-id"),
+  });
+  process.stdout.write(renderEngineStatus(report, args.has("json")));
+}
+
 const todoEntry = (handler: AgentCommandHandler, description: string, mutates: boolean, flags: readonly string[], help: string) =>
   commandEntry({ ...noTool("the household to-do tools (todo_list, todo_read, ...) already serve MCP"), handler: traced("runTodo", handler),
     description, mutates, flags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`${help} ${TODO_HELP_TAIL}`] });
@@ -12627,6 +12673,14 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 13,
     refusalTrace: "runListen",
+  }),
+  engine: group({
+    run: commandEntry({ ...noTool("starts a local headless harness runner; never a model tool"), handler: traced("runEngineCli", runEngineCli), description: "Preview: run the local engine for one seat (live runs require CSWARM_ENGINE_ALLOW_LIVE=1 and are not enabled yet).", mutates: true, flags: ENGINE_RUN_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm engine run --harness <claude|codex> [--cwd <folder>] [--profile <path>] [--host-session-id <id>] [--json]"] }),
+    status: commandEntry({ ...noTool("local engine state inspection; never a model tool"), handler: traced("runEngineStatusCli", runEngineStatusCli), description: "Preview: report seat lock state, journal counts, and last stop reason without starting anything.", mutates: false, flags: ENGINE_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm engine status [--profile <path>] [--host-session-id <id>] [--json]"] }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm engine takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: ENGINE_RUN_ACCEPTED_FLAGS, ...NATIVE_PROFILE },
+    profileListOrder: 34,
+    refusalTrace: "runEngine",
   }),
   session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => {
     const humanOnly = action === "enable" || action === "disable" || action === "recover";
@@ -12859,6 +12913,8 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "listen.status": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.stop": LISTEN_STOP_ACCEPTED_FLAGS,
   "listen.canary": LISTEN_CANARY_ACCEPTED_FLAGS,
+  "engine.run": ENGINE_RUN_ACCEPTED_FLAGS,
+  "engine.status": ENGINE_STATUS_ACCEPTED_FLAGS,
   get "session.start"() { return SESSION_START_ACCEPTED_FLAGS.filter(flag => !(SESSION_START_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "session.status": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
   "session.stop": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
@@ -13203,7 +13259,7 @@ function safeOptionalFlag(args: Arguments | undefined, name: string): string | u
 
 const SUBCOMMAND_VERBS = new Set([
   "conversation", "channel", "receive", "setup", "file", "brain", "todo", "session",
-  "listen", "admin", "profile", "target", "member", "workspace", "invite", "grant",
+  "listen", "engine", "admin", "profile", "target", "member", "workspace", "invite", "grant",
   "link", "token", "principal", "alert", "memory", "hook", "object",
 ]);
 
