@@ -49,7 +49,7 @@ import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
-import { dbAssert, repoSql, runSql } from "../support/admin-schema-db.js";
+import { dbAssert, localClusterAdminUrl, repoSql, runSql } from "../support/admin-schema-db.js";
 import { sqlPhase } from "../support/admin-schema-process.js";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
@@ -161,8 +161,12 @@ function step(name: string): void {
   console.error(`[retired-seat-asks] ${name}`);
 }
 
-function openBoundedConnection(applicationName: string, forLockHolder = false): postgres.Sql {
-  const conn = postgres(local.DB_URL, {
+function openBoundedConnection(
+  applicationName: string,
+  forLockHolder = false,
+  dbUrl: string = local.DB_URL,
+): postgres.Sql {
+  const conn = postgres(dbUrl, {
     prepare: false,
     max: forLockHolder ? 1 : 8,
     connection: {
@@ -767,7 +771,7 @@ async function createLocalAgent(opts: {
     task_id: randomUUID(),
     epoch: 1,
     device_id: deviceId,
-    scopes: ["post_signal", "read_signals"],
+    scopes: ["post_signal"],
     ...(opts.ttlMs !== undefined ? { ttl_ms: opts.ttlMs } : {}),
   });
   assert.equal(minted.status, 200, respDiag(`mint_agent_token(${opts.name})`, minted));
@@ -922,7 +926,7 @@ async function cleanupFixture(workspaceIds: string[], userIds: string[]): Promis
       await tx`DELETE FROM swarm.seat_admin_grants WHERE owner_user_id = ANY(${userIds}::uuid[])`;
       await tx`DELETE FROM swarm.admin_events WHERE owner_user_id = ANY(${userIds}::uuid[])`;
       await tx`DELETE FROM swarm.admin_accounts WHERE owner_user_id = ANY(${userIds}::uuid[])`;
-      await tx`DELETE FROM swarm.idempotency_keys WHERE principal_kind = 'user' AND principal_id = ANY(${userIds}::uuid[])`;
+      await tx`DELETE FROM swarm.idempotency_keys WHERE principal_kind = 'user' AND principal_id = ANY(${userIds}::text[])`;
       await tx`DELETE FROM swarm.devices WHERE user_id = ANY(${userIds}::uuid[])`;
       await tx`DELETE FROM swarm.users WHERE user_id = ANY(${userIds}::uuid[])`;
     }
@@ -933,6 +937,22 @@ async function cleanupFixture(workspaceIds: string[], userIds: string[]): Promis
       await admin.auth.admin.deleteUser(userId);
     } catch {
       /* user already removed */
+    }
+  }
+}
+
+async function cleanupFixtureInFinally(
+  label: string,
+  workspaceIds: string[],
+  userIds: string[],
+  hasPrimaryError: boolean,
+): Promise<void> {
+  try {
+    await cleanupFixture(workspaceIds, userIds);
+  } catch (cleanupErr) {
+    console.error(`[retired-seat-asks] ${label} cleanupFixture failed:`, cleanupErr);
+    if (!hasPrimaryError) {
+      throw cleanupErr;
     }
   }
 }
@@ -1212,6 +1232,7 @@ test(
     assert.equal(privChResp.status, 200, respDiag("create priv channel", privChResp));
     const privChId = String((privChResp.body.channel as Row).channel_id);
 
+    let primaryFailed = false;
     try {
       // 1. Live local seat: post plain ask + choice ask + note; check sender_lifecycle_epoch + live 409 refusal.
       step("Suite 1a.1: live local seat refuses 409 seat_still_live + runtime epoch check");
@@ -1643,8 +1664,16 @@ test(
         principal_id: revokedHosted.principalId,
       });
       assert.equal(clearRevokedHosted.status, 200, respDiag("clearRevokedHosted", clearRevokedHosted));
+    } catch (err) {
+      primaryFailed = true;
+      throw err;
     } finally {
-      await cleanupFixture([wsId], [owner.id, adminUser.id, agentOwner.id, departingOwner.id, addressee.id, outsider.id]);
+      await cleanupFixtureInFinally(
+        "Suite 1a",
+        [wsId],
+        [owner.id, adminUser.id, agentOwner.id, departingOwner.id, addressee.id, outsider.id],
+        primaryFailed,
+      );
     }
   },
 );
@@ -1672,6 +1701,7 @@ test(
       members: [{ user: addressee, role: "member" }],
     });
 
+    let primaryFailed = false;
     try {
       // 1. Re-add resurrection guard (remove -> clear -> add -> new ask stays open while old stays cleared)
       step("Suite 1b.1: re-add resurrection guard");
@@ -1875,7 +1905,7 @@ test(
         task_id: randomUUID(),
         epoch: 2,
         device_id: precBot.deviceId,
-        scopes: ["post_signal", "read_signals"],
+        scopes: ["post_signal"],
       });
       assert.equal(remintedPrec.status, 200, respDiag("remintedPrec", remintedPrec));
       const precToken2 = String(remintedPrec.body.agent_token);
@@ -1965,7 +1995,7 @@ test(
         task_id: randomUUID(),
         epoch: 2,
         device_id: multiBot.deviceId,
-        scopes: ["post_signal", "read_signals"],
+        scopes: ["post_signal"],
       });
       assert.equal(remintMulti.status, 200, respDiag("remintMulti", remintMulti));
       const multiToken2 = String(remintMulti.body.agent_token);
@@ -2012,8 +2042,11 @@ test(
         (((await readWaitingViewsAs(wsB, addressee.id)).dq.asks as Array<Row>) ?? []).some((a) => a.signal_id === newAskB),
         true,
       );
+    } catch (err) {
+      primaryFailed = true;
+      throw err;
     } finally {
-      await cleanupFixture([wsA, wsB], [owner.id, addressee.id]);
+      await cleanupFixtureInFinally("Suite 1b", [wsA, wsB], [owner.id, addressee.id], primaryFailed);
     }
   },
 );
@@ -2090,12 +2123,18 @@ test(
       return Number(row!.m);
     };
 
-    await sql`ALTER SYSTEM SET track_functions = 'all'`;
-    await sql`SELECT pg_reload_conf()`;
-    // Brief pause so pooled backends observe SIGHUP before probing.
-    await delay(150);
-
+    const adminSql = openBoundedConnection(
+      "retired-seat-asks-track-fn",
+      true,
+      localClusterAdminUrl(local.DB_URL),
+    );
+    let primaryFailed = false;
     try {
+      await adminSql`ALTER SYSTEM SET track_functions = 'all'`;
+      await adminSql`SELECT pg_reload_conf()`;
+      // Brief pause so pooled backends observe SIGHUP before probing.
+      await delay(150);
+
       const sharedSlug = `shared-${randomBytes(3).toString("hex")}`;
       const sharedChResp = await sendCommand(owner.jwt, wsId, {
         kind: "channel_create",
@@ -2225,7 +2264,7 @@ test(
         task_id: randomUUID(),
         epoch: 2,
         device_id: bot.deviceId,
-        scopes: ["post_signal", "read_signals"],
+        scopes: ["post_signal"],
       });
       assert.equal(reconnected.status, 200, respDiag("reconnected", reconnected));
       const botToken2 = String(reconnected.body.agent_token);
@@ -2431,10 +2470,35 @@ test(
         wcAfterPos > wcBeforePos,
         `positive control must increment ask_complete_for_withdrawal (${wcBeforePos} -> ${wcAfterPos})`,
       );
+    } catch (err) {
+      primaryFailed = true;
+      throw err;
     } finally {
-      await sql`ALTER SYSTEM RESET track_functions`;
-      await sql`SELECT pg_reload_conf()`;
-      await cleanupFixture([wsId], [owner.id, addrA.id, addrB.id]);
+      let resetError: unknown = null;
+      try {
+        await adminSql`ALTER SYSTEM RESET track_functions`;
+        await adminSql`SELECT pg_reload_conf()`;
+      } catch (resetErr) {
+        console.error("[retired-seat-asks] Suite 2 track_functions reset failed:", resetErr);
+        resetError = resetErr;
+      } finally {
+        try {
+          await adminSql.end({ timeout: 2 });
+        } catch {
+          /* admin connection already closed */
+        } finally {
+          activeConnections.delete(adminSql);
+        }
+      }
+      await cleanupFixtureInFinally(
+        "Suite 2",
+        [wsId],
+        [owner.id, addrA.id, addrB.id],
+        primaryFailed || resetError !== null,
+      );
+      if (!primaryFailed && resetError !== null) {
+        throw resetError;
+      }
     }
   },
 );
@@ -2473,6 +2537,7 @@ test(
       members: [{ user: adminDemote, role: "admin" }],
     });
 
+    let primaryFailed = false;
     try {
       // 1. Mandatory captured-epoch trigger controls (R3 Point 1) under BOTH swarm_command and owner roles.
       step("Suite 3.1: mandatory epoch trigger controls (NULL, delayed-E, current+1, 0, unexpected, Phase 1 gate)");
@@ -2552,11 +2617,11 @@ test(
         });
       }
 
-      // Disconnect & clear trigBot -> cutoff_epoch = 1, v_current_epoch = 2.
+      // Disconnect & clear trigBot -> cutoff_epoch = trigEpoch (2), v_current_epoch = 3.
       assert.equal((await sendCommand(owner.jwt, wsA, { kind: "revoke_agent_token", token_id: trigBot.tokenId })).status, 200);
       assert.equal((await sendCommand(owner.jwt, wsA, { kind: "clear_retired_seat_asks", principal_id: trigBot.principalId })).status, 200);
 
-      // Omitted NULL after clear -> 42501 SEAT_LIFECYCLE_EPOCH_REQUIRED; delayed explicit-E (1) succeeds and is covered!
+      // Omitted NULL after clear -> 42501 SEAT_LIFECYCLE_EPOCH_REQUIRED; delayed explicit-E (trigEpoch) succeeds and is covered!
       const delayedAskId = randomUUID();
       await sql.begin(async (tx) => {
         await tx`SET LOCAL ROLE swarm_command`;
@@ -2590,6 +2655,12 @@ test(
       await sql
         .begin(async (tx) => {
           await tx`UPDATE swarm.config SET value = 'false'::jsonb WHERE key = 'retired_seat_ask_clear_enabled'`;
+          // Simulate a seat created during Phase 1 (still at epoch 1 before Phase 2 enablement).
+          await tx`
+            UPDATE swarm.agent_ask_lifecycle
+            SET ask_lifecycle_epoch = 1
+            WHERE workspace_id = ${wsA}::uuid AND principal_id = ${phase1Bot.principalId}::uuid
+          `;
           await tx`SET LOCAL ROLE swarm_command`;
           const [clearDisabled] = await tx<{ r: Row }[]>`
             SELECT swarm.clear_retired_seat_asks(${wsA}::uuid, ${owner.id}::uuid, ${phase1Bot.principalId}::uuid) AS r
@@ -2640,7 +2711,7 @@ test(
           await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${newRun}::uuid, ${raceA.principalId}::uuid, ${raceA.deviceId}::uuid)`;
           await tx`
             INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
-            VALUES (${randomUUID()}::uuid, ${raceA.principalId}::uuid, ${newRun}::uuid, ${tx.json(["post_signal", "read_signals"])}::jsonb,
+            VALUES (${randomUUID()}::uuid, ${raceA.principalId}::uuid, ${newRun}::uuid, ${tx.json(["post_signal"])}::jsonb,
               ${createHash("sha256").update(newTok).digest()}, clock_timestamp() + interval '1 hour', ${randomUUID()}::uuid)
           `;
           await tx`SELECT swarm.advance_seat_lifecycle_epoch(${raceA.principalId}::uuid, NULL::uuid)`;
@@ -2701,7 +2772,7 @@ test(
               task_id: randomUUID(),
               epoch: 2,
               device_id: raceB.deviceId,
-              scopes: ["post_signal", "read_signals"],
+              scopes: ["post_signal"],
             }),
           );
           await waitForBlockedOnPid(clearPid, "sibling-wsB mint waits on clearPid Step 17 lock");
@@ -2861,8 +2932,16 @@ test(
         principal_id: archBot.principalId,
       });
       assert.equal(clearAfterArchive.status, 403, respDiag("clearAfterArchive", clearAfterArchive));
+    } catch (err) {
+      primaryFailed = true;
+      throw err;
     } finally {
-      await cleanupFixture([wsA, wsB, wsArchive], [owner.id, adminDemote.id, adminRemove.id, addressee.id]);
+      await cleanupFixtureInFinally(
+        "Suite 3",
+        [wsA, wsB, wsArchive],
+        [owner.id, adminDemote.id, adminRemove.id, addressee.id],
+        primaryFailed,
+      );
     }
   },
 );
@@ -2940,6 +3019,7 @@ test(
       return Number(r!.m);
     };
 
+    let primaryFailed = false;
     try {
       // 0. Baseline 0-ask empty control clear by nonMemberAdmin.
       step("Suite 4.0: capture 0-ask empty control baseline");
@@ -3218,7 +3298,7 @@ test(
         );
         if (pos === "post-fence-commit") {
           const [w] = await sql<{ w: boolean }[]>`SELECT swarm.ask_is_withdrawn(${wsId}::uuid, ${delayedLocalAskId}::uuid) AS w`;
-          assert.equal(w!.w, true, "delayed local ask with explicit E=1 is covered by cutoff_epoch=1");
+          assert.equal(w!.w, true, "delayed local ask with explicit captured epoch is covered by cutoff_epoch");
           assert.equal(
             (((await readWaitingViewsAs(wsId, privUser.id)).dq.asks as Array<Row>) ?? []).some((a) => a.signal_id === delayedLocalAskId),
             false,
@@ -3322,7 +3402,7 @@ test(
             task_id: randomUUID(),
             epoch: 2,
             device_id: deviceIdForLocal!,
-            scopes: ["post_signal", "read_signals"],
+            scopes: ["post_signal"],
           });
           assert.equal(remint.status, 200, respDiag("remint local replay", remint));
         } else {
@@ -3430,8 +3510,11 @@ test(
       );
       const [sibCommitted] = await sql<{ id: string }[]>`SELECT id FROM swarm.signals WHERE id = ${siblingNoteId}::uuid`;
       assert.equal(sibCommitted?.id, siblingNoteId, "sibling Q private reply committed cleanly");
+    } catch (err) {
+      primaryFailed = true;
+      throw err;
     } finally {
-      await cleanupFixture([wsId], [owner.id, nonMemberAdmin.id, privUser.id, otherAddr.id]);
+      await cleanupFixtureInFinally("Suite 4", [wsId], [owner.id, nonMemberAdmin.id, privUser.id, otherAddr.id], primaryFailed);
     }
   },
 );
@@ -3465,6 +3548,7 @@ test(
       members: [{ user: adminUser, role: "admin" }],
     });
 
+    let primaryFailed = false;
     try {
       const targetA = await createLocalAgent({ wsId: wsA, owner, name: "TargetA" });
       assert.equal((await sendCommand(owner.jwt, wsA, { kind: "revoke_agent_token", token_id: targetA.tokenId })).status, 200);
@@ -3687,8 +3771,11 @@ test(
         archCmdId,
       );
       assert.equal(archivedReplay.status, 403, respDiag("archivedReplay", archivedReplay));
+    } catch (err) {
+      primaryFailed = true;
+      throw err;
     } finally {
-      await cleanupFixture([wsA, wsB, wsArch], [owner.id, adminUser.id, nonOwnerMember.id, stranger.id]);
+      await cleanupFixtureInFinally("Suite 5", [wsA, wsB, wsArch], [owner.id, adminUser.id, nonOwnerMember.id, stranger.id], primaryFailed);
     }
   },
 );

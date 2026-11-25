@@ -1090,7 +1090,7 @@ BEGIN
     );
   END IF;
 
-  -- 2. Deadline and cutoff/autoclear check SECOND, strictly BEFORE ask_complete_for_withdrawal.
+  -- 2. Deadline and cutoff/autoclear check SECOND, strictly before global completion.
   --    waiting_ask_autoclear_status never reads replies, ui_actions, or completion predicates.
   IF v_ask.until <= v_now
      OR EXISTS (

@@ -213,7 +213,9 @@ SELECT
     WHERE p.oid = to_regprocedure('swarm.withdraw_ask(uuid,text,uuid,uuid,uuid)')
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
       AND position('agent_ask_clear_events' IN p.prosrc) > 0
-      AND position('waiting_ask_autoclear_status' IN p.prosrc) < position('ask_complete_for_withdrawal' IN p.prosrc)
+      AND position('swarm.waiting_ask_autoclear_status(' IN p.prosrc) > 0
+      AND position('swarm.ask_complete_for_withdrawal(' IN p.prosrc) > 0
+      AND position('swarm.waiting_ask_autoclear_status(' IN p.prosrc) < position('swarm.ask_complete_for_withdrawal(' IN p.prosrc)
   )
   AND has_function_privilege('swarm_command', 'swarm.withdraw_ask(uuid,text,uuid,uuid,uuid)', 'EXECUTE')
   AND EXISTS (

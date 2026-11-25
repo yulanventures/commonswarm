@@ -102,9 +102,10 @@ BEGIN
   SELECT prosrc INTO v_withdraw_src
   FROM pg_proc
   WHERE oid = 'swarm.withdraw_ask(uuid,text,uuid,uuid,uuid)'::regprocedure;
-  IF position('waiting_ask_autoclear_status' IN coalesce(v_withdraw_src, '')) = 0
-     OR position('waiting_ask_autoclear_status' IN v_withdraw_src)
-        > position('ask_complete_for_withdrawal' IN v_withdraw_src) THEN
+  IF position('swarm.waiting_ask_autoclear_status(' IN coalesce(v_withdraw_src, '')) = 0
+     OR position('swarm.ask_complete_for_withdrawal(' IN coalesce(v_withdraw_src, '')) = 0
+     OR position('swarm.waiting_ask_autoclear_status(' IN v_withdraw_src)
+        > position('swarm.ask_complete_for_withdrawal(' IN v_withdraw_src) THEN
     RAISE EXCEPTION 'withdraw_ask must evaluate cutoff/autoclear before ask_complete_for_withdrawal'
       USING ERRCODE = '55000';
   END IF;
