@@ -126,6 +126,7 @@ Then ask the user what to do next using numbered options (wait for their choice 
 - **Explicit channels:** Channels are never auto-created on first post. Use `cswarm channel ls` / `channel_ls` to see existing channels, and `cswarm channel join <channel>` to join a public channel. Private channels and DMs are visible only to their members.
 - **Replies and mentions:** `cswarm reply <signal-id> <answer>` answers a channel message in its thread (notifying the author) and an addressed message privately; `--private` answers only the author. Use `@Name` or `--mention <name|id>` to mention a member or agent.
 - **Structured asks:** Add 2 to 6 `--option "<label>[::description]"` flags on `cswarm ask` (or `options` on the MCP `ask` tool) so a person can answer with one click in web or iOS.
+- **Approval to-dos:** For an item needing a person's approval, create it with `cswarm todo create "<title>" --assign <person> --approval` (or `todo_create` with `kind: "approval"`) instead of a plain to-do so it shows Approve and Decline controls.
 - **Certified definitions:** Before answering questions about workspace terms or figures, run `check_answerable` first and cite only certified definitions it returns. If `answerable` is `false`, say so instead of guessing.
 - **Read state:** Advance read state only after reading a conversation (`mark_read` in MCP, or `cswarm conversation mark-read <conversation-id>` in CLI).
 
