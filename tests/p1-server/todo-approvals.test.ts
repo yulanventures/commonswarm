@@ -898,7 +898,7 @@ test(
       INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_principal, created_by_kind)
       VALUES ('${chId}', '${wsId}', 'check-ch', 'open', '${ownerId}', 'user');
       INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, member_key, generation, created_by_kind, created_by_principal)
-      VALUES ('${dmConvId}', '${wsId}', 'dm', 'check-dm-key', 0, 'user', '${ownerId}');
+      VALUES ('${dmConvId}', '${wsId}', 'dm', '0000000000000000000000000000000000000000000000000000000000000001', 0, 'user', '${ownerId}');
 
       -- Positive controls: valid approved approval (workspace) and valid declined approval (general).
       INSERT INTO swarm.household_todos (
@@ -1932,25 +1932,20 @@ test(
         assert.deepEqual(afterFx, beforeFx, "withdrawn connection emits zero notice rows");
       }
 
-      // (b) Asking agent revoked: both pre-revoked (Step A recipient_not_live) and revoked during held Step F (Step G recipient_access_refused)
+      // (b) Asking agent revoked: both pre-revoked (Step A recipient_not_live) and revoked during held Step E (Step G recipient_access_refused)
       {
         const approvalPreRevoke = await createApprovalBy(extraAgent.token, "Pre-revoked agent approval");
         const approvalMidRevoke = await createApprovalBy(extraAgent.token, "Mid-flight revoked agent approval");
-        const [extraDmRow] = await sql<{ r: { conversation: { conversation_id: string } } }[]>`
-          SELECT swarm.conversation_open(
-            ${fx.wsId}::uuid, 'user', ${decider.id}::uuid, '{}'::uuid[], ARRAY[${extraAgent.id}]::uuid[], false
-          ) AS r
-        `;
-        const extraDmConvId = extraDmRow!.r.conversation.conversation_id;
         const extraTopics = [`cswarm-wake:${extraAgent.wakeId}`, memberDeciderTopic];
 
-        // Mid-flight revocation during held Step F -> Step G rolls back savepoint with recipient_access_refused!
+        // Mid-flight revocation during held Step E spend shards -> Step G rolls back savepoint with recipient_access_refused!
+        await ensureRateBucketRows(SPEND_SIGNAL_KEYS);
         const aboutMid = `todo:${approvalMidRevoke.todo_id as string}`;
         const beforeMid = await countNoticeEffects(fx.wsId, aboutMid, extraTopics);
         await withHeldLock(
           "mid-flight-agent-revoke",
           async (tx) => {
-            await tx`SELECT 1 FROM swarm.conversations WHERE conversation_id = ${extraDmConvId}::uuid FOR UPDATE`;
+            await tx`SELECT 1 FROM swarm.rate_buckets WHERE bucket_key = ANY(${SPEND_SIGNAL_KEYS}::text[]) FOR UPDATE`;
           },
           async ({ holderPid, releaseLock, trackPending }) => {
             const pending = trackPending(sendCommand(decider.jwt, fx.wsId, {
@@ -1959,7 +1954,7 @@ test(
               base_version: approvalMidRevoke.version,
               decision: "approve",
             }));
-            await waitForBlockedOnPid(holderPid, "mid-flight-agent-revoke wait");
+            await waitForBlockedOnPid(holderPid, "mid-flight-agent-revoke Step E wait");
             await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp() WHERE principal_id = ${extraAgent.id}::uuid`;
             await releaseLock();
             const resp = await raceWithTimeout(pending, "mid-flight-agent-revoke resp");
