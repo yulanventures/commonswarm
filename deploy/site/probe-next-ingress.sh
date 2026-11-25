@@ -57,9 +57,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-has_header() {
-  tr -d '\r' < "$WORK/headers" | grep -Eiq "$1"
-}
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | cut -d' ' -f1
@@ -114,28 +111,8 @@ else
         failures=$((failures + 1))
         continue
       fi
-      if ! has_header '^content-type:[[:space:]]*text/html([[:space:]]*;.*)?[[:space:]]*$'; then
-        printf 'FAIL path=%s encoding=%s status=%s reason=content-type-mismatch\n' "$path" "$encoding" "$status" >&2
-        failures=$((failures + 1))
-        continue
-      fi
-      if ! reason=$(python3 "$SCRIPT_DIR/refresh-site.py" --check-next-csp "$WORK/headers" 2>&1); then
-        printf 'FAIL path=%s encoding=%s status=%s reason=%s\n' "$path" "$encoding" "$status" "${reason:-csp-check-failed}" >&2
-        failures=$((failures + 1))
-        continue
-      fi
-      if ! has_header '^x-content-type-options:[[:space:]]*nosniff[[:space:]]*$'; then
-        printf 'FAIL path=%s encoding=%s status=%s reason=missing-nosniff\n' "$path" "$encoding" "$status" >&2
-        failures=$((failures + 1))
-        continue
-      fi
-      if ! has_header '^referrer-policy:[[:space:]]*no-referrer[[:space:]]*$'; then
-        printf 'FAIL path=%s encoding=%s status=%s reason=missing-referrer-policy\n' "$path" "$encoding" "$status" >&2
-        failures=$((failures + 1))
-        continue
-      fi
-      if ! has_header '^cache-control:[[:space:]]*no-cache[[:space:]]*$'; then
-        printf 'FAIL path=%s encoding=%s status=%s reason=cache-control-mismatch\n' "$path" "$encoding" "$status" >&2
+      if ! reason=$(python3 "$SCRIPT_DIR/refresh-site.py" --check-next-html-headers "$WORK/headers" 2>&1); then
+        printf 'FAIL path=%s encoding=%s status=%s reason=%s\n' "$path" "$encoding" "$status" "${reason:-html-headers-check-failed}" >&2
         failures=$((failures + 1))
         continue
       fi

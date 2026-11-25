@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { gzipSync } from 'node:zlib';
 const exec = promisify(execFile);
 const repo = resolve(import.meta.dirname, '../..');
@@ -585,6 +586,10 @@ test('probe-next-ingress.sh and finalize-release.sh share one exact effective CS
   assert.equal(refreshNextCsp[1], caddyNextCsp[1], 'refresh-site.py EXPECTED_NEXT_CSP must match commonswarm-site.caddy');
   assert.match(probeSource, /refresh-site\.py" --check-next-csp/);
   assert.match(finalizeSource, /refresh-site\.py" --check-next-csp/);
+  assert.match(probeSource, /refresh-site\.py" --check-next-html-headers/);
+  assert.match(finalizeSource, /refresh-site\.py" --check-next-html-headers/);
+  assert.doesNotMatch(probeSource, /has_header/);
+  assert.doesNotMatch(finalizeSource, /has_header/);
   assert.doesNotMatch(probeSource, /grep .*frame-ancestors/);
   assert.doesNotMatch(finalizeSource, /grep .*frame-ancestors/);
 
@@ -807,6 +812,185 @@ test('probe-next-ingress.sh --expect-sha verifies three paths, compressed and id
   }
 });
 
+test('refresh-site.py --check-next-html-headers and probe-next-ingress.sh --expect-sha reject interim-only headers, duplicate final headers, and malformed lines', async () => {
+  const refreshScript = join(repo, 'deploy/site/refresh-site.py');
+  const probeScript = join(repo, 'deploy/site/probe-next-ingress.sh');
+  const headerFile = join(root, 'check-headers.txt');
+
+  const validFinalLines = [
+    'Content-Type: text/html; charset=utf-8',
+    "Content-Security-Policy: frame-ancestors 'none'",
+    'X-Content-Type-Options: nosniff',
+    'Referrer-Policy: no-referrer',
+    'Cache-Control: no-cache',
+  ];
+  const valid103Block = [
+    'HTTP/1.1 103 Early Hints',
+    ...validFinalLines,
+    '',
+  ].join('\r\n');
+  const makeDump = (statusLine: string, lines: string[], prefix = '') =>
+    `${prefix}${statusLine}\r\n${lines.join('\r\n')}\r\n\r\n`;
+
+  // Direct parser pass cases: HTTP/1.1, HTTP/2, OWS, case-insensitive non-CSP values, and 103 + valid 200.
+  for (const [label, payload] of [
+    ['http11-valid', makeDump('HTTP/1.1 200 OK', validFinalLines)],
+    ['http2-valid', makeDump('HTTP/2 200 ', [
+      'content-type:  TEXT/HTML ; charset=utf-8 \t',
+      "content-security-policy: \tframe-ancestors 'none' ",
+      'x-content-type-options:  NOSNIFF\t',
+      'referrer-policy: No-Referrer ',
+      'cache-control: NO-CACHE',
+    ])],
+    ['early-hints-plus-valid-200', makeDump('HTTP/1.1 200 OK', validFinalLines, `${valid103Block}\r\n`)],
+  ] as const) {
+    await writeFile(headerFile, payload, 'binary');
+    await exec('python3', [refreshScript, '--check-next-html-headers', headerFile]);
+    await exec('python3', [refreshScript, '--check-next-csp', headerFile]);
+    assert.ok(label);
+  }
+
+  // Direct parser rejection cases: interim-only, duplicates, wrong values, obs-fold, control/non-ASCII, malformed lines.
+  const directFailures: Array<{ name: string; bytes: Buffer; reason: RegExp }> = [
+    { name: 'interim-103-only', bytes: Buffer.from(`${valid103Block}\r\n`, 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'no-colon', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'MalformedLine']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'empty-name', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, ': value']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'space-in-name', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'X-Bad Name: 1']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'obs-fold-space', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, ' continuation']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'obs-fold-tab', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, '\tcontinuation']), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'control-vtab', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html\x0b; charset=utf-8', ...validFinalLines.slice(1)]), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'embedded-cr', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Cache-Control: no-cache\r', ...validFinalLines.slice(0, 4)]), 'binary'), reason: /^invalid-http-headers$/m },
+    { name: 'non-ascii-nbsp', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', ['Content-Type: text/html;\u00a0charset=utf-8', ...validFinalLines.slice(1)]), 'utf8'), reason: /^invalid-http-headers$/m },
+    { name: 'wrong-nosniff', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', validFinalLines.map(l => l.startsWith('X-Content-Type-Options:') ? 'X-Content-Type-Options: sniff' : l)), 'binary'), reason: /^nosniff-mismatch$/m },
+    { name: 'wrong-referrer', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', validFinalLines.map(l => l.startsWith('Referrer-Policy:') ? 'Referrer-Policy: origin' : l)), 'binary'), reason: /^referrer-policy-mismatch$/m },
+    { name: 'dup-content-type', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Content-Type: text/plain']), 'binary'), reason: /^multiple-content-type$/m },
+    { name: 'dup-csp', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Content-Security-Policy: frame-ancestors https://example.com']), 'binary'), reason: /^multiple-csp$/m },
+    { name: 'dup-nosniff', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'X-Content-Type-Options: nosniff']), 'binary'), reason: /^multiple-nosniff$/m },
+    { name: 'dup-referrer', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Referrer-Policy: unsafe-url']), 'binary'), reason: /^multiple-referrer-policy$/m },
+    { name: 'dup-cache-control', bytes: Buffer.from(makeDump('HTTP/1.1 200 OK', [...validFinalLines, 'Cache-Control: public, max-age=3600']), 'binary'), reason: /^multiple-cache-control$/m },
+  ];
+  for (const row of directFailures) {
+    await writeFile(headerFile, row.bytes);
+    await assert.rejects(exec('python3', [refreshScript, '--check-next-html-headers', headerFile]), (error: unknown) => {
+      assert.match((error as { stderr: string }).stderr, row.reason, row.name);
+      return true;
+    });
+  }
+
+  // Raw TCP HTTP/1.1 fixture driving probe-next-ingress.sh --expect-sha with 103 Early Hints and duplicate final headers.
+  const htmlBody = Buffer.from(syntheticNextHtml(), 'utf8');
+  const htmlSha = hash(htmlBody);
+  let send103 = false;
+  let finalHeaderOverride: (urlPath: string) => string[] = () => [...validFinalLines];
+
+  const tcpServer = createTcpServer((socket) => {
+    let buffered = '';
+    socket.on('data', (chunk) => {
+      buffered += chunk.toString('latin1');
+      const headerEnd = buffered.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return;
+      const head = buffered.slice(0, headerEnd).split('\r\n');
+      const reqLine = head[0] ?? 'GET / HTTP/1.1';
+      const urlPath = reqLine.split(' ')[1] ?? '/';
+      let ae = '';
+      for (const line of head.slice(1)) {
+        const idx = line.indexOf(':');
+        if (idx > 0 && line.slice(0, idx).trim().toLowerCase() === 'accept-encoding') {
+          ae = line.slice(idx + 1).trim();
+        }
+      }
+      const isIdentity = ae.toLowerCase() === 'identity';
+      const isCompressed = !isIdentity && ae.toLowerCase().includes('gzip');
+      const payload = isCompressed ? gzipSync(htmlBody) : htmlBody;
+      const finalHeaders = [
+        ...finalHeaderOverride(urlPath),
+        ...(isCompressed ? ['Content-Encoding: gzip'] : []),
+        `Content-Length: ${payload.length}`,
+        'Connection: close',
+      ];
+      const prefix = send103 ? `${valid103Block}\r\n` : '';
+      const responseHead = `${prefix}HTTP/1.1 200 OK\r\n${finalHeaders.join('\r\n')}\r\n\r\n`;
+      socket.end(Buffer.concat([Buffer.from(responseHead, 'latin1'), payload]));
+    });
+  });
+
+  await new Promise<void>(r => tcpServer.listen(0, '127.0.0.1', r));
+  const address = tcpServer.address();
+  assert.ok(address && typeof address === 'object');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    // 103 Early Hints followed by a valid final 200 OK must pass.
+    send103 = true;
+    finalHeaderOverride = () => [...validFinalLines];
+    const okWith103 = await exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]);
+    assert.match(okWith103.stdout, /PASS probe-next-ingress/);
+
+    // 103 Early Hints supplies all five valid headers, while final 200 OK serves exact body + valid CSP with bad final headers.
+    const interimBypassCases: Array<{ name: string; lines: string[]; reason: RegExp }> = [
+      {
+        name: '103-bad-content-type',
+        lines: validFinalLines.map(l => l.startsWith('Content-Type:') ? 'Content-Type: text/plain; charset=utf-8' : l),
+        reason: /reason=content-type-mismatch/,
+      },
+      {
+        name: '103-bad-cache-control',
+        lines: validFinalLines.map(l => l.startsWith('Cache-Control:') ? 'Cache-Control: public, max-age=60' : l),
+        reason: /reason=cache-control-mismatch/,
+      },
+      {
+        name: '103-missing-referrer-policy',
+        lines: validFinalLines.filter(l => !l.startsWith('Referrer-Policy:')),
+        reason: /reason=missing-referrer-policy/,
+      },
+      {
+        name: '103-missing-nosniff',
+        lines: validFinalLines.filter(l => !l.startsWith('X-Content-Type-Options:')),
+        reason: /reason=missing-nosniff/,
+      },
+      {
+        name: '103-all-four-bad',
+        lines: [
+          'Content-Type: text/plain; charset=utf-8',
+          "Content-Security-Policy: frame-ancestors 'none'",
+          'Cache-Control: public, max-age=60',
+        ],
+        reason: /reason=content-type-mismatch/,
+      },
+    ];
+    for (const row of interimBypassCases) {
+      send103 = true;
+      finalHeaderOverride = (urlPath) => urlPath === '/next/' ? row.lines : [...validFinalLines];
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        const stderr = (error as { stderr: string }).stderr;
+        assert.match(stderr, /FAIL path=\/next\/ /, row.name);
+        assert.match(stderr, row.reason, row.name);
+        return true;
+      });
+    }
+
+    // Conflicting duplicate headers on the final 200 OK response must fail.
+    send103 = false;
+    const duplicateCases: Array<{ name: string; extra: string; reason: RegExp }> = [
+      { name: 'dup-content-type', extra: 'Content-Type: text/plain; charset=utf-8', reason: /reason=multiple-content-type/ },
+      { name: 'dup-csp', extra: 'Content-Security-Policy: frame-ancestors https://example.com', reason: /reason=multiple-csp/ },
+      { name: 'dup-nosniff', extra: 'X-Content-Type-Options: nosniff', reason: /reason=multiple-nosniff/ },
+      { name: 'dup-referrer', extra: 'Referrer-Policy: unsafe-url', reason: /reason=multiple-referrer-policy/ },
+      { name: 'dup-cache-control', extra: 'Cache-Control: public, max-age=3600', reason: /reason=multiple-cache-control/ },
+    ];
+    for (const row of duplicateCases) {
+      finalHeaderOverride = (urlPath) => urlPath === '/next/index.html' ? [...validFinalLines, row.extra] : [...validFinalLines];
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        const stderr = (error as { stderr: string }).stderr;
+        assert.match(stderr, /FAIL path=\/next\/index\.html /, row.name);
+        assert.match(stderr, row.reason, row.name);
+        return true;
+      });
+    }
+  } finally {
+    await new Promise<void>(r => tcpServer.close(() => r()));
+  }
+});
+
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
   const nextVariants = new Set([
@@ -994,9 +1178,18 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         const output = await readFile(join(packet, 'hostrun.log'), 'utf8');
         if (['root-status', 'app-status', 'next-status', 'next-slash-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
         if (['root-body', 'app-body', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject'].includes(variant)) assert.match(output, /assertion=httphash/);
-        if (variant === 'next-slash-cache') assert.match(output, /assertion=next-cache/);
-        if (variant === 'next-index-content-type') assert.match(output, /assertion=next-content-type/);
-        if (variant === 'next-header' || variant.startsWith('next-header-')) assert.match(output, /assertion=next-csp/);
+        if (variant === 'next-slash-cache') {
+          assert.match(output, /assertion=next-html-headers/);
+          assert.match(output, /cache-control-mismatch/);
+        }
+        if (variant === 'next-index-content-type') {
+          assert.match(output, /assertion=next-html-headers/);
+          assert.match(output, /content-type-mismatch/);
+        }
+        if (variant === 'next-header' || variant.startsWith('next-header-')) {
+          assert.match(output, /assertion=next-html-headers/);
+          assert.match(output, /(?:missing-csp|csp-mismatch|multiple-csp)/);
+        }
         if (variant.startsWith('next-preflip-')) {
           assert.match(output, /assertion=preflip-next-csp/);
           assert.doesNotMatch(output, /PASS rollback/);

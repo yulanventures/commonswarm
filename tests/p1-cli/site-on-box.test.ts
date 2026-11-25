@@ -570,7 +570,9 @@ test("parity check exits nonzero for one injected header difference", async () =
 
 test("parity discovers fresh assets, relative imports, and Vite preload paths using Vercel's policy", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "commonswarm-site-dynamic-asset-"));
+  const seenUserAgents = new Map<string, string | undefined>();
   const server = createServer((request, response) => {
+    seenUserAgents.set(request.url ?? "/", request.headers["user-agent"]);
     response.statusCode = 200;
     if (request.url === "/page") {
       response.setHeader("content-type", "text/html; charset=utf-8");
@@ -628,6 +630,9 @@ test("parity discovers fresh assets, relative imports, and Vite preload paths us
         return true;
       },
     );
+    for (const [path, ua] of seenUserAgents) {
+      assert.equal(ua, undefined, `non-/next parity request ${path} must not send a browser User-Agent`);
+    }
   } finally {
     await new Promise<void>((resolveClose, rejectClose) => {
       server.close((error) => error ? rejectClose(error) : resolveClose());
@@ -749,13 +754,11 @@ test("parity omits /next by default, and --check-next walks /next, /next/, and /
   let badStatusPath: string | null = null;
   let missingNext = false;
   const requestedPaths: string[] = [];
-  const nextUserAgents = new Map<string, string | undefined>();
+  const seenUserAgents = new Map<string, string | undefined>();
   const server = createServer((request, response) => {
     const url = request.url ?? "/";
     requestedPaths.push(url);
-    if (url === "/next" || url.startsWith("/next/")) {
-      nextUserAgents.set(url, request.headers["user-agent"]);
-    }
+    seenUserAgents.set(url, request.headers["user-agent"]);
     if (url === "/page") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate" });
       response.end("<!doctype html><p>ok</p>");
@@ -807,24 +810,27 @@ test("parity omits /next by default, and --check-next walks /next, /next/, and /
     }));
     const baseArgs = [join(deployRoot, "parity-check.mjs"), `http://127.0.0.1:${address.port}`, "--reference", referencePath];
 
-    // Default (without --check-next): never probes /next and does not require its headers or presence.
+    // Default (without --check-next): never probes /next and does not send a browser UA on existing routes.
     missingNext = true;
     requestedPaths.length = 0;
-    nextUserAgents.clear();
+    seenUserAgents.clear();
     const defaultPassed = await execFileAsync(process.execPath, baseArgs, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
     assert.match(defaultPassed.stdout, /Parity passed for 1 routes/);
     assert.equal(requestedPaths.some((p) => p === "/next" || p.startsWith("/next/")), false);
+    assert.equal(seenUserAgents.get("/page"), undefined, "default parity must not send browser User-Agent on existing routes");
 
-    // Explicit --check-next: probes /next, /next/, /next/index.html, and every referenced asset with a browser UA.
+    // Explicit --check-next: probes /next, /next/, /next/index.html, and every referenced asset with a browser UA,
+    // while keeping existing parity routes without a User-Agent override.
     missingNext = false;
     requestedPaths.length = 0;
-    nextUserAgents.clear();
+    seenUserAgents.clear();
     const args = [...baseArgs, "--check-next"];
     const passed = await execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
     assert.match(passed.stdout, /Parity passed for 7 routes/);
+    assert.equal(seenUserAgents.get("/page"), undefined, "--check-next must not send browser User-Agent on non-/next routes");
     for (const expectedPath of ["/next", "/next/", "/next/index.html", "/next/assets/index-abc.js", "/next/assets/index-abc.css", "/next/fonts/inter-latin.woff2"]) {
       assert.equal(requestedPaths.includes(expectedPath), true, `expected request for ${expectedPath}`);
-      assert.match(nextUserAgents.get(expectedPath) ?? "", /^Mozilla\/5\.0\b/, `expected browser User-Agent on ${expectedPath}`);
+      assert.match(seenUserAgents.get(expectedPath) ?? "", /^Mozilla\/5\.0\b/, `expected browser User-Agent on ${expectedPath}`);
     }
 
     for (const path of ["/next", "/next/", "/next/index.html"]) {

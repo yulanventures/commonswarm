@@ -9,8 +9,8 @@ assert() { label=$1; shift; "$@" || { printf 'FAIL step=%s assertion=%s\n' "$STE
 hash() { sha256sum "$1" | cut -d' ' -f1; }
 flip() { ln -s "$1" "$S/current.@@RELEASE@@" && mv -Tf "$S/current.@@RELEASE@@" "$S/current"; }
 probe() { : > "$B/probe.headers"; curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A CommonSwarmReleaseCheck/1.0 -H 'Cache-Control: no-cache' -D "$B/probe.headers" -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$1"; }
-has_header() { tr -d '\r' < "$B/probe.headers" | grep -Eiq "$1"; }
 has_next_csp() { python3 "$B/refresh-site.py" --check-next-csp "$B/probe.headers"; }
+has_next_html_headers() { python3 "$B/refresh-site.py" --check-next-html-headers "$B/probe.headers"; }
 rollback() {
   STEP=rollback; local old old_target unchanged=''; old=$(cat "$B/old.link") || return 1
   case $old in /*) assert old-directory test -d "$old";; *) assert old-directory test -d "$S/$old";; esac || return 1
@@ -62,11 +62,7 @@ if [[ '@@INCLUDE_NEXT@@' == 1 ]]; then
       esac
       printf 'CHECK step=%s path=%s mode=%s http=%s\n' "$STEP" "$next_route" "$next_mode" "$status"
       assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = '@@NEXT_SHA@@'
-      assert next-content-type has_header '^content-type:[[:space:]]*text/html([[:space:]]*;.*)?[[:space:]]*$'
-      assert next-csp has_next_csp
-      assert next-nosniff has_header '^x-content-type-options:[[:space:]]*nosniff[[:space:]]*$'
-      assert next-referrer has_header '^referrer-policy:[[:space:]]*no-referrer[[:space:]]*$'
-      assert next-cache has_header '^cache-control:[[:space:]]*no-cache[[:space:]]*$'
+      assert next-html-headers has_next_html_headers
     done
   done
   for asset in @@NEXT_ASSETS@@; do

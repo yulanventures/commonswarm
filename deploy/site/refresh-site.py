@@ -2,6 +2,7 @@
 """Before either flip, retain the live asset graph and advance HTML validators."""
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import sys
@@ -87,40 +88,97 @@ def prepare(live, target):
 
 
 EXPECTED_NEXT_CSP = b"frame-ancestors 'none'"
+_FINAL_STATUS_RE = re.compile(rb'HTTP/[0-9]+(?:\.[0-9]+)? [2-5][0-9]{2}(?:[ \t][\x20-\x7e\t]*)?')
+_CONTENT_TYPE_HTML_RE = re.compile(rb'text/html(?:[ \t]*;.*)?', re.IGNORECASE)
+_HEADER_NAME_BYTES = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 
 
-def check_next_csp(headers_path):
-    """Require a single exact Content-Security-Policy header on the final HTTP response block."""
+def parse_final_http_headers(headers_path):
+    """Parse only the final HTTP response header block from a curl -D dump."""
     raw = Path(headers_path).read_bytes()
     lines = [line[:-1] if line.endswith(b'\r') else line for line in raw.split(b'\n')]
-    status_indices = [
-        idx for idx, line in enumerate(lines)
-        if line.startswith(b'HTTP/') and len(line) > 5 and 48 <= line[5] <= 57
-    ]
-    if not status_indices:
-        return 'invalid-http-headers'
-    final_lines = lines[status_indices[-1] + 1:]
-    csp_values = []
-    last_header = None
-    for line in final_lines:
+    blocks = []
+    current = []
+    for line in lines:
         if line == b'':
-            break
+            if current:
+                blocks.append(current)
+                current = []
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return None
+    final_block = blocks[-1]
+    if not _FINAL_STATUS_RE.fullmatch(final_block[0]):
+        return None
+    headers = {}
+    for line in final_block[1:]:
         if line[:1] in (b' ', b'\t'):
-            if last_header == b'content-security-policy':
-                return 'invalid-http-headers'
-            continue
+            return None
         name, sep, value = line.partition(b':')
-        if not sep or not name:
-            return 'invalid-http-headers'
-        last_header = name.lower()
-        if last_header == b'content-security-policy':
-            csp_values.append(value)
+        if not sep or not name or any(b not in _HEADER_NAME_BYTES for b in name):
+            return None
+        if any((b < 0x20 and b != 0x09) or b >= 0x7F for b in value):
+            return None
+        headers.setdefault(name.lower(), []).append(value.strip(b' \t'))
+    return headers
+
+
+def _check_csp_header(headers):
+    csp_values = headers.get(b'content-security-policy', [])
     if len(csp_values) == 0:
         return 'missing-csp'
     if len(csp_values) > 1:
         return 'multiple-csp'
-    if csp_values[0].strip(b' \t') != EXPECTED_NEXT_CSP:
+    if csp_values[0] != EXPECTED_NEXT_CSP:
         return 'csp-mismatch'
+    return None
+
+
+def check_next_csp(headers_path):
+    """Require a single exact Content-Security-Policy header on the final HTTP response block."""
+    headers = parse_final_http_headers(headers_path)
+    if headers is None:
+        return 'invalid-http-headers'
+    return _check_csp_header(headers)
+
+
+def check_next_html_headers(headers_path):
+    """Require all five preview HTML headers once each on the final HTTP response block."""
+    headers = parse_final_http_headers(headers_path)
+    if headers is None:
+        return 'invalid-http-headers'
+    ct_values = headers.get(b'content-type', [])
+    if len(ct_values) > 1:
+        return 'multiple-content-type'
+    if len(ct_values) == 0 or not _CONTENT_TYPE_HTML_RE.fullmatch(ct_values[0]):
+        return 'content-type-mismatch'
+    csp_reason = _check_csp_header(headers)
+    if csp_reason is not None:
+        return csp_reason
+    nosniff_values = headers.get(b'x-content-type-options', [])
+    if len(nosniff_values) > 1:
+        return 'multiple-nosniff'
+    if len(nosniff_values) == 0:
+        return 'missing-nosniff'
+    if nosniff_values[0].lower() != b'nosniff':
+        return 'nosniff-mismatch'
+    referrer_values = headers.get(b'referrer-policy', [])
+    if len(referrer_values) > 1:
+        return 'multiple-referrer-policy'
+    if len(referrer_values) == 0:
+        return 'missing-referrer-policy'
+    if referrer_values[0].lower() != b'no-referrer':
+        return 'referrer-policy-mismatch'
+    cache_values = headers.get(b'cache-control', [])
+    if len(cache_values) > 1:
+        return 'multiple-cache-control'
+    if len(cache_values) == 0 or cache_values[0].lower() != b'no-cache':
+        return 'cache-control-mismatch'
     return None
 
 
@@ -128,6 +186,10 @@ if __name__ == '__main__':
     try:
         if len(sys.argv) == 3 and sys.argv[1] == '--check-next-csp':
             reason = check_next_csp(sys.argv[2])
+            if reason is not None:
+                sys.exit(reason)
+        elif len(sys.argv) == 3 and sys.argv[1] == '--check-next-html-headers':
+            reason = check_next_html_headers(sys.argv[2])
             if reason is not None:
                 sys.exit(reason)
         else:

@@ -71,11 +71,12 @@ async function get(url, hostOverride, extraHeaders) {
   nextRequestAt = Date.now() + requestIntervalMs;
   return new Promise((resolveRequest, rejectRequest) => {
     const transport = url.protocol === "https:" ? https : http;
-    const headers = {
-      "user-agent": browserUserAgent,
-      ...(hostOverride ? { host: hostOverride } : {}),
-      ...extraHeaders,
-    };
+    const headers = hostOverride || extraHeaders
+      ? {
+          ...(hostOverride ? { host: hostOverride } : {}),
+          ...extraHeaders,
+        }
+      : undefined;
     const request = transport.request(url, {
       method: "GET",
       headers,
@@ -283,6 +284,7 @@ if (checkNext) {
     checkedNextHtmlCount += 1;
     try {
       const nextResponse = await get(new URL(nextPath, baseUrl), host, {
+        "user-agent": browserUserAgent,
         accept: "text/html,application/xhtml+xml",
       });
       if (nextResponse.statusCode !== 200) {
@@ -310,7 +312,9 @@ if (checkNext) {
     if (seen.has(assetPath)) continue;
     seen.add(assetPath);
     try {
-      const assetRes = await get(new URL(assetPath, baseUrl), host);
+      const assetRes = await get(new URL(assetPath, baseUrl), host, {
+        "user-agent": browserUserAgent,
+      });
       if (assetRes.statusCode !== 200) {
         differences.push(`${assetPath}: status expected 200, got ${assetRes.statusCode}`);
       }
