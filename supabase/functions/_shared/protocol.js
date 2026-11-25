@@ -4441,6 +4441,7 @@ var TODO_NOTES_LIMIT = 4e3;
 var TODO_COMMENT_LIMIT = 4e3;
 var TODO_MENTIONS_LIMIT = 8;
 var TODO_GATE_NOTE_LIMIT = 200;
+var TODO_DECISION_NOTE_LIMIT = 500;
 var TODO_EVENT_BYTE_LIMIT = 64 * 1024;
 var TODO_IDENTITY_WRITE_HOURLY_LIMIT = HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT;
 var TODO_WORKSPACE_WRITE_HOURLY_LIMIT = HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT;
@@ -4463,6 +4464,9 @@ var TODO_NOTICE_BODIES = {
   agent_offer: "Asks for a to-do for your agent.",
   accepted: "Accepted your to-do request.",
   declined: "Declined your to-do request.",
+  approval_ask: "Asks for your approval on a to-do.",
+  approved: "Approved your to-do.",
+  declined_decision: "Declined your to-do.",
   mentioned: "Mentioned you in a comment."
 };
 function todoNoticeAbout(todoId) {
@@ -4731,13 +4735,17 @@ var BASE_HOUSEHOLD_TOOL_REGISTRY = [
       title: text2(1, TODO_TITLE_LIMIT),
       notes: text2(0, TODO_NOTES_LIMIT),
       due_on: due,
+      kind: { type: "string", enum: ["task", "approval"] },
       assign: object({ to: party, start, gate }, ["start", "gate"]),
       origin_placement: { type: "string", enum: ["workspace", "general", "channel", "dm", "group_dm"] },
       origin_channel_id: { oneOf: [uuid2, { type: "null" }] },
       origin_conversation_id: { oneOf: [uuid2, { type: "null" }] }
     },
-    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],
-    toCore: (args) => todoCommand("todo_create", args)
+    optional: ["notes", "due_on", "kind", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],
+    toCore: (args) => {
+      const { seat: _seat, request_id: _request, kind: todoKind2, ...fields } = args;
+      return { command: { kind: "todo_create", ...todoKind2 === void 0 ? {} : { todo_kind: todoKind2 }, ...fields } };
+    }
   }),
   define({
     name: "todo_comment",
@@ -4944,8 +4952,16 @@ function validateHouseholdHumanCommand(value) {
       kind: literal("household_todo_answer"),
       todo_id: uuid2,
       offer_id: uuid2,
+      base_version: integer(1),
       answer: { type: "string", enum: ["accept", "decline", "withdraw"] }
     }),
+    household_todo_decide: object({
+      kind: literal("household_todo_decide"),
+      todo_id: uuid2,
+      base_version: integer(1),
+      decision: { type: "string", enum: ["approve", "decline"] },
+      note: { oneOf: [text2(0, TODO_DECISION_NOTE_LIMIT), { type: "null" }] }
+    }, ["note"]),
     household_todo_steer: object({
       kind: literal("household_todo_steer"),
       todo_id: uuid2,
@@ -5191,6 +5207,7 @@ var TODO_EVENT_TYPES = [
   "TodoOffered",
   "TodoOfferAnswered",
   "TodoStateChanged",
+  "TodoDecided",
   "TodoQueueOrdered",
   "TodoGateSet",
   "TodoStartAsked",
@@ -5203,6 +5220,10 @@ var id = (value) => typeof value === "string" && value.length > 0;
 var uuid4 = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 var receiptKey2 = (principal, commandId) => JSON.stringify([principal, commandId]);
 var isOpen = (todo) => todo.state === "open" || todo.state === "doing";
+var todoKind = (todo) => todo.kind ?? "task";
+var isApproval = (todo) => todoKind(todo) === "approval";
+var decisionStatusOf = (todo) => todo.decision_status ?? null;
+var isApprovalGate = (gate2, todos) => gate2.kind === "after" && !!own2(todos, gate2.todo_id) && isApproval(own2(todos, gate2.todo_id));
 var sameParty = (a, b) => a === null || b === null ? a === b : a.kind === b.kind && a.id === b.id;
 function equal(a, b) {
   if (a === b) return true;
@@ -5255,7 +5276,9 @@ function evaluateGate(gate2, todos, now) {
   if (gate2.kind === "at") return Date.parse(gate2.at) <= now;
   if (gateCycles("", gate2, todos)) return false;
   const dependency = own2(todos, gate2.todo_id);
-  return !!dependency && (dependency.state === "done" || dependency.state === "dropped");
+  if (!dependency) return false;
+  if (isApproval(dependency)) return dependency.state === "done" && decisionStatusOf(dependency) === "approved";
+  return dependency.state === "done" || dependency.state === "dropped";
 }
 function emptyHouseholdTodoState(workspaceId, streamId) {
   if (!id(workspaceId) || !id(streamId)) throw new RangeError("workspace and stream IDs are required");
@@ -5334,6 +5357,11 @@ function decideTodo(state, command, ctx) {
     emit("TodoQueueOrdered", { principal_id: principalId, todo_ids: items });
     return null;
   };
+  const canModifyApprovalGate = (gate2) => {
+    if (!human || gate2.kind !== "after") return false;
+    const predecessor = own2(draft.todos, gate2.todo_id);
+    return !!predecessor && isApproval(predecessor) && (predecessor.assignee?.kind === "user" && predecessor.assignee.id === actor.user_id || admin());
+  };
   const notice = (todoId2, kind, to, body) => {
     notices.push({ kind, to: [to], about: todoNoticeAbout(todoId2), body });
   };
@@ -5343,10 +5371,11 @@ function decideTodo(state, command, ctx) {
     const start2 = input.start ?? "queue";
     const owner = input.to.kind === "agent" ? agent(input.to.id).owner_user_id : input.to.id;
     const ownerStartNow = input.to.kind === "agent" && start2 === "now" && human && owner === actor.user_id;
-    const gate2 = input.gate ?? (ownerStartNow ? { kind: "none" } : todo2.gate);
+    const gate2 = input.gate ?? (ownerStartNow && !isApprovalGate(todo2.gate, draft.todos) ? { kind: "none" } : todo2.gate);
     if (start2 !== "queue" && start2 !== "now") return refuse2("invalid_transition");
     const gateError = gateRefusal(todo2.todo_id, gate2);
     if (gateError) return refuse2(gateError);
+    if (start2 === "now" && isApprovalGate(gate2, draft.todos) && !evaluateGate(gate2, draft.todos, ctx.now)) return refuse2("gate_invalid");
     const accepted = input.to.kind === "user" ? input.to.id === actor.user_id : start2 === "now" ? human && owner === actor.user_id : owner === actor.user_id || (own2(draft.policies, input.to.id)?.accepts_from ?? TODO_DEFAULT_ACCEPTS_FROM) === "anyone";
     if (accepted && queueFull(todo2, input.to)) return refuse2("queue_full");
     if (todo2.offer) {
@@ -5365,9 +5394,9 @@ function decideTodo(state, command, ctx) {
       return null;
     }
     accept3(todo2, input.to, start2, gate2, gate2.kind === "none" ? null : input.gate === void 0 ? todo2.gate_set_by : actor.user_id);
-    if (input.to.kind === "agent") {
+    if (input.to.kind === "agent" && evaluateGate(gate2, draft.todos, ctx.now)) {
       if (start2 === "now") notice(todo2.todo_id, "ask", input.to, TODO_NOTICE_BODIES.start);
-      else if (evaluateGate(gate2, draft.todos, ctx.now)) notice(todo2.todo_id, "note", input.to, TODO_NOTICE_BODIES.added);
+      else notice(todo2.todo_id, "note", input.to, TODO_NOTICE_BODIES.added);
     }
     return null;
   };
@@ -5387,7 +5416,7 @@ function decideTodo(state, command, ctx) {
       queue_rank: rank,
       offer: null
     } });
-    if (to?.kind === "agent" && start2 === "now") {
+    if (to?.kind === "agent" && start2 === "now" && evaluateGate(gate2, draft.todos, ctx.now)) {
       order(to.id, todo2.todo_id, null);
       emit("TodoStartAsked", { todo_id: todo2.todo_id, principal_id: to.id });
     }
@@ -5421,9 +5450,16 @@ function decideTodo(state, command, ctx) {
     if (!validTitle(command.title)) return refuse2("title_invalid");
     if (!validNotes(command.notes ?? "")) return refuse2("notes_invalid");
     if (!validDate(command.due_on ?? null)) return refuse2("due_invalid");
+    const kind = command.todo_kind ?? "task";
+    if (kind !== "task" && kind !== "approval") return refuse2("invalid_transition");
     const rawPlacement = command.origin_placement;
     const rawChannelId = command.origin_channel_id;
     const rawConversationId = command.origin_conversation_id;
+    if (kind === "approval") {
+      if (rawPlacement !== void 0 && rawPlacement !== "workspace" && rawPlacement !== "general" || rawChannelId !== void 0 && rawChannelId !== null || rawConversationId !== void 0 && rawConversationId !== null) {
+        return refuse2("approval_origin_not_allowed");
+      }
+    }
     let originPlacement = "workspace";
     let originChannelId = null;
     let originConversationId = null;
@@ -5451,12 +5487,19 @@ function decideTodo(state, command, ctx) {
     } else {
       return refuse2("target_not_found");
     }
+    if (kind === "approval") {
+      if (!command.assign || command.assign.to.kind !== "user") return refuse2("invalid_transition");
+      if (command.assign.start !== void 0 && command.assign.start !== "queue" || command.assign.gate !== void 0 && command.assign.gate.kind !== "none") return refuse2("invalid_transition");
+      const assigneeFailure = targetRefusal(command.assign.to);
+      if (assigneeFailure) return refuse2(assigneeFailure);
+    }
     if (Object.values(state.todos).filter(isOpen).length >= TODO_OPEN_LIMIT) return refuse2("todo_limit_reached");
     if (!uuid4(ctx.todo_id) || own2(state.todos, ctx.todo_id)) throw new RangeError("new server to-do ID is required");
     const todo2 = {
       workspace_id: state.workspace_id,
       todo_id: ctx.todo_id,
       version: 1,
+      kind,
       title: command.title,
       notes: command.notes ?? "",
       due_on: command.due_on ?? null,
@@ -5473,12 +5516,21 @@ function decideTodo(state, command, ctx) {
       state_by: actor,
       state_at: timestamp,
       comment_count: 0,
+      decision_status: null,
+      decision_by_user: null,
+      decision_at: null,
+      decision_note: null,
       origin_placement: originPlacement,
       origin_channel_id: originChannelId,
       origin_conversation_id: originConversationId
     };
     emit("TodoCreated", { todo: todo2 });
-    if (command.assign) {
+    if (kind === "approval") {
+      accept3(todo2, command.assign.to, "queue", { kind: "none" }, null);
+      if (actor.principal_id !== null || command.assign.to.id !== actor.user_id) {
+        notice(todo2.todo_id, "ask", command.assign.to, TODO_NOTICE_BODIES.approval_ask);
+      }
+    } else if (command.assign) {
       const failure = assigned(todo2, command.assign);
       if (failure) return failure;
     }
@@ -5494,6 +5546,8 @@ function decideTodo(state, command, ctx) {
   if (!todo) return refuse2("todo_not_found");
   if ("base_version" in command && command.base_version !== todo.version) return finish({ status: "conflict", current: structuredClone(todo) });
   if (command.kind === "todo_update") {
+    if (isApproval(todo) && decisionStatusOf(todo) !== null) return refuse2("approval_decided_frozen");
+    if (todo.offer !== null) return refuse2("offer_pending_frozen");
     if (command.title !== void 0 && !validTitle(command.title)) return refuse2("title_invalid");
     if (command.notes !== void 0 && !validNotes(command.notes)) return refuse2("notes_invalid");
     if (command.due_on !== void 0 && !validDate(command.due_on)) return refuse2("due_invalid");
@@ -5507,18 +5561,71 @@ function decideTodo(state, command, ctx) {
     } });
   } else if (command.kind === "todo_assign") {
     if (!isOpen(todo)) return refuse2("invalid_transition");
-    if (command.to === null) {
-      const gate2 = command.gate ?? todo.gate;
-      const gateError = gateRefusal(todo.todo_id, gate2);
-      if (gateError) return refuse2(gateError);
-      if (todo.offer) {
-        emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: "replaced" });
-        todo = own2(draft.todos, todo.todo_id);
-      }
-      accept3(todo, null, "queue", gate2, command.gate === void 0 ? todo.gate_set_by : gate2.kind === "none" ? null : actor.user_id);
+    if (isApproval(todo)) {
+      if (!human) return refuse2("human_confirmation_required");
+      if (command.to === null || command.to.kind !== "user") return refuse2("invalid_transition");
+      if (command.start !== void 0 && command.start !== "queue" || command.gate !== void 0 && command.gate.kind !== "none") return refuse2("invalid_transition");
+      const isCurrentDecider = todo.assignee?.kind === "user" && todo.assignee.id === actor.user_id;
+      if (!isCurrentDecider && !admin()) return refuse2("not_permitted");
+      const failure = targetRefusal(command.to);
+      if (failure) return refuse2(failure);
+      accept3(todo, command.to, "queue", { kind: "none" }, null);
+      if (command.to.id !== actor.user_id) notice(todo.todo_id, "ask", command.to, TODO_NOTICE_BODIES.approval_ask);
     } else {
-      const failure = assigned(todo, { to: command.to, start: command.start, gate: command.gate });
-      if (failure) return failure;
+      if (command.gate !== void 0 && isApprovalGate(todo.gate, draft.todos) && !equal(command.gate, todo.gate)) {
+        if (!human) return refuse2("human_confirmation_required");
+        if (!canModifyApprovalGate(todo.gate)) return refuse2("not_permitted");
+      }
+      if (command.to === null) {
+        const gate2 = command.gate ?? todo.gate;
+        const gateError = gateRefusal(todo.todo_id, gate2);
+        if (gateError) return refuse2(gateError);
+        if (todo.offer) {
+          emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: "replaced" });
+          todo = own2(draft.todos, todo.todo_id);
+        }
+        accept3(todo, null, "queue", gate2, command.gate === void 0 ? todo.gate_set_by : gate2.kind === "none" ? null : actor.user_id);
+      } else {
+        const failure = assigned(todo, { to: command.to, start: command.start, gate: command.gate });
+        if (failure) return failure;
+      }
+    }
+  } else if (command.kind === "household_todo_decide") {
+    if (!isApproval(todo) || todo.state !== "open" || decisionStatusOf(todo) !== null) return refuse2("invalid_transition");
+    if (todo.assignee?.kind !== "user" || todo.assignee.id !== actor.user_id) return refuse2("not_decider");
+    if (command.decision !== "approve" && command.decision !== "decline") return refuse2("invalid_transition");
+    let cleanNote = null;
+    if (command.note !== void 0 && command.note !== null) {
+      if (typeof command.note !== "string" || textLength(command.note) > TODO_DECISION_NOTE_LIMIT || hasInvalidControls(command.note)) {
+        return refuse2("notes_invalid");
+      }
+      const trimmed = command.note.trim();
+      cleanNote = trimmed.length === 0 ? null : trimmed;
+    }
+    const decisionStatus = command.decision === "approve" ? "approved" : "declined";
+    const nextState = command.decision === "approve" ? "done" : "dropped";
+    emit("TodoDecided", {
+      todo: {
+        ...todo,
+        version: todo.version + 1,
+        state: nextState,
+        state_by: actor,
+        state_at: timestamp,
+        queue_rank: null,
+        decision_status: decisionStatus,
+        decision_by_user: actor.user_id,
+        decision_at: timestamp,
+        decision_note: cleanNote
+      },
+      decision: command.decision,
+      note: cleanNote
+    });
+    const requester = todo.assigned_by ?? todo.created_by;
+    const body = command.decision === "approve" ? TODO_NOTICE_BODIES.approved : TODO_NOTICE_BODIES.declined_decision;
+    if (requester.principal_id !== null) {
+      notice(todo.todo_id, "note", { kind: "agent", id: requester.principal_id }, body);
+    } else if (requester.user_id !== actor.user_id) {
+      notice(todo.todo_id, "note", { kind: "user", id: requester.user_id }, body);
     }
   } else if (command.kind === "household_todo_answer") {
     const offer = todo.offer;
@@ -5531,6 +5638,7 @@ function decideTodo(state, command, ctx) {
       if (targetError) return refuse2(targetError);
       const gateError = gateRefusal(todo.todo_id, offer.gate);
       if (gateError) return refuse2(gateError);
+      if (offer.start === "now" && !evaluateGate(offer.gate, draft.todos, ctx.now)) return refuse2("gate_invalid");
       if (queueFull(todo, offer.to)) return refuse2("queue_full");
     }
     emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: offer.offer_id, answer: command.answer });
@@ -5541,10 +5649,10 @@ function decideTodo(state, command, ctx) {
       offer.gate,
       offer.gate.kind === "none" ? null : offer.by.user_id
     );
-    if (command.answer === "accept" && offer.to.kind === "agent" && (offer.start === "now" || evaluateGate(offer.gate, draft.todos, ctx.now))) {
+    if (command.answer === "accept" && offer.to.kind === "agent" && evaluateGate(offer.gate, draft.todos, ctx.now)) {
       if (offer.start === "now") notice(todo.todo_id, "ask", offer.to, TODO_NOTICE_BODIES.start);
       else notice(todo.todo_id, "note", offer.to, TODO_NOTICE_BODIES.added);
-    } else if (command.answer !== "withdraw" && offer.by.user_id !== offer.decider_user_id) {
+    } else if (command.answer !== "withdraw" && (offer.by.principal_id !== null || offer.by.user_id !== offer.decider_user_id)) {
       notice(todo.todo_id, "note", offer.by.principal_id ? { kind: "agent", id: offer.by.principal_id } : { kind: "user", id: offer.by.user_id }, command.answer === "accept" ? TODO_NOTICE_BODIES.accepted : TODO_NOTICE_BODIES.declined);
     }
   } else if (command.kind === "household_todo_steer") {
@@ -5557,20 +5665,38 @@ function decideTodo(state, command, ctx) {
       const failure = order(todo.assignee.id, todo.todo_id, action.after_todo_id);
       if (failure) return refuse2(failure);
     } else if (action.kind === "start_now") {
-      if (todo.gate.kind !== "none") {
-        emit("TodoGateSet", { todo: { ...todo, version: todo.version + 1, gate: { kind: "none" }, gate_set_by: null } });
+      const assignee = todo.assignee;
+      const approvalGated = isApprovalGate(todo.gate, draft.todos);
+      if (approvalGated && !evaluateGate(todo.gate, draft.todos, ctx.now)) return refuse2("gate_invalid");
+      if (todo.offer) {
+        emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: "replaced" });
+        todo = own2(draft.todos, todo.todo_id);
       }
-      order(todo.assignee.id, todo.todo_id, null);
-      emit("TodoStartAsked", { todo_id: todo.todo_id, principal_id: todo.assignee.id });
-      notice(todo.todo_id, "ask", todo.assignee, TODO_NOTICE_BODIES.start);
+      if (todo.gate.kind !== "none" && !approvalGated) {
+        emit("TodoGateSet", { todo: { ...todo, version: todo.version + 1, gate: { kind: "none" }, gate_set_by: null } });
+        todo = own2(draft.todos, todo.todo_id);
+      }
+      order(assignee.id, todo.todo_id, null);
+      emit("TodoStartAsked", { todo_id: todo.todo_id, principal_id: assignee.id });
+      notice(todo.todo_id, "ask", assignee, TODO_NOTICE_BODIES.start);
     } else if (action.kind === "gate") {
+      if (isApprovalGate(todo.gate, draft.todos) && !equal(action.gate, todo.gate) && !canModifyApprovalGate(todo.gate)) {
+        return refuse2("not_permitted");
+      }
       const failure = gateRefusal(todo.todo_id, action.gate);
       if (failure) return refuse2(failure);
+      if (todo.offer) {
+        emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: "replaced" });
+        todo = own2(draft.todos, todo.todo_id);
+      }
       emit("TodoGateSet", { todo: { ...todo, version: todo.version + 1, gate: action.gate, gate_set_by: action.gate.kind === "none" ? null : actor.user_id } });
     } else return refuse2("not_permitted");
   } else if (command.kind === "todo_start" || command.kind === "todo_set_state") {
     const next = command.kind === "todo_start" ? "doing" : command.state;
     const allowed = todo.state === "open" ? ["doing", "done", "dropped"] : todo.state === "doing" ? ["open", "done", "dropped"] : ["open"];
+    if (isApproval(todo) && (next === "done" || next === "doing")) {
+      return refuse2(!human ? "human_confirmation_required" : "invalid_transition");
+    }
     if (!allowed.includes(next)) return refuse2("invalid_transition");
     if (next === "doing") {
       if (todo.assignee !== null && !sameParty(todo.assignee, actorParty)) return refuse2("not_assignee");
@@ -5583,12 +5709,20 @@ function decideTodo(state, command, ctx) {
           emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: "replaced" });
           todo = own2(draft.todos, todo.todo_id);
         }
-        accept3(todo, actorParty, "queue", { kind: "none" });
+        const keepGate = isApprovalGate(todo.gate, draft.todos);
+        accept3(todo, actorParty, "queue", keepGate ? todo.gate : { kind: "none" }, keepGate ? todo.gate_set_by : null);
         todo = own2(draft.todos, todo.todo_id);
       }
     } else {
-      const assigneeSide = sameParty(todo.assignee, actorParty) || todo.assignee?.kind === "agent" && agent(todo.assignee.id)?.owner_user_id === actor.user_id;
-      if (todo.assignee !== null && !assigneeSide && todo.created_by.user_id !== actor.user_id && !admin()) return refuse2("not_permitted");
+      const reopeningDecidedApproval = isApproval(todo) && !isOpen(todo) && next === "open" && decisionStatusOf(todo) !== null;
+      if (reopeningDecidedApproval) {
+        if (!human) return refuse2("human_confirmation_required");
+        const isDecider = todo.assignee?.kind === "user" && todo.assignee.id === actor.user_id;
+        if (!isDecider && !admin()) return refuse2("not_permitted");
+      } else {
+        const assigneeSide = sameParty(todo.assignee, actorParty) || todo.assignee?.kind === "agent" && agent(todo.assignee.id)?.owner_user_id === actor.user_id;
+        if (todo.assignee !== null && !assigneeSide && todo.created_by.user_id !== actor.user_id && !admin()) return refuse2("not_permitted");
+      }
       if (!isOpen(todo) && next === "open") {
         if (Object.values(state.todos).filter(isOpen).length >= TODO_OPEN_LIMIT) return refuse2("todo_limit_reached");
         if (todo.assignee && queueFull(todo, todo.assignee)) return refuse2("queue_full");
@@ -5599,13 +5733,15 @@ function decideTodo(state, command, ctx) {
       }
     }
     const rank = !isOpen(todo) && next === "open" && todo.assignee?.kind === "agent" ? Math.max(0, ...queue(draft, todo.assignee.id).map((t) => t.queue_rank)) + 1 : todo.queue_rank;
+    const clearDecision = isApproval(todo) && !isOpen(todo) && next === "open" && decisionStatusOf(todo) !== null;
     emit("TodoStateChanged", { todo: {
       ...todo,
       version: todo.version + 1,
       state: next,
       state_by: actor,
       state_at: timestamp,
-      queue_rank: next === "done" || next === "dropped" ? null : rank
+      queue_rank: next === "done" || next === "dropped" ? null : rank,
+      ...clearDecision ? { decision_status: null, decision_by_user: null, decision_at: null, decision_note: null } : {}
     } });
   } else return refuse2("not_permitted");
   return finish({ status: "committed", value: own2(draft.todos, todo.todo_id) });
@@ -5645,37 +5781,90 @@ function reduceTodoEvents(initial, events) {
           fail("invalid origin conversation");
         }
       }
+      if (todo.kind !== void 0 && todo.kind !== "task" && todo.kind !== "approval") fail("invalid kind");
+      const kind = todoKind(todo);
+      const decisionStatus = decisionStatusOf(todo);
+      const decisionBy = todo.decision_by_user ?? null;
+      const decisionAt = todo.decision_at ?? null;
+      const decisionNote = todo.decision_note ?? null;
+      if (decisionStatus !== null && decisionStatus !== "approved" && decisionStatus !== "declined") fail("invalid decision");
+      if (kind !== "approval" && decisionStatus !== null) fail("invalid decision");
+      if (decisionStatus === null) {
+        if (decisionBy !== null || decisionAt !== null || decisionNote !== null) fail("invalid decision");
+      } else {
+        if (!id(decisionBy) || typeof decisionAt !== "string" || !Number.isFinite(Date.parse(decisionAt))) fail("invalid decision");
+        if (decisionNote !== null && (typeof decisionNote !== "string" || textLength(decisionNote) > TODO_DECISION_NOTE_LIMIT || hasInvalidControls(decisionNote))) fail("invalid decision");
+        if (decisionStatus === "approved" && todo.state !== "done" || decisionStatus === "declined" && todo.state !== "dropped") fail("invalid decision state");
+      }
+      if (kind === "approval") {
+        if (todo.assignee?.kind === "agent") fail("invalid approval assignee");
+        const placement = todo.origin_placement ?? "workspace";
+        if (placement !== "workspace" && placement !== "general" || (todo.origin_channel_id ?? null) !== null || (todo.origin_conversation_id ?? null) !== null) fail("invalid approval origin");
+      }
       if (create) {
-        if (!equal(todo.created_by, author) || !equal(todo.state_by, author) || todo.created_at !== at || todo.state_at !== at || todo.state !== "open" || todo.assignee !== null || todo.assigned_by !== null || todo.assigned_at !== null || todo.offer !== null || todo.gate.kind !== "none" || todo.gate_set_by !== null || todo.queue_rank !== null || todo.comment_count !== 0) fail("invalid create");
+        if (!equal(todo.created_by, author) || !equal(todo.state_by, author) || todo.created_at !== at || todo.state_at !== at || todo.state !== "open" || todo.assignee !== null || todo.assigned_by !== null || todo.assigned_at !== null || todo.offer !== null || todo.gate.kind !== "none" || todo.gate_set_by !== null || todo.queue_rank !== null || todo.comment_count !== 0 || decisionStatus !== null || decisionBy !== null || decisionAt !== null || decisionNote !== null) fail("invalid create");
       } else {
         const fields = {
           TodoDetailsChanged: ["title", "notes", "due_on"],
           TodoAssigned: ["assignee", "assigned_by", "assigned_at", "state", "state_by", "state_at", "gate", "gate_set_by", "queue_rank", "offer"],
           TodoOffered: ["offer"],
           TodoOfferAnswered: ["offer"],
-          TodoStateChanged: ["state", "state_by", "state_at", "queue_rank"],
+          TodoStateChanged: ["state", "state_by", "state_at", "queue_rank", "decision_status", "decision_by_user", "decision_at", "decision_note"],
+          TodoDecided: ["state", "state_by", "state_at", "queue_rank", "decision_status", "decision_by_user", "decision_at", "decision_note"],
           TodoGateSet: ["gate", "gate_set_by"],
           TodoCommented: ["comment_count"]
         };
         const allowed = /* @__PURE__ */ new Set(["version", ...fields[event2.type] ?? []]);
         const allKeys = /* @__PURE__ */ new Set([...Object.keys(current), ...Object.keys(todo)]);
-        const originFieldEqual = (key2) => {
+        const immutableFieldEqual = (key2) => {
           if (key2 === "origin_placement") return (current.origin_placement ?? "workspace") === (todo.origin_placement ?? "workspace");
           if (key2 === "origin_channel_id") return (current.origin_channel_id ?? null) === (todo.origin_channel_id ?? null);
           if (key2 === "origin_conversation_id") return (current.origin_conversation_id ?? null) === (todo.origin_conversation_id ?? null);
+          if (key2 === "kind") return todoKind(current) === todoKind(todo);
+          if (key2 === "decision_status") return decisionStatusOf(current) === decisionStatusOf(todo);
+          if (key2 === "decision_by_user") return (current.decision_by_user ?? null) === (todo.decision_by_user ?? null);
+          if (key2 === "decision_at") return (current.decision_at ?? null) === (todo.decision_at ?? null);
+          if (key2 === "decision_note") return (current.decision_note ?? null) === (todo.decision_note ?? null);
           return equal(current[key2], todo[key2]);
         };
-        if ([...allKeys].some((key2) => !allowed.has(key2) && !originFieldEqual(key2))) fail("unrelated field changed");
+        if ([...allKeys].some((key2) => !allowed.has(key2) && !immutableFieldEqual(key2))) fail("unrelated field changed");
+        if (event2.type === "TodoDetailsChanged") {
+          if (isApproval(current) && decisionStatusOf(current) !== null) fail("approval decided frozen");
+          if (current.offer !== null) fail("offer pending frozen");
+        }
         if (event2.type === "TodoAssigned") {
           const validSetter = acceptedOffer ? acceptedOffer.todo_id === todo.todo_id && acceptedOffer.command_id === event2.command_id && acceptedOffer.offer.decider_user_id === event2.actor_user && event2.actor_agent_principal === null && sameParty(todo.assignee, acceptedOffer.offer.to) && equal(todo.gate, acceptedOffer.offer.gate) && todo.gate_set_by === (todo.gate.kind === "none" ? null : acceptedOffer.offer.by.user_id) : todo.gate_set_by === (todo.gate.kind === "none" ? null : event2.actor_user) || equal(todo.gate, current.gate) && todo.gate_set_by === current.gate_set_by;
           if (todo.state !== "open" || todo.offer !== null || !equal(todo.assigned_by, author) || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at || !validSetter) fail("invalid assignment");
+          if (isApproval(current)) {
+            if (!isOpen(current) || todo.assignee?.kind !== "user" || todo.gate.kind !== "none") fail("invalid approval assignment");
+            if (current.assignee !== null && event2.actor_agent_principal !== null) fail("invalid approval reassignment");
+          }
+          if (isApprovalGate(current.gate, todos) && !equal(todo.gate, current.gate) && event2.actor_agent_principal !== null) fail("invalid approval gate change");
         }
         if (event2.type === "TodoOffered" && (!todo.offer || !equal(todo.offer.by, author) || todo.offer.at !== at || current.offer !== null)) fail("invalid offer provenance");
         if (event2.type === "TodoStateChanged") {
           const allowedStates = current.state === "open" ? ["doing", "done", "dropped"] : current.state === "doing" ? ["open", "done", "dropped"] : ["open"];
           if (!allowedStates.includes(todo.state) || !equal(todo.state_by, author) || todo.state_at !== at || todo.state === "doing" && (!todo.assignee || !sameParty(todo.assignee, event2.actor_agent_principal ? { kind: "agent", id: event2.actor_agent_principal } : { kind: "user", id: event2.actor_user }) || !evaluateGate(todo.gate, todos, event2.occurred_at_server))) fail("invalid state transition");
+          if (isApproval(current)) {
+            if (todo.state === "doing" || todo.state === "done") fail("invalid approval state transition");
+            if (decisionStatusOf(current) !== null) {
+              if (event2.actor_agent_principal !== null || todo.state !== "open" || decisionStatus !== null || decisionBy !== null || decisionAt !== null || decisionNote !== null) fail("invalid approval reopen");
+            } else if (decisionStatus !== null || decisionBy !== null || decisionAt !== null || decisionNote !== null) {
+              fail("invalid decision");
+            }
+          } else if (decisionStatus !== null || decisionBy !== null || decisionAt !== null || decisionNote !== null) {
+            fail("invalid decision");
+          }
         }
-        if (event2.type === "TodoGateSet" && todo.gate_set_by !== (todo.gate.kind === "none" ? null : event2.actor_user)) fail("invalid gate setter");
+        if (event2.type === "TodoDecided") {
+          const expectedStatus = event2.payload.decision === "approve" ? "approved" : "declined";
+          const expectedState = event2.payload.decision === "approve" ? "done" : "dropped";
+          if (event2.actor_agent_principal !== null || !isApproval(current) || current.state !== "open" || decisionStatusOf(current) !== null || current.assignee?.kind !== "user" || current.assignee.id !== event2.actor_user || event2.payload.decision !== "approve" && event2.payload.decision !== "decline" || todo.state !== expectedState || decisionStatus !== expectedStatus || decisionBy !== event2.actor_user || decisionAt !== at || decisionNote !== event2.payload.note || !equal(todo.state_by, author) || todo.state_at !== at || todo.queue_rank !== null) fail("invalid decision event");
+        }
+        if (event2.type === "TodoGateSet") {
+          if (todo.gate_set_by !== (todo.gate.kind === "none" ? null : event2.actor_user)) fail("invalid gate setter");
+          if (isApprovalGate(current.gate, todos) && !equal(todo.gate, current.gate) && event2.actor_agent_principal !== null) fail("invalid approval gate change");
+        }
       }
       todos[todo.todo_id] = structuredClone(todo);
     };
@@ -5688,6 +5877,7 @@ function reduceTodoEvents(initial, events) {
       case "TodoAssigned":
       case "TodoOffered":
       case "TodoStateChanged":
+      case "TodoDecided":
       case "TodoGateSet":
         applyTodo(event2.payload.todo);
         break;
@@ -5713,7 +5903,7 @@ function reduceTodoEvents(initial, events) {
       }
       case "TodoStartAsked": {
         const todo = own2(todos, event2.payload.todo_id);
-        if (!todo || todo.assignee?.kind !== "agent" || todo.assignee.id !== event2.payload.principal_id || !isOpen(todo)) fail("invalid start request");
+        if (!todo || todo.assignee?.kind !== "agent" || todo.assignee.id !== event2.payload.principal_id || !isOpen(todo) || !evaluateGate(todo.gate, todos, event2.occurred_at_server)) fail("invalid start request");
         break;
       }
       case "TodoCommented": {
@@ -7046,6 +7236,7 @@ export {
   SKILL_WHEN_TO_USE_MAX,
   StreamIntegrityError,
   TODO_COMMENT_LIMIT,
+  TODO_DECISION_NOTE_LIMIT,
   TODO_DEFAULT_ACCEPTS_FROM,
   TODO_EVENT_BYTE_LIMIT,
   TODO_EVENT_TYPES,

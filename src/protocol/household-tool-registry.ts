@@ -11,8 +11,8 @@ import {
   type HouseholdPatch, type HouseholdRevisionRef,
 } from './household-object-events.js';
 import type { HouseholdObjectCommand, HouseholdReadQuery } from './household-objects.js';
-import type { TodoCommand, Party, TodoGate, TodoComment } from './household-todos.js';
-import { TODO_TITLE_LIMIT, TODO_NOTES_LIMIT, TODO_COMMENT_LIMIT, TODO_MENTIONS_LIMIT, TODO_GATE_NOTE_LIMIT } from './household-todo-policy.js';
+import type { TodoCommand, TodoKind, Party, TodoGate, TodoComment } from './household-todos.js';
+import { TODO_TITLE_LIMIT, TODO_NOTES_LIMIT, TODO_COMMENT_LIMIT, TODO_MENTIONS_LIMIT, TODO_GATE_NOTE_LIMIT, TODO_DECISION_NOTE_LIMIT } from './household-todo-policy.js';
 
 export const HOUSEHOLD_LOCAL_SEAT = 'seat_0000000000000000000000';
 
@@ -227,13 +227,17 @@ const BASE_HOUSEHOLD_TOOL_REGISTRY = [
       title: text(1, TODO_TITLE_LIMIT),
       notes: text(0, TODO_NOTES_LIMIT),
       due_on: due,
+      kind: { type: 'string', enum: ['task', 'approval'] },
       assign: object({ to: party, start, gate }, ['start', 'gate']),
       origin_placement: { type: 'string', enum: ['workspace', 'general', 'channel', 'dm', 'group_dm'] },
       origin_channel_id: { oneOf: [uuid, { type: 'null' }] },
       origin_conversation_id: { oneOf: [uuid, { type: 'null' }] },
     },
-    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],
-    toCore: (args) => todoCommand('todo_create', args),
+    optional: ["notes", "due_on", "kind", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],
+    toCore: (args) => {
+      const { seat: _seat, request_id: _request, kind: todoKind, ...fields } = args;
+      return { command: { kind: 'todo_create', ...(todoKind === undefined ? {} : { todo_kind: todoKind as TodoKind }), ...fields } as TodoCommand };
+    },
   }),
   define({ name: 'todo_comment', title: "Comment on a shared item",
     description: "Append a comment; tagged people and agents receive a notice when it can be sent." + untrustedTodo,
@@ -390,7 +394,10 @@ export function validateHouseholdHumanCommand(value: unknown): TodoCommand | { k
   | HouseholdDefinitionCertifyCommand {
   const schemas: Record<string, Schema> = {
     household_todo_answer: object({ kind: literal('household_todo_answer'), todo_id: uuid, offer_id: uuid,
-      answer: { type: 'string', enum: ['accept', 'decline', 'withdraw'] } }),
+      base_version: integer(1), answer: { type: 'string', enum: ['accept', 'decline', 'withdraw'] } }),
+    household_todo_decide: object({ kind: literal('household_todo_decide'), todo_id: uuid, base_version: integer(1),
+      decision: { type: 'string', enum: ['approve', 'decline'] },
+      note: { oneOf: [text(0, TODO_DECISION_NOTE_LIMIT), { type: 'null' }] } }, ['note']),
     household_todo_steer: object({ kind: literal('household_todo_steer'), todo_id: uuid, base_version: integer(1),
       action: { oneOf: [object({ kind: literal('move'), after_todo_id: { oneOf: [uuid, { type: 'null' }] } }),
         object({ kind: literal('start_now') }), object({ kind: literal('gate'), gate })] } }),

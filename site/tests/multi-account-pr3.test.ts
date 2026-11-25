@@ -811,7 +811,7 @@ test("PR3 4: LiveDashboard teardown isolation contract & MULTI_ACCOUNT_ENABLED r
 
   const waitingTodoMatch = liveDashboard.match(/const markWaitingTodoDone = async [\s\S]*?\n    \};/);
   assert.ok(waitingTodoMatch, "markWaitingTodoDone must exist");
-  assert.ok(waitingTodoMatch[0].includes("homeServer(pinned, { accountRouted: true })"), "markWaitingTodoDone must use accountRouted HomeServer");
+  assert.ok(waitingTodoMatch[0].includes("homeServer(pinned, { accountRouted: true, isAlive })"), "markWaitingTodoDone must use accountRouted HomeServer with isAlive guard");
   assert.ok(waitingTodoMatch[0].includes("workspaces.some(ws => ws.id === item.workspaceId)"), "markWaitingTodoDone must verify workspace belongs to account");
 });
 

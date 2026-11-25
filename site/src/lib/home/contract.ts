@@ -7,6 +7,15 @@ export type LocalDate = string; // YYYY-MM-DD; a deadline only, never a wake
 export type Party = { kind: 'user'; id: Uuid } | { kind: 'agent'; id: Uuid };
 export interface Actor { user_id: Uuid; principal_id: Uuid | null }
 
+export type TodoKind = 'task' | 'approval';
+export type TodoDecisionStatus = 'approved' | 'declined';
+export type TodoDecisionChoice = 'approve' | 'decline';
+export interface TodoDecision {
+  status: TodoDecisionStatus;
+  by: Uuid;
+  at: IsoTime;
+  note: string | null;
+}
 export type TodoState = 'open' | 'doing' | 'done' | 'dropped';
 export type TodoStart = 'queue' | 'now';
 export type TodoGate =
@@ -19,6 +28,7 @@ export interface TodoOffer {
 }
 export interface Todo {
   workspace_id: Uuid; todo_id: Uuid; version: number;
+  kind?: TodoKind;
   title: string; notes: string; state: TodoState; due_on: LocalDate | null;
   created_by: Actor; created_at: IsoTime;
   assignee: Party | null; assigned_by: Actor | null; assigned_at: IsoTime | null;
@@ -26,14 +36,31 @@ export interface Todo {
   gate: TodoGate; gate_clear: boolean;   // evaluated with the server clock at read time
   queue_position: number | null;         // 1-based within the agent's up_next; else null
   state_by: Actor; state_at: IsoTime; comment_count: number;
+  decision_status?: TodoDecisionStatus | null;
+  decision_by_user?: Uuid | null;
+  decision_at?: IsoTime | null;
+  decision_note?: string | null;
+  decision?: TodoDecision | null;
 }
 export interface TodoRef { todo_id: Uuid; title: string; state: TodoState; due_on: LocalDate | null }
+export interface TodoSummaryOffer {
+  offer_id: Uuid;
+  to: Party;
+  decider_user_id: Uuid;
+  start: TodoStart;
+  gate?: TodoGate;
+  by?: Actor;
+  at?: IsoTime;
+}
 /** List/queue rows (SERVER-PLAN-AMENDMENTS AM3): no notes, no comments, no gate note; pages of <= 50 that the
  * store also truncates to a 48 KiB response budget. Details come only from readTodo. */
 export interface TodoSummary {
   todo_id: Uuid; version: number; title: string; state: TodoState; due_on: LocalDate | null;
-  assignee: Party | null; offer: { offer_id: Uuid; to: Party; decider_user_id: Uuid; start: TodoStart } | null;
-  gate: { kind: TodoGate['kind']; clear: boolean; todo_id: Uuid | null; at: IsoTime | null };
+  kind?: TodoKind;
+  decision_status?: TodoDecisionStatus | null;
+  has_notes?: boolean;
+  assignee: Party | null; offer: TodoSummaryOffer | null;
+  gate: { kind: TodoGate['kind']; clear: boolean; todo_id?: Uuid | null; at?: IsoTime | null };
   queue_position: number | null; comment_count: number; state_at: IsoTime;
 }
 export type QueueSection = 'working' | 'up_next' | 'not_yet' | 'requests';
@@ -45,7 +72,7 @@ export interface Comment {
 }
 export type Notice =
   | { to: Party[]; status: 'sent'; signal_id: Uuid }
-  | { to: Party[]; status: 'not_sent'; reason: 'signal_rate_limited' | 'recipient_not_live' };
+  | { to: Party[]; status: 'not_sent'; reason: 'signal_rate_limited' | 'recipient_not_live' | 'recipient_access_refused' };
 
 export type AccessRefusal = 'workspace_access_refused' | 'content_consent_required'
   | 'content_read_only' | 'connection_access_refused' | 'human_confirmation_required';
@@ -53,7 +80,8 @@ export type TodoRefusal = AccessRefusal | 'todo_not_found' | 'target_not_found' 
   | 'notes_invalid' | 'due_invalid' | 'comment_invalid' | 'mentions_invalid' | 'assignee_not_member'
   | 'assignee_removed' | 'invalid_transition' | 'not_assignee' | 'not_permitted' | 'owner_only'
   | 'offer_not_pending' | 'not_decider' | 'not_in_queue' | 'gate_invalid' | 'gate_cycle'
-  | 'queue_empty' | 'queue_full' | 'todo_limit_reached' | 'request_id_reused' | 'todo_write_rate_limited';
+  | 'queue_empty' | 'queue_full' | 'todo_limit_reached' | 'request_id_reused' | 'todo_write_rate_limited'
+  | 'approval_origin_not_allowed' | 'approval_decided_frozen' | 'offer_pending_frozen';
 export type WriteResult<T> =
   | { status: 'committed'; value: T; notices: Notice[]; replayed: boolean }
   | { status: 'conflict'; current: Todo }
@@ -111,6 +139,11 @@ export interface DecisionAsk {
 export interface DecisionQueue { workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; asks: DecisionAsk[] }
 /** Where a waiting/assigned to-do originated: a specific channel, #general, a DM/group DM, or workspace-only. */
 export type WaitingTodoPlacement = 'channel' | 'general' | 'workspace' | 'dm' | 'group_dm';
+export interface WaitingTodoParty {
+  kind: 'user' | 'agent';
+  id: Uuid;
+  name: string | null;
+}
 export interface WaitingTodoEntry {
   todo_id: Uuid; title: string; state: 'open' | 'doing'; due_on: LocalDate | null;
   reason: 'assigned' | 'request' | 'after' | 'hold' | 'agent_removed';
@@ -118,6 +151,14 @@ export interface WaitingTodoEntry {
   placement: WaitingTodoPlacement; channel_id: Uuid | null;
   conversation_id?: Uuid | null;
   offer_id?: Uuid | null;
+  version?: number;
+  kind?: TodoKind;
+  notes_preview?: string | null;
+  notes_truncated?: boolean;
+  requested_by?: WaitingTodoParty | null;
+  offer_to?: WaitingTodoParty | null;
+  offer_start?: TodoStart | null;
+  offer_gate?: TodoGate | null;
 }
 /** The viewer's open/doing assigned and waiting to-dos in one workspace (`truncated` when more pages remain). */
 export interface WaitingTodosQueue {
@@ -126,6 +167,7 @@ export interface WaitingTodosQueue {
 export type WaitingArchivedKind = 'ask' | 'todo' | 'review';
 export type KnownWaitingArchivedOutcomeKind =
   | 'answered'
+  | 'approved'
   | 'cleared_stale'
   | 'done'
   | 'dropped'
@@ -209,8 +251,10 @@ export interface HomeServer {
   setTodoState(workspaceId: Uuid, input: { todo_id: Uuid; base_version: number; state: TodoState },
     requestId: string): Promise<WriteResult<Todo>>;
   startTodo(workspaceId: Uuid, input: { todo_id: Uuid }, requestId: string): Promise<WriteResult<Todo>>;
-  answerRequest(workspaceId: Uuid, input: { todo_id: Uuid; offer_id: Uuid;
+  answerRequest(workspaceId: Uuid, input: { todo_id: Uuid; offer_id: Uuid; base_version: number;
     answer: 'accept' | 'decline' | 'withdraw' }, requestId: string): Promise<WriteResult<Todo>>;
+  decideTodo(workspaceId: Uuid, input: { todo_id: Uuid; base_version: number;
+    decision: TodoDecisionChoice; note?: string | null }, requestId: string): Promise<WriteResult<Todo>>;
   steerQueue(workspaceId: Uuid, input: { todo_id: Uuid; base_version: number; action: SteerAction },
     requestId: string): Promise<WriteResult<Todo>>;
   setWorkPolicy(workspaceId: Uuid, input: { principal_id: Uuid; accepts_from: 'anyone' | 'owner' },

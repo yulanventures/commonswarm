@@ -23,6 +23,7 @@ export async function readHouseholdActivity(tx: Sql, workspaceId: string, identi
           WHEN 'TodoAssigned' THEN 'assigned' WHEN 'TodoOffered' THEN 'requested'
           WHEN 'TodoOfferAnswered' THEN CASE e.event->'payload'->>'answer' WHEN 'accept' THEN 'accepted' WHEN 'decline' THEN 'declined' ELSE 'updated' END
           WHEN 'TodoStateChanged' THEN CASE e.event->'payload'->'todo'->>'state' WHEN 'doing' THEN 'started' WHEN 'done' THEN 'done' WHEN 'dropped' THEN 'dropped' ELSE 'reopened' END
+          WHEN 'TodoDecided' THEN CASE e.event->'payload'->>'decision' WHEN 'approve' THEN 'approved' ELSE 'declined' END
           WHEN 'TodoCommented' THEN 'commented' ELSE 'updated' END AS event,
         coalesce(e.event->'payload'->'todo'->>'title', t.title, o.value->'history'->-1->>'title') AS title,
         CASE WHEN e.event->>'type'='TodoCommented' THEN jsonb_build_object('kind',e.event->'payload'->'comment'->'target'->>'kind','id',e.event->'payload'->'comment'->'target'->>'id')

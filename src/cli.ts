@@ -15,12 +15,13 @@ import { householdRefusalNextStep } from "./protocol/household-next-steps.js";
 import { HouseholdObjectClient, type HouseholdClientResult } from "./cloud/household-objects.js";
 import {
   checkedToolArguments, fileText, mentionCount, oneSource, renderTodoList, renderTodoQueue, renderTodoRead, renderTodoWrite,
-  resolveTodoParty, todoBaseVersion, todoCommentBody, todoDue, todoFailureText, todoIdArgument, todoLimit, todoNames,
+  resolveTodoParty, todoBaseVersion, todoCommentBody, todoDecisionNote, todoDue, todoFailureText, todoIdArgument, todoLimit, todoNames,
   todoNextAction, todoNotes, todoOffset, todoSection, todoStart, todoTitle, TODO_STATE_VERBS,
   type TodoNames, type TodoRosterEntry, type TodoStateVerb,
 } from "./cloud/todo-cli.js";
 import type { Party } from "./protocol/household-todos.js";
-import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from "./cloud/household-http.js";
+import { callHouseholdHumanCommand, createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT, ServerError } from "./cloud/household-http.js";
+import { decodeHouseholdTodoDecideResponse } from "./cloud/household-todos.js";
 import { randomUUID } from "node:crypto";
 import { NO_LISTENER_STATUS, NO_LISTENER_STATUS_SENTENCE } from "./listener/main-routing.js";
 import { signalDuration } from "./cloud/signal-duration.js";
@@ -778,7 +779,7 @@ export const KNOWN_FLAGS = new Set([
   "wake-profile", "wake-host-session-id",
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
   "workspace", "none",
-  "all", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
+  "all", "approval", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
   "conversation", "mentions", "after", "after-created-at", "after-id", "timeout",
   "check-id", "subject-repo", "pr", "seat", "verdict", "note", "conversation-id", "thread-root-id",
 ]);
@@ -825,6 +826,7 @@ export const BOOLEAN_FLAGS = new Set([
   "workspace",
   "none",
   "all",
+  "approval",
   "resolved",
   "escalated",
   "archived",
@@ -12467,9 +12469,10 @@ async function runHouseholdObject(args: Arguments): Promise<void> {
 export const TODO_LS_ACCEPTED_FLAGS = [...agentFlags, "all", "assignee", "limit", "offset"] as const;
 export const TODO_QUEUE_ACCEPTED_FLAGS = [...agentFlags, "section", "agent", "limit", "offset"] as const;
 export const TODO_READ_ACCEPTED_FLAGS = [...agentFlags, "comment-offset"] as const;
-export const TODO_CREATE_ACCEPTED_FLAGS = [...agentFlags, "notes", "notes-file", "due", "assign", "start"] as const;
+export const TODO_CREATE_ACCEPTED_FLAGS = [...agentFlags, "notes", "notes-file", "due", "assign", "start", "approval"] as const;
 export const TODO_START_ACCEPTED_FLAGS = [...agentFlags] as const;
 export const TODO_STATE_ACCEPTED_FLAGS = [...agentFlags, "base-version"] as const;
+export const TODO_DECIDE_ACCEPTED_FLAGS = [...agentFlags, "note", "base-version"] as const;
 export const TODO_COMMENT_ACCEPTED_FLAGS = [...agentFlags, "body-file"] as const;
 
 type TodoContext = FileCliContext & { client: HouseholdObjectClient; directory(): Promise<SignalDirectory> };
@@ -12507,7 +12510,11 @@ async function todoParty(context: TodoContext, selector: string, flag: string,
       ? { kind: "user", id: selected.human!.userId.toLowerCase() }
       : { kind: "agent", id: (selected.agent?.principalId ?? (await context.directory()).identity?.principal_id ?? "").toLowerCase() };
     if (!me.id) throw new Error(`--${flag} me needs this agent's id, and the workspace directory did not return it; pass the id instead`);
-    if (!kinds.includes(me.kind)) throw new Error(`--${flag} names an agent; you are signed in as a person`);
+    if (!kinds.includes(me.kind)) {
+      throw new Error(me.kind === "user"
+        ? `--${flag} names an agent; you are signed in as a person`
+        : `--${flag} names a person; you are signed in as an agent`);
+    }
     return me;
   }
   return resolveTodoParty(selector, todoRoster(await context.directory()), flag, kinds);
@@ -12588,12 +12595,16 @@ async function runTodoCreate(args: Arguments): Promise<void> {
   const dueOn = todoDue(args.optional("due"));
   const assignSelector = todoSelector(args, "assign");
   const start = todoStart(args.optional("start"));
+  const approval = args.has("approval");
   if (start !== undefined && assignSelector === undefined) throw new Error("--start goes with --assign: it says how the assignee takes the to-do");
+  if (approval && assignSelector === undefined) throw new Error("--approval requires --assign <person>");
+  if (approval && start === "now") throw new Error("--approval cannot use --start now");
   const notes = notesSource === null ? undefined
     : todoNotes(notesSource === 0 ? args.required("notes") : fileText(readFileSync(args.required("notes-file"), "utf8")));
   const context = await todoContext(args, TODO_CREATE_ACCEPTED_FLAGS, 3);
-  const to = assignSelector === undefined ? undefined : await todoParty(context, assignSelector, "assign");
+  const to = assignSelector === undefined ? undefined : await todoParty(context, assignSelector, "assign", approval ? ["user"] : ["user", "agent"]);
   const result = await sendTodoTool(context, "todo_create", { request_id: randomUUID(), title,
+    ...(approval ? { kind: "approval" } : {}),
     ...(notes === undefined ? {} : { notes }), ...(dueOn === undefined ? {} : { due_on: dueOn }),
     ...(to === undefined ? {} : { assign: { to, ...(start === undefined ? {} : { start }) } }) });
   await emitTodo(args, result, async () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, "Created",
@@ -12623,6 +12634,52 @@ async function runTodoSetState(args: Arguments, verb: TodoStateVerb): Promise<vo
   const result = await sendTodoTool(context, "todo_set_state", { request_id: randomUUID(), todo_id: todoId, base_version: baseVersion,
     state: TODO_STATE_VERBS[verb] });
   const said = verb === "done" ? "Done" : verb === "drop" ? "Dropped" : "Reopened";
+  await emitTodo(args, result, () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, said, new Map()), todoId);
+}
+
+/** approve and decline: human-only household_todo_decide against --base-version, or against todo_read's version. */
+async function runTodoDecide(args: Arguments, decision: "approve" | "decline"): Promise<void> {
+  const todoId = todoIdArgument(args.positionals[2], `cswarm todo ${decision}`);
+  args.assertShape(TODO_DECIDE_ACCEPTED_FLAGS, 3);
+  const note = todoDecisionNote(args.optional("note"));
+  let baseVersion = todoBaseVersion(args.optional("base-version"));
+  const context = await todoContext(args, TODO_DECIDE_ACCEPTED_FLAGS, 3);
+  if (context.selected.kind !== "human") {
+    await emitTodo(args, { status: "refused", reason: "human_confirmation_required" }, () => "", todoId);
+    return;
+  }
+  if (baseVersion === undefined) {
+    const read = await sendTodoTool(context, "todo_read", { todo_id: todoId });
+    if (read.status !== "ok" || read.kind !== "todo_read") { await emitTodo(args, read, () => "", todoId); return; }
+    baseVersion = read.todo.version;
+  }
+  const requestId = randomUUID();
+  const command: Record<string, unknown> = {
+    kind: "household_todo_decide",
+    todo_id: todoId,
+    base_version: baseVersion,
+    decision,
+    ...(note === undefined ? {} : { note }),
+  };
+  const attempt = async (): Promise<HouseholdClientResult> => {
+    try {
+      const raw = await callHouseholdHumanCommand({
+        target: context.cloud,
+        workspaceId: context.selected.selectedWorkspace,
+        credential: context.selected.bearer,
+        fetcher: context.selected.fetcher,
+        commandId: requestId,
+        command,
+      });
+      return decodeHouseholdTodoDecideResponse(raw, context.selected.selectedWorkspace, requestId, todoId)
+        ?? { status: "unknown", request_id: requestId, reason: "invalid_response" };
+    } catch (error) {
+      return { status: "unknown", request_id: requestId, reason: error instanceof ServerError ? "server_error" : "transport_interrupted" };
+    }
+  };
+  let result = await attempt();
+  if (result.status === "unknown") result = await attempt();
+  const said = decision === "approve" ? "Approved" : "Declined";
   await emitTodo(args, result, () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, said, new Map()), todoId);
 }
 
@@ -12665,7 +12722,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     read: todoEntry(runTodoRead, "Read one to-do with its notes and up to twenty comments.", false, TODO_READ_ACCEPTED_FLAGS,
       "cswarm todo read <todo-id> [--comment-offset <n>]"),
     create: todoEntry(runTodoCreate, "Create a to-do, optionally assigned. Assigning never starts an agent.", true, TODO_CREATE_ACCEPTED_FLAGS,
-      'cswarm todo create "<title>" [--notes "<text>" | --notes-file <path>] [--due <YYYY-MM-DD>] [--assign <me|name|id> [--start <queue|now>]]'),
+      'cswarm todo create "<title>" [--notes "<text>" | --notes-file <path>] [--due <YYYY-MM-DD>] [--assign <me|name|id> [--start <queue|now>]] [--approval]'),
     start: todoEntry(runTodoStart, "Move a to-do to doing. Without an id, the first ready item in your up next.", true, TODO_START_ACCEPTED_FLAGS,
       "cswarm todo start [<todo-id>]"),
     done: todoEntry((args) => runTodoSetState(args, "done"), "Mark a to-do done.", true, TODO_STATE_ACCEPTED_FLAGS,
@@ -12674,6 +12731,10 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
       "cswarm todo drop <todo-id> [--base-version <n>]"),
     reopen: todoEntry((args) => runTodoSetState(args, "reopen"), "Reopen a done or dropped to-do.", true, TODO_STATE_ACCEPTED_FLAGS,
       "cswarm todo reopen <todo-id> [--base-version <n>]"),
+    approve: todoEntry((args) => runTodoDecide(args, "approve"), "Approve an approval to-do (human-only).", true, TODO_DECIDE_ACCEPTED_FLAGS,
+      'cswarm todo approve <todo-id> [--note "<text>"] [--base-version <n>]'),
+    decline: todoEntry((args) => runTodoDecide(args, "decline"), "Decline an approval to-do (human-only).", true, TODO_DECIDE_ACCEPTED_FLAGS,
+      'cswarm todo decline <todo-id> [--note "<text>"] [--base-version <n>]'),
     comment: todoEntry(runTodoComment, "Comment on a to-do. @Name mentions notify that person or agent.", true, TODO_COMMENT_ACCEPTED_FLAGS,
       'cswarm todo comment <todo-id> ("<text>" | --body-file <path>)'),
   }, args => args.positionals[1], (_args, names) => new UsageError(`cswarm todo takes ${formatOrList(names)}`), {
@@ -13081,6 +13142,8 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "todo.done": TODO_STATE_ACCEPTED_FLAGS,
   "todo.drop": TODO_STATE_ACCEPTED_FLAGS,
   "todo.reopen": TODO_STATE_ACCEPTED_FLAGS,
+  "todo.approve": TODO_DECIDE_ACCEPTED_FLAGS,
+  "todo.decline": TODO_DECIDE_ACCEPTED_FLAGS,
   "todo.comment": TODO_COMMENT_ACCEPTED_FLAGS,
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
   roster: RUN_ROSTER_ACCEPTED_FLAGS,

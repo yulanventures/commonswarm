@@ -478,17 +478,23 @@ function homeActor(actor: Actor, people: HomePeople): PersonVM | AgentVM {
 /** Missing summary metadata stays unknown; it is never attributed to the viewer. */
 export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known: readonly TodoSummary[] = [], comments: readonly Comment[] = []): TodoVM {
   const full = 'created_by' in row ? row : null;
+  const kind = row.kind ?? 'task';
+  const decisionStatus = row.decision_status ?? full?.decision?.status ?? null;
+  const decided = kind === 'approval' && decisionStatus !== null;
   const party = row.offer?.to ?? row.assignee;
   const who = homeParty(party, ctx.people);
   const agent = who && 'label' in who ? who : null;
   const me = ctx.people.groups.find(group => group.person.you)?.person;
   const elevated = me?.role === 'owner' || me?.role === 'admin';
-  const edit = ctx.editor && !ctx.sample;
+  const edit = ctx.editor && !ctx.sample && !decided;
   const open = row.state === 'open' || row.state === 'doing';
   const steer = edit && open && !!agent?.yours && !row.offer;
-  const canComplete = edit && (row.assignee === null || row.assignee.kind === 'user' && row.assignee.id === ctx.viewerId
+  const canComplete = kind !== 'approval' && edit && (row.assignee === null || row.assignee.kind === 'user' && row.assignee.id === ctx.viewerId
     || !!homeParty(row.assignee, ctx.people) && 'label' in homeParty(row.assignee, ctx.people)! && (homeParty(row.assignee, ctx.people) as AgentVM).yours
     || full?.created_by.user_id === ctx.viewerId || elevated);
+  const canDecide = kind === 'approval' && ctx.editor && !ctx.sample && row.state === 'open' && !decided
+    && row.assignee?.kind === 'user' && row.assignee.id === ctx.viewerId;
+  const canAnswerOffer = ctx.editor && !ctx.sample && open && Boolean(row.offer && row.offer.decider_user_id === ctx.viewerId);
   const gate = full?.gate ?? row.gate;
   const clear = full ? full.gate_clear : 'clear' in row.gate ? row.gate.clear : false;
   const gateId = gate.kind === 'after' && 'todo_id' in gate ? gate.todo_id : null;
@@ -500,12 +506,54 @@ export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known
       : gate.kind === 'at' && 'at' in gate && gate.at ? { kind: 'time', at: gate.at }
       : gate.kind === 'hold' ? { kind: 'note', note: 'note' in gate ? gate.note ?? 'Waiting for release' : 'Waiting for release' } : null };
   const decider = row.offer ? ctx.people.groups.find(group => group.person.id === row.offer!.decider_user_id)?.person : null;
+  const requesterActor = full?.assigned_by ?? full?.created_by ?? null;
+  const requester = requesterActor ? homeActor(requesterActor, ctx.people) : null;
+  const rawDecision = full?.decision ?? (decisionStatus && full?.decision_by_user && full?.decision_at
+    ? { status: decisionStatus, by: full.decision_by_user, at: full.decision_at, note: full.decision_note ?? null }
+    : null);
+  const decision: TodoVM['decision'] = rawDecision
+    ? { status: rawDecision.status, by: homeActor({ user_id: rawDecision.by, principal_id: null }, ctx.people), at: rawDecision.at, note: rawDecision.note }
+    : null;
+  let pendingOffer: TodoVM['pendingOffer'] = null;
+  if (row.offer) {
+    const offerGate = row.offer.gate;
+    const offerGateKind = offerGate?.kind ?? 'none';
+    const offerAfterId = offerGate?.kind === 'after' ? offerGate.todo_id : null;
+    const offerPrereq = offerAfterId ? known.find(todo => todo.todo_id === offerAfterId) : undefined;
+    const mappedOfferGate: TodoVM['pendingOffer'] extends infer _ ? NonNullable<TodoVM['pendingOffer']>['gate'] : never =
+      offerGate?.kind === 'after'
+        ? { kind: 'todo', todo: { id: offerGate.todo_id, title: offerPrereq?.title ?? 'another to-do',
+            href: routeHref({ view: 'todo', workspaceId: ctx.workspaceId, todoId: offerGate.todo_id }),
+            done: offerPrereq?.state === 'done' } }
+        : offerGate?.kind === 'at'
+          ? { kind: 'time', at: offerGate.at }
+          : offerGate?.kind === 'hold'
+            ? { kind: 'note', note: offerGate.note ?? '' }
+            : null;
+    const offerByActor = full?.offer?.by ?? ('by' in row.offer ? row.offer.by ?? null : null);
+    pendingOffer = {
+      offerId: row.offer.offer_id,
+      by: offerByActor ? homeActor(offerByActor, ctx.people) : null,
+      to: homeParty(row.offer.to, ctx.people),
+      start: row.offer.start,
+      gate: mappedOfferGate,
+      gateKind: offerGateKind,
+      deciderIsViewer: row.offer.decider_user_id === ctx.viewerId,
+    };
+  }
   return { id: row.todo_id, workspaceId: ctx.workspaceId, title: row.title, notes: full?.notes ?? '', state: row.state,
+    kind, requester, decision, pendingOffer,
     addedBy: full ? homeActor(full.created_by, ctx.people) : homeActor({ user_id: '', principal_id: null }, ctx.people), addedAt: full?.created_at ?? '', due: row.due_on,
     assignee: who ? 'label' in who ? { kind: 'agent', agent: who } : { kind: 'person', person: who } : null,
     start: gateVM, request: row.offer ? { status: 'pending', ownerFirstName: decider?.firstName ?? 'its owner' } : null,
     doneBy: full && row.state === 'done' ? homeActor(full.state_by, ctx.people) : null, doneAt: row.state === 'done' ? row.state_at : null,
-    receipt: null, sample: ctx.sample, may: { edit, assign: edit && open, start: steer, reorder: steer, complete: !!canComplete, comment: edit },
+    receipt: null, sample: ctx.sample,
+    may: {
+      edit, assign: edit && open, start: steer, reorder: steer, complete: !!canComplete,
+      comment: ctx.editor && !ctx.sample && !decided,
+      ...(canDecide ? { decide: true } : {}),
+      ...(canAnswerOffer ? { answerOffer: true } : {}),
+    },
     comments: comments.map(comment => ({ id: comment.comment_id, author: homeActor(comment.author, ctx.people), at: comment.created_at, body: comment.body,
       tags: comment.mentions.flatMap(party => { const who = homeParty(party, ctx.people); return who ? [{ id: party.id, label: 'label' in who ? who.label : who.name }] : []; }) })), tagDelivers: ctx.tagDelivers === true };
 }

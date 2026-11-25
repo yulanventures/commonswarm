@@ -1416,7 +1416,8 @@ import "../../styles/kylon-image-viewer.css";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
   import { addAgentStore, connectedHosts, forgetAddAgent, joinAttemptMatch, rememberJoinedHost } from "../../lib/add-agent";
-  import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused, HomeArchivedDeniedError } from "../../lib/home/client";
+  import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused, HomeOperationRetired, HomeArchivedDeniedError } from "../../lib/home/client";
+  import { TODO_CONFLICT_MESSAGE } from "../../lib/todo-offer-terms";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue, WaitingArchivedEntry } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, conversationParticipantKey, indexDirectConversations, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
@@ -5895,7 +5896,10 @@ import "../../styles/kylon-image-viewer.css";
         offer_not_pending: "This request has already been answered. Reload to check.", not_decider: "This request needs its owner's answer.",
         assignee_removed: "That agent was removed. Choose someone else.", title_invalid: "Add a title of 1 to 200 characters.",
         gate_cycle: "These to-dos cannot wait on each other.", gate_invalid: "Check what this to-do is waiting on and try again.",
-        not_in_queue: "This to-do is no longer in the line. Reload to check.", todo_write_rate_limited: "Too many changes at once. Wait and try again." };
+        not_in_queue: "This to-do is no longer in the line. Reload to check.", todo_write_rate_limited: "Too many changes at once. Wait and try again.",
+        approval_origin_not_allowed: "Approvals can only be created in #general or workspace scope.",
+        approval_decided_frozen: "This approval has already been decided.",
+        offer_pending_frozen: "This to-do has a pending request. Answer the request first." };
       return copy[reason] ?? "Not saved. Reload to check and try again.";
     };
     const loadHomeWorkspace = async (): Promise<void> => {
@@ -5963,17 +5967,39 @@ import "../../styles/kylon-image-viewer.css";
     };
     const homeWrite = async <T,>(run: (server: HomeServer, requestId: string) => Promise<WriteResult<T>>, receipt?: (value: T, notices: HomeNotice[]) => string): Promise<void> => {
       if (sampleMode || homeTodoSave === "saving") return;
-      const server = homeServer(); if (!server) return;
       const workspaceId = activeWorkspaceId, generation = homeWorkspaceGeneration, navigation = homeNavigation;
-      const live = () => workspaceId === activeWorkspaceId && generation === homeWorkspaceGeneration && navigation === homeNavigation;
+      const viewer = typeof homeViewerId === "function" ? homeViewerId() : (typeof session !== "undefined" ? session?.user.id ?? null : null);
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const authAlive = viewer && typeof waitingActionGuard === "function"
+        ? waitingActionGuard(viewer, authGen)
+        : () => (typeof homeViewerId === "function" ? homeViewerId() === viewer : true);
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && viewer && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewer, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      const live = (): boolean =>
+        Boolean(authAlive()) &&
+        workspaceId === activeWorkspaceId &&
+        generation === homeWorkspaceGeneration &&
+        navigation === homeNavigation &&
+        (!pinned || pinned.isCurrent(workspaceId));
+      const server = homeServer(pinned, { isAlive: live });
+      if (!server || !live()) return;
       homeTodoSave = "saving"; homeTodoReceipt = "Saving…"; renderHomeObjectPane();
       try {
         const result = await run(server, crypto.randomUUID());
         if (!live()) return;
         homeTodoSave = "idle";
         if (result.status === "refused") { homeTodoSave = "refused"; homeTodoReceipt = homeRefusalCopy(result.reason); }
-        else if (result.status === "conflict") homeTodoReceipt = "Someone changed this to-do. Reload to check before trying again.";
-        else {
+        else if (result.status === "conflict") {
+          homeTodoReceipt = typeof TODO_CONFLICT_MESSAGE === "string" ? TODO_CONFLICT_MESSAGE : "This to-do changed. Reload to check.";
+          if (result.current && homeTodoRead?.todo.todo_id === result.current.todo_id) {
+            homeTodoRead = { ...homeTodoRead, todo: result.current };
+          }
+          homeDetailKey = "";
+          void loadHomeWorkspace();
+        } else {
           homeTodoReceipt = "Saved.";
           for (const field of all<HTMLInputElement | HTMLTextAreaElement>("[data-home-route-pane] textarea, [data-home-route-pane] .hm-todos-add-form input[type=text]")) field.value = "";
           homeTodoNotice = result.notices[0]?.status ?? null;
@@ -5990,7 +6016,7 @@ import "../../styles/kylon-image-viewer.css";
           await loadHomeWorkspace();
         }
       } catch (error) {
-        if (!live()) return;
+        if (!live() || (typeof HomeOperationRetired !== "undefined" && error instanceof HomeOperationRetired)) return;
         if (error instanceof HomeToolsUnavailable) {
           homeTodosState = "absent"; homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "failed";
           const workspace = workspaces.find(row => row.id === workspaceId) as { todosAvailable?: boolean } | undefined;
@@ -6618,15 +6644,21 @@ import "../../styles/kylon-image-viewer.css";
           const options = tagOptions(ctx.people);
           const mentions: Party[] = tags.flatMap(tag => { const option = options.find(option => option.value === tag.id); return option ? [{ kind: option.kind === "person" ? "user" as const : "agent" as const, id: option.value }] : []; });
           void homeWrite((server, requestId) => server.comment(workspace.id, { target: { kind: "todo", id: todo.id }, body, mentions }, requestId));
+        }, decide: (decision, note) => {
+          if (!todo || !homeTodoRead) return;
+          const id = homeTodoRead.todo.todo_id, baseVersion = homeTodoRead.todo.version;
+          void homeWrite(
+            (server, requestId) => server.decideTodo(workspace.id, { todo_id: id, base_version: baseVersion, decision, ...(note !== null ? { note } : {}) }, requestId),
+            () => decision === "approve" ? "Approved." : "Declined.",
+          );
+        }, answerOffer: answer => {
+          if (!todo || !homeTodoRead?.todo.offer) return;
+          const offer = homeTodoRead.todo.offer, id = homeTodoRead.todo.todo_id, baseVersion = homeTodoRead.todo.version;
+          void homeWrite(
+            (server, requestId) => server.answerRequest(workspace.id, { todo_id: id, offer_id: offer.offer_id, base_version: baseVersion, answer }, requestId),
+            () => answer === "accept" ? "Accepted." : "Declined.",
+          );
         } })]);
-      if (homeTodoRead?.todo.offer?.decider_user_id === ctx.viewerId && !sampleMode && ctx.editor) {
-        const offer = homeTodoRead.todo.offer, id = homeTodoRead.todo.todo_id;
-        for (const answer of ["accept", "decline"] as const) { const button = document.createElement("button"); button.className = "hm-todo-save"; button.type = "button";
-          button.textContent = answer === "accept" ? "Accept" : "Decline";
-          button.setAttribute("aria-label", `${button.textContent} ‘${todo?.title ?? "this to-do"}’`);
-          button.disabled = homeTodoSave === "saving";
-          button.addEventListener("click", () => void homeWrite((server, requestId) => server.answerRequest(workspace.id, { todo_id: id, offer_id: offer.offer_id, answer }, requestId), () => answer === "accept" ? "Accepted." : "Declined.")); slot.append(button); }
-      }
       appendReceipt();
       if (todo?.id === homeGateEditorId) {
         const choice = one<HTMLInputElement>("[data-todo-start] input[value=gated]");
@@ -7311,11 +7343,19 @@ import "../../styles/kylon-image-viewer.css";
         dueOn: todo.due_on ?? null,
         reason: todo.reason,
         href: routeHref({ view: "todo", workspaceId: workspace.id, todoId: todo.todo_id }),
-        canMarkDone: todo.reason === "assigned",
+        canMarkDone: todo.reason === "assigned" && todo.kind !== "approval",
+        ...(typeof todo.version === "number" ? { version: todo.version } : {}),
+        kind: todo.kind ?? "task",
+        notesPreview: todo.notes_preview ?? null,
+        notesTruncated: todo.notes_truncated === true,
+        requestedBy: todo.requested_by ?? null,
         placement: todo.placement,
         channelId: todo.channel_id,
         conversationId: todo.conversation_id ?? null,
         ...(todo.offer_id ? { offerId: todo.offer_id } : {}),
+        ...(todo.offer_to !== undefined ? { offerTo: todo.offer_to } : {}),
+        ...(todo.offer_start !== undefined ? { offerStart: todo.offer_start } : {}),
+        ...(todo.offer_gate !== undefined ? { offerGate: todo.offer_gate } : {}),
         channelLabel: waitingTodoChannelLabel(workspace.id, todo.placement, todo.channel_id, todo.conversation_id ?? null),
       }));
 
@@ -7383,9 +7423,8 @@ import "../../styles/kylon-image-viewer.css";
           : null;
       if (!sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       if (!sampleMode && typeof workspaces !== "undefined" && !workspaces.some(ws => ws.id === item.workspaceId)) return;
-      const server = homeServer(pinned, { accountRouted: true });
-      const isAlive = (): boolean => Boolean(authAlive()) && (!pinned || pinned.isCurrent());
-      if (!server || !viewer || !isAlive() || waitingTodoTickets.has(item.id)) return;
+      const scopeAlive = (): boolean => Boolean(authAlive()) && (!pinned || pinned.isCurrent());
+      if (!viewer || !scopeAlive() || waitingTodoTickets.has(item.id)) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
@@ -7394,6 +7433,9 @@ import "../../styles/kylon-image-viewer.css";
         : -1;
       const ticket: WaitingTodoTicket = { attemptId: newWaitingAttemptId(), viewer, workspaceId: item.workspaceId, todoId: item.id };
       const ownsTicket = (): boolean => waitingTodoTickets.get(item.id) === ticket;
+      const isAlive = (): boolean => scopeAlive() && ownsTicket();
+      const server = homeServer(pinned, { accountRouted: true, isAlive });
+      if (!server) return;
       waitingTodoTickets.set(item.id, ticket);
       waitingTodoErrors.delete(item.id);
       renderWaitingPanelView();
@@ -7404,6 +7446,7 @@ import "../../styles/kylon-image-viewer.css";
         }
       }
       let ok = false;
+      let retired = false;
       let errorMessage = TODO_SAVE_FAILED;
       try {
         let baseVersion: number | null = null;
@@ -7416,7 +7459,7 @@ import "../../styles/kylon-image-viewer.css";
         if (baseVersion === null) {
           const read = await server.readTodo(item.workspaceId, item.id);
           if (!ownsTicket()) return;
-          if (!isAlive()) {
+          if (!scopeAlive()) {
             waitingTodoTickets.delete(item.id);
             return;
           }
@@ -7428,13 +7471,13 @@ import "../../styles/kylon-image-viewer.css";
         }
         if (!ok && baseVersion !== null) {
           if (!ownsTicket()) return;
-          if (!isAlive()) {
+          if (!scopeAlive()) {
             waitingTodoTickets.delete(item.id);
             return;
           }
           let result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: baseVersion, state: "done" }, uuid());
           if (!ownsTicket()) return;
-          if (!isAlive()) {
+          if (!scopeAlive()) {
             waitingTodoTickets.delete(item.id);
             return;
           }
@@ -7444,7 +7487,7 @@ import "../../styles/kylon-image-viewer.css";
               ok = true;
             } else {
               if (!ownsTicket()) return;
-              if (!isAlive()) {
+              if (!scopeAlive()) {
                 waitingTodoTickets.delete(item.id);
                 return;
               }
@@ -7460,18 +7503,26 @@ import "../../styles/kylon-image-viewer.css";
           }
         }
       } catch (error) {
-        errorMessage = error instanceof CommandOutcomeUnknown
-          ? TODO_RESULT_UNKNOWN
-          : error instanceof HomeCommandRefused
-            ? homeRefusalCopy(error.reason)
-            : TODO_SAVE_FAILED;
+        if (typeof HomeOperationRetired !== "undefined" && error instanceof HomeOperationRetired) {
+          retired = true;
+        } else {
+          errorMessage = error instanceof CommandOutcomeUnknown
+            ? TODO_RESULT_UNKNOWN
+            : error instanceof HomeCommandRefused
+              ? homeRefusalCopy(error.reason)
+              : TODO_SAVE_FAILED;
+        }
       }
       if (!ownsTicket()) return;
-      if (!isAlive() || homeViewerId() !== ticket.viewer) {
+      if (!scopeAlive() || homeViewerId() !== ticket.viewer) {
         waitingTodoTickets.delete(item.id);
         return;
       }
       waitingTodoTickets.delete(item.id);
+      if (retired) {
+        renderWaitingPanelView();
+        return;
+      }
       const canRestoreFocus = (): HTMLElement | null => {
         if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
         const panelNow = one<HTMLElement>("[data-waiting-panel]");
@@ -7508,6 +7559,195 @@ import "../../styles/kylon-image-viewer.css";
       if (focusTargetPanel) {
         waitingPanelMod?.focusWaitingPanelAfterAction(focusTargetPanel, { kind: "retry-todo", todoId: item.id });
       }
+    };
+
+    const applyWaitingTodoConflictTerms = (item: WaitingTodoItem, current: Todo): void => {
+      const list = waitingPanelTodos.get(item.workspaceId);
+      if (!list) return;
+      if (current.state === "done" || current.state === "dropped") {
+        waitingPanelTodos.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        return;
+      }
+      const notesChars = Array.from(current.notes ?? "");
+      const notesTruncated = notesChars.length > 200;
+      const preview = notesChars.slice(0, 200).join("");
+      waitingPanelTodos.set(item.workspaceId, list.map(entry => {
+        if (entry.id !== item.id) return entry;
+        return {
+          ...entry,
+          version: current.version,
+          title: current.title,
+          state: current.state === "doing" ? "doing" : "open",
+          dueOn: current.due_on ?? null,
+          kind: current.kind ?? entry.kind ?? "task",
+          notesPreview: preview || null,
+          notesTruncated,
+          ...(entry.reason === "request"
+            ? {
+                offerId: current.offer?.offer_id ?? null,
+                offerStart: current.offer?.start ?? null,
+                offerGate: current.offer?.gate ?? null,
+              }
+            : {}),
+        };
+      }));
+    };
+
+    const runWaitingTodoDecision = async (
+      item: WaitingTodoItem,
+      statusLabel: "Approved" | "Declined",
+      nextState: "done" | "dropped" | null,
+      execute: (server: HomeServer, requestId: string) => Promise<WriteResult<Todo>>,
+    ): Promise<void> => {
+      const viewer = homeViewerId();
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const authAlive = viewer && typeof waitingActionGuard === "function"
+        ? waitingActionGuard(viewer, authGen)
+        : () => homeViewerId() === viewer;
+      const pinned =
+        !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && viewer && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewer })
+          : null;
+      if (!sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      if (!sampleMode && typeof workspaces !== "undefined" && !workspaces.some(ws => ws.id === item.workspaceId)) return;
+      const scopeAlive = (): boolean => Boolean(authAlive()) && (!pinned || pinned.isCurrent());
+      if (sampleMode || !viewer || !scopeAlive() || waitingTodoTickets.has(item.id)) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      const prevCardIndex = panelBefore
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
+            .findIndex(el => el.dataset.waitingTodo === item.id)
+        : -1;
+      const ticket: WaitingTodoTicket = { attemptId: newWaitingAttemptId(), viewer, workspaceId: item.workspaceId, todoId: item.id };
+      const ownsTicket = (): boolean => waitingTodoTickets.get(item.id) === ticket;
+      const isAlive = (): boolean => scopeAlive() && ownsTicket();
+      const server = homeServer(pinned, { accountRouted: true, isAlive });
+      if (!server) return;
+      waitingTodoTickets.set(item.id, ticket);
+      waitingTodoErrors.delete(item.id);
+      renderWaitingPanelView();
+      let ok = false;
+      let conflict = false;
+      let retired = false;
+      let committedTodo: Todo | null = null;
+      let errorMessage = TODO_SAVE_FAILED;
+      try {
+        const result = await execute(server, uuid());
+        if (!ownsTicket()) return;
+        if (!scopeAlive()) {
+          waitingTodoTickets.delete(item.id);
+          return;
+        }
+        if (result.status === "committed") {
+          ok = true;
+          committedTodo = result.value;
+        } else if (result.status === "conflict") {
+          conflict = true;
+          errorMessage = typeof TODO_CONFLICT_MESSAGE === "string" ? TODO_CONFLICT_MESSAGE : "This to-do changed. Reload to check.";
+          if (result.current) applyWaitingTodoConflictTerms(item, result.current);
+        } else {
+          errorMessage = homeRefusalCopy(result.reason);
+        }
+      } catch (error) {
+        if (typeof HomeOperationRetired !== "undefined" && error instanceof HomeOperationRetired) {
+          retired = true;
+        } else {
+          errorMessage = error instanceof CommandOutcomeUnknown
+            ? TODO_RESULT_UNKNOWN
+            : error instanceof HomeCommandRefused
+              ? homeRefusalCopy(error.reason)
+              : TODO_SAVE_FAILED;
+        }
+      }
+      if (!ownsTicket()) return;
+      if (!scopeAlive() || homeViewerId() !== ticket.viewer) {
+        waitingTodoTickets.delete(item.id);
+        return;
+      }
+      waitingTodoTickets.delete(item.id);
+      if (retired) {
+        renderWaitingPanelView();
+        return;
+      }
+      const canRestoreFocus = (): HTMLElement | null => {
+        if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (!panelNow) return null;
+        if (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement)) {
+          return panelNow;
+        }
+        return null;
+      };
+      if (ok) {
+        waitingTodoErrors.delete(item.id);
+        const list = waitingPanelTodos.get(item.workspaceId);
+        if (list) waitingPanelTodos.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        const prevCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+        showWaitingStatus(statusLabel);
+        renderWaitingPanelView();
+        const focusTargetPanel = canRestoreFocus();
+        if (focusTargetPanel) {
+          waitingPanelMod?.focusWaitingPanelAfterAction(focusTargetPanel, { kind: "completed-todo", prevIndex: prevCardIndex });
+        }
+        renderHomeRail();
+        if (item.workspaceId === activeWorkspaceId) {
+          if (committedTodo && homeTodoRead?.todo.todo_id === item.id) {
+            homeTodoRead = { ...homeTodoRead, todo: committedTodo };
+          }
+          if (nextState) {
+            homeTodoRows = homeTodoRows.map(row => row.todo_id === item.id
+              ? { ...row, state: nextState, ...(committedTodo ? { version: committedTodo.version, decision_status: committedTodo.decision_status ?? null } : {}) }
+              : row);
+          } else {
+            void loadHomeWorkspace();
+          }
+          if (homeRoute.view === "todos" || homeRoute.view === "todo") renderHomeObjectPane();
+        }
+        invalidateWaitingArchived(item.workspaceId);
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingTodoErrors.set(item.id, errorMessage);
+      renderWaitingPanelView();
+      const focusTargetPanel = canRestoreFocus();
+      if (focusTargetPanel) {
+        waitingPanelMod?.focusWaitingPanelAfterAction(focusTargetPanel, { kind: "retry-todo", todoId: item.id });
+      }
+      if (conflict) {
+        scheduleWaitingRefresh(0);
+      }
+    };
+
+    const decideWaitingTodo = async (item: WaitingTodoItem, decision: "approve" | "decline", note: string | null): Promise<void> => {
+      if (typeof item.version !== "number" || !Number.isInteger(item.version) || item.version < 1) return;
+      const baseVersion = item.version;
+      await runWaitingTodoDecision(
+        item,
+        decision === "approve" ? "Approved" : "Declined",
+        decision === "approve" ? "done" : "dropped",
+        (server, requestId) => server.decideTodo(
+          item.workspaceId,
+          { todo_id: item.id, base_version: baseVersion, decision, ...(note !== null ? { note } : {}) },
+          requestId,
+        ),
+      );
+    };
+
+    const answerWaitingTodoOffer = async (item: WaitingTodoItem, answer: "accept" | "decline"): Promise<void> => {
+      if (!item.offerId || typeof item.version !== "number" || !Number.isInteger(item.version) || item.version < 1) return;
+      const offerId = item.offerId;
+      const baseVersion = item.version;
+      await runWaitingTodoDecision(
+        item,
+        answer === "accept" ? "Approved" : "Declined",
+        null,
+        (server, requestId) => server.answerRequest(
+          item.workspaceId,
+          { todo_id: item.id, offer_id: offerId, base_version: baseVersion, answer },
+          requestId,
+        ),
+      );
     };
 
     const sendWaitingSurveyAll = async (entries: Array<{ item: WaitingAskItem; submission: ChoiceSubmission }>): Promise<void> => {
@@ -8585,6 +8825,8 @@ import "../../styles/kylon-image-viewer.css";
           onDismissPlainAsk: (item) => void dismissWaitingPanelItem({ slotKind: "plain", item }),
           onMarkTodoDone: (item) => void markWaitingTodoDone(item),
           onRetryTodo: (item) => void markWaitingTodoDone(item),
+          onDecideTodo: (item, decision, note) => void decideWaitingTodo(item, decision, note),
+          onAnswerTodoOffer: (item, answer) => void answerWaitingTodoOffer(item, answer),
           onOpenTodo: (item) => {
             clearWaitingStatus();
             if (waitingSurface?.isPhone()) waitingSurface.close(false);
@@ -9447,19 +9689,46 @@ import "../../styles/kylon-image-viewer.css";
       homeRailKey = key;
     };
     const answerOffer = (card: OfferCardVM, answer: OfferAnswer, controls: { buttons: HTMLButtonElement[]; status: HTMLElement }): void => {
-      const server = homeServer();
       const workspaceId = activeWorkspaceId;
-      if (!server || !workspaceId) return;
+      if (sampleMode || !workspaceId) return;
+      if (typeof card.version !== "number" || !Number.isInteger(card.version) || card.version < 1) return;
+      const viewer = typeof homeViewerId === "function" ? homeViewerId() : (typeof session !== "undefined" ? session?.user.id ?? null : null);
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const authAlive = viewer && typeof waitingActionGuard === "function"
+        ? waitingActionGuard(viewer, authGen)
+        : () => (typeof homeViewerId === "function" ? homeViewerId() === viewer : true);
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && viewer && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewer, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      const wsGen = typeof homeWorkspaceGeneration !== "undefined" ? homeWorkspaceGeneration : 0;
+      const isAlive = (): boolean =>
+        Boolean(authAlive()) &&
+        workspaceId === activeWorkspaceId &&
+        (typeof homeWorkspaceGeneration === "undefined" || homeWorkspaceGeneration === wsGen) &&
+        (!pinned || pinned.isCurrent(workspaceId));
+      const server = homeServer(pinned, { isAlive });
+      if (!server || !isAlive()) return;
       const settle = (message: string, retry: boolean): void => {
         controls.status.textContent = message;
         for (const button of controls.buttons) button.disabled = !retry;
       };
       settle("Saving…", false);
-      void server.answerRequest(workspaceId, { todo_id: card.todoId, offer_id: card.offerId, answer }, uuid()).then(result => {
-        if (workspaceId !== activeWorkspaceId) return;
+      void server.answerRequest(workspaceId, {
+        todo_id: card.todoId,
+        offer_id: card.offerId,
+        base_version: card.version,
+        answer,
+      }, uuid()).then(result => {
+        if (!isAlive()) return;
         if (result.status === "committed") { settle(answer === "accept" ? "Accepted." : "Declined.", false); void loadHomeWorkspace(); }
-        else settle(result.status === "conflict" ? "This to-do changed. Reload to check." : homeRefusalCopy(result.reason), true);
-      }).catch(() => { if (workspaceId === activeWorkspaceId) settle("The answer may not have been saved. Reload to check.", true); });
+        else if (result.status === "conflict") { settle(typeof TODO_CONFLICT_MESSAGE === "string" ? TODO_CONFLICT_MESSAGE : "This to-do changed. Reload to check.", false); void loadHomeWorkspace(); }
+        else settle(homeRefusalCopy(result.reason), true);
+      }).catch(error => {
+        if (!isAlive() || (typeof HomeOperationRetired !== "undefined" && error instanceof HomeOperationRetired)) return;
+        settle("The answer may not have been saved. Reload to check.", true);
+      });
     };
     /** Read the open Direct Message's history. Pinned to the workspace, viewer, teammate and screen version at the
      *  request and dropped if any moved on before it landed; a newer read retires an older one. */
@@ -14520,12 +14789,20 @@ import "../../styles/kylon-image-viewer.css";
       /* Offers waiting on you, answered in place (Accept / Decline) without leaving Chat. */
       const offerViewer = typeof homeViewerId === "function" ? homeViewerId() ?? "" : "";
       const offers = typeof answerOffer === "function" && homeTodosState === "ready"
-        ? pendingOfferCards(homeTodoRows, offerViewer, party => entityName(party.kind === "agent" ? { kind: "agent", id: party.id } : { kind: "person", id: party.id }))
+        ? pendingOfferCards(
+            homeTodoRows,
+            offerViewer,
+            party => entityName(party.kind === "agent" ? { kind: "agent", id: party.id } : { kind: "person", id: party.id }),
+            todoId => routeHref({ view: "todo", workspaceId: activeWorkspaceId, todoId }),
+          )
         : [];
       for (const offer of offers) {
         const row = document.createElement("li");
         row.className = "dashboard__feed-fix dashboard__feed-approval";
-        row.append(buildOfferCard(document, offer, { answer: answerOffer }));
+        row.append(buildOfferCard(document, offer, {
+          answer: answerOffer,
+          openDetail: card => { if (card.detailHref) navigateHomeHref(card.detailHref); },
+        }));
         list.append(row);
       }
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");

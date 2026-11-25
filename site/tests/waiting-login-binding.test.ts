@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { afterEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { createContext, runInContext } from "node:vm";
 import { build } from "esbuild";
 import ts from "typescript";
@@ -71,7 +72,7 @@ let cachedBundleText: string | null = null;
 async function loadCommonswarmBundle(): Promise<string> {
   if (cachedBundleText) return cachedBundleText;
   const bundle = await build({
-    entryPoints: [new URL("../src/lib/commonswarm.ts", import.meta.url).pathname],
+    entryPoints: [fileURLToPath(new URL("../src/lib/commonswarm.ts", import.meta.url))],
     bundle: true,
     write: false,
     platform: "browser",

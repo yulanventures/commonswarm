@@ -64,9 +64,14 @@ const cases = [
     unknown: 'The to-do may or may not be in Doing. Reload to check.',
   },
   {
-    method: 'answerRequest', args: [W.home, { todo_id: T.requestClaude, offer_id: O.claude, answer: 'accept' }, 'req-answer-1'],
-    command: { kind: 'household_todo_answer', todo_id: T.requestClaude, offer_id: O.claude, answer: 'accept' },
+    method: 'answerRequest', args: [W.home, { todo_id: T.requestClaude, offer_id: O.claude, base_version: 2, answer: 'accept' }, 'req-answer-1'],
+    command: { kind: 'household_todo_answer', todo_id: T.requestClaude, offer_id: O.claude, base_version: 2, answer: 'accept' },
     unknown: 'The request may or may not have been answered. Reload to check.',
+  },
+  {
+    method: 'decideTodo', args: [W.home, { todo_id: T.assignedTom, base_version: 3, decision: 'approve', note: 'Looks good' }, 'req-decide-1'],
+    command: { kind: 'household_todo_decide', todo_id: T.assignedTom, base_version: 3, decision: 'approve', note: 'Looks good' },
+    unknown: 'The decision may or may not have been saved. Reload to check.',
   },
   {
     method: 'steerQueue', args: [W.home, { todo_id: T.claudeUp2, base_version: 2, action: { kind: 'move', after_todo_id: T.claudeUp1 } }, 'req-steer-1'],

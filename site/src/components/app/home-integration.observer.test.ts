@@ -446,30 +446,29 @@ test('routed To-dos keeps an honest message, workspace back link and heading foc
 async function routedTodoFixture() {
   const context = createContext({ ...MESSAGE_STATUS_STUBS, });
   runInContext(`
-    const buttons = [], slot = {hidden:true, append(node) {buttons.push(node);}};
+    const slot = {hidden:true, append() {}};
     const activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'todo'}, sampleMode=false;
     const homeTodosState='ready', homeTodoReceipt='', homeQueueRead='ready', homeTodoSave='idle', homeTodoNotice=null, homeGateEditorId=null;
     const homePolicies=new Map(), homeQueue=null, homeTodoRows=[];
     const ctx={now:0, viewerId:'tom', editor:true, people:{groups:[{person:{id:'tom',firstName:'Tom'}}]}};
-    const homeTodoRead={todo:{todo_id:'T',offer:{offer_id:'O',decider_user_id:'tom'}}};
+    const homeTodoRead={todo:{todo_id:'T',version:4,offer:{offer_id:'O',decider_user_id:'tom'}}};
     const one=()=>slot, homeTodoContext=()=>ctx, routeHref=()=>'?w=W', mapHomeTodo=()=>({id:'T',title:'Book plumber',assignee:null});
-    let receivedVM, receipt;
-    const todoView=(doc,vm)=>{receivedVM=vm; return {};}, replaceHomeRegion=()=>{}, parkPeopleHosts=()=>{};
-    const homeWrite=async(run,copy)=>{await run({answerRequest:async(w,input)=>{globalThis.answer=input.answer; return {}; }},'R'); receipt=copy({},[]);};
+    let receivedVM, receivedCallbacks, receipt;
+    const todoView=(doc,vm,callbacks)=>{receivedVM=vm; receivedCallbacks=callbacks; return {};}, replaceHomeRegion=()=>{}, parkPeopleHosts=()=>{};
+    const homeWrite=async(run,copy)=>{await run({answerRequest:async(w,input)=>{globalThis.answerInput=input; return {}; }},'R'); receipt=copy({},[]);};
     const document={createElement(){return {setAttribute(name,value){this[name]=value;},addEventListener(name,fn){this[name]=fn;}};}};
   `, context);
   runInContext(await dashboardFunctions(['renderHomeObjectPane']), context);
   runInContext('renderHomeObjectPane()', context);
   return context;
 }
-test('the request answer receipt speaks to the decider, and buttons name the to-do', async () => {
+test('the request answer receipt speaks to the decider, and sends base_version', async () => {
   const context = await routedTodoFixture();
-  await runInContext('buttons.find(button=>button.textContent === "Decline").click()', context);
-  assert.equal(runInContext('answer', context), 'decline');
+  await runInContext('receivedCallbacks.answerOffer("decline")', context);
+  assert.deepEqual({ ...runInContext('answerInput', context) }, { todo_id: 'T', offer_id: 'O', base_version: 4, answer: 'decline' });
   assert.equal(runInContext('receipt', context), 'Declined.');
-  assert.equal(runInContext('buttons[1]["aria-label"]', context), 'Decline ‘Book plumber’');
-  await runInContext('buttons.find(button=>button.textContent === "Accept").click()', context);
-  assert.equal(runInContext('answer', context), 'accept');
+  await runInContext('receivedCallbacks.answerOffer("accept")', context);
+  assert.deepEqual({ ...runInContext('answerInput', context) }, { todo_id: 'T', offer_id: 'O', base_version: 4, answer: 'accept' });
   assert.equal(runInContext('receipt', context), 'Accepted.');
 });
 test('the first assignment picker uses owner requests until a measured policy allows anyone', async () => {

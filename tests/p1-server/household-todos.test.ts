@@ -20,7 +20,8 @@ const proofRoot = 'deploy/release-proofs/household-todo/20261006000001';
 const rollback = () => repoSql(`${proofRoot}-rollback.sql`);
 const migration = () => repoSql('supabase/migrations/20261006000001_household_todos.sql');
 const originMigration = () => repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql')
-  + repoSql('supabase/migrations/20261120000002_waiting_dm_convergence.sql');
+  + repoSql('supabase/migrations/20261120000002_waiting_dm_convergence.sql')
+  + repoSql('supabase/migrations/20261125000004_todo_approvals.sql');
 const core = { ...todos, ...todoPolicy, ...objectPolicy };
 class RollbackProof extends Error {}
 function fixture() {
@@ -314,7 +315,7 @@ test('read pages fit the double-serialized 28 KiB transport budget and keep sect
               assert.equal(Object.hasOwn(row, 'gate_note'), false);
               assert.equal(Object.hasOwn(row, 'gate_clear'), false);
               assert.equal(Object.hasOwn(row.gate as object, 'note'), false);
-              if (row.offer) assert.equal(Object.hasOwn((row.offer as { gate: object }).gate, 'note'), false);
+              if (row.offer) assert.deepEqual((row.offer as { gate: object }).gate, { kind: 'hold', note: 'Private offer gate note' });
             }
             total += rows.length;
             const next = page.next_offset[section]!;

@@ -589,6 +589,7 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         kind: "household_todo_answer",
         todo_id: bobPrivateOriginOffer.todo_id,
         offer_id: bobPrivateOriginOffer.offer.offer_id,
+        base_version: bobPrivateOriginOffer.version,
         answer: "accept",
       }));
       assert.equal(
@@ -621,6 +622,7 @@ test("per-person isolation, direct table denial, C1 eligibility, private-origin 
         kind: "household_todo_answer",
         todo_id: declinedOfferTodo.todo_id,
         offer_id: formerOfferId,
+        base_version: declinedOfferTodo.version,
         answer: "decline",
       }));
       await tx`RESET ROLE`;

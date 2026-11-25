@@ -648,6 +648,7 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
         kind: "household_todo_answer",
         todo_id: reviewTodo.todo_id,
         offer_id: reviewOfferId,
+        base_version: reviewTodo.version,
         answer: "withdraw",
       }));
       await tx`RESET ROLE`;

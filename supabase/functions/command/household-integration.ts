@@ -12,7 +12,7 @@ import { FILE_BUCKET, fileContentAllowed } from './file-artifacts.ts';
 import type { HouseholdContent, HouseholdRevision } from '../_shared/household-object-events.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity', 'household_skills', 'household_definition_certify'] as const;
+export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_decide', 'household_todo_steer', 'household_agent_work_policy', 'household_activity', 'household_skills', 'household_definition_certify'] as const;
 const localSeat = core.HOUSEHOLD_LOCAL_SEAT;
 const refused = (reason: string) => ({ status: 'refused', reason });
 export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
@@ -47,7 +47,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (value.kind === 'household_approve_connection') return approveHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
   if (value.kind === 'household_withdraw_connection') return withdrawHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
   // Refuse agent credentials before touching any human-only content or input.
-  const humanOnly = ['household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity',
+  const humanOnly = ['household_todo_answer', 'household_todo_decide', 'household_todo_steer', 'household_agent_work_policy', 'household_activity',
     'household_definition_certify'].includes(String(value.kind));
   if (humanOnly && identity.principal_id !== null) return refused('human_confirmation_required');
   const store = householdStore(recheckCredential);

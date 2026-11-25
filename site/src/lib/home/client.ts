@@ -16,7 +16,13 @@ import type {
   Party,
   SteerAction,
   Todo,
+  TodoDecision,
+  TodoDecisionChoice,
+  TodoDecisionStatus,
+  TodoGate,
+  TodoKind,
   TodoRefusal as WireTodoRefusal,
+  TodoStart,
   TodoSummary,
   QueueSection,
   TodoState,
@@ -28,6 +34,7 @@ import type {
   WaitingArchivedPage,
   WaitingArchivedPlacement,
   WaitingTodoEntry,
+  WaitingTodoParty,
   WaitingTodoPlacement,
   WaitingTodosQueue,
   WriteResult,
@@ -58,6 +65,7 @@ export const TODO_REFUSAL_CODES = [
   'not_assignee', 'not_permitted', 'owner_only', 'offer_not_pending', 'not_decider',
   'not_in_queue', 'gate_invalid', 'gate_cycle', 'queue_empty', 'queue_full',
   'todo_limit_reached', 'request_id_reused', 'todo_write_rate_limited',
+  'approval_origin_not_allowed', 'approval_decided_frozen', 'offer_pending_frozen',
 ] as const satisfies readonly WireTodoRefusal[];
 export type TodoRefusal = typeof TODO_REFUSAL_CODES[number];
 const refusalCodes: ReadonlySet<string> = new Set(TODO_REFUSAL_CODES);
@@ -179,6 +187,9 @@ async function householdTool(
         }
       : pinned,
   );
+  if (status === 0 && body.error === 'operation_retired') {
+    throw new HomeOperationRetired();
+  }
   if (pinned && !isCurrent(pinned)) {
     throw new HomeCommandRefused('workspace_access_refused');
   }
@@ -211,8 +222,17 @@ async function householdSurface(
     command,
     workspaceExtra(workspaceId),
     unknownOutcome,
-    accountRouted ? { pinned, accountWideWorkspace: true } : pinned,
+    accountRouted || pinOptions.isAlive
+      ? {
+          pinned,
+          ...(accountRouted ? { accountWideWorkspace: true } : {}),
+          ...(pinOptions.isAlive ? { isAlive: pinOptions.isAlive } : {}),
+        }
+      : pinned,
   );
+  if (status === 0 && body.error === 'operation_retired') {
+    throw new HomeOperationRetired();
+  }
   if (pinned && !isCurrent(pinned)) {
     throw new HomeCommandRefused('workspace_access_refused');
   }
@@ -273,6 +293,16 @@ export function parseDecisionQueue(data: unknown, workspaceId: Uuid): DecisionQu
 const WAITING_TODO_REASONS = new Set(['assigned', 'request', 'after', 'hold', 'agent_removed']);
 const WAITING_TODO_PLACEMENTS = new Set<WaitingTodoPlacement>(['channel', 'general', 'workspace', 'dm', 'group_dm']);
 
+function waitingTodoParty(value: unknown): WaitingTodoParty | null {
+  if (value === null) return null;
+  if (!record(value) || (value.kind !== 'user' && value.kind !== 'agent')
+    || typeof value.id !== 'string' || !value.id
+    || (value.name !== null && typeof value.name !== 'string')) {
+    throw new Error('home_waiting_todos_malformed');
+  }
+  return { kind: value.kind, id: value.id, name: value.name };
+}
+
 function waitingTodoEntry(value: unknown): WaitingTodoEntry {
   if (!record(value) || typeof value.todo_id !== 'string' || typeof value.title !== 'string'
     || (value.state !== 'open' && value.state !== 'doing')
@@ -283,7 +313,13 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     || typeof value.placement !== 'string' || !WAITING_TODO_PLACEMENTS.has(value.placement as WaitingTodoPlacement)
     || (value.channel_id !== null && typeof value.channel_id !== 'string')
     || (value.conversation_id !== undefined && value.conversation_id !== null && typeof value.conversation_id !== 'string')
-    || (value.offer_id !== undefined && value.offer_id !== null && typeof value.offer_id !== 'string')) {
+    || (value.offer_id !== undefined && value.offer_id !== null && typeof value.offer_id !== 'string')
+    || (value.version !== undefined && (typeof value.version !== 'number' || !Number.isInteger(value.version) || value.version < 1))
+    || (value.kind !== undefined && value.kind !== 'task' && value.kind !== 'approval')
+    || (value.notes_preview !== undefined && value.notes_preview !== null && typeof value.notes_preview !== 'string')
+    || (value.notes_truncated !== undefined && typeof value.notes_truncated !== 'boolean')
+    || (value.offer_start !== undefined && value.offer_start !== null && value.offer_start !== 'queue' && value.offer_start !== 'now')
+    || (value.offer_gate !== undefined && value.offer_gate !== null && !record(value.offer_gate))) {
     throw new Error('home_waiting_todos_malformed');
   }
   const placement = value.placement as WaitingTodoPlacement;
@@ -297,6 +333,8 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
   if ((placement === 'dm' || placement === 'group_dm') && (!rawConvId || value.channel_id !== null)) {
     throw new Error('home_waiting_todos_malformed');
   }
+  const requestedBy = value.requested_by !== undefined ? waitingTodoParty(value.requested_by) : undefined;
+  const offerTo = value.offer_to !== undefined ? waitingTodoParty(value.offer_to) : undefined;
   return {
     todo_id: value.todo_id,
     title: value.title,
@@ -309,6 +347,14 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     channel_id: placement === 'channel' ? value.channel_id : null,
     conversation_id: (placement === 'dm' || placement === 'group_dm') ? rawConvId : null,
     ...(rawOfferId !== null ? { offer_id: rawOfferId } : {}),
+    ...(value.version !== undefined ? { version: value.version } : {}),
+    ...(value.kind !== undefined ? { kind: value.kind as TodoKind } : {}),
+    ...(value.notes_preview !== undefined ? { notes_preview: value.notes_preview } : {}),
+    ...(value.notes_truncated !== undefined ? { notes_truncated: value.notes_truncated } : {}),
+    ...(requestedBy !== undefined ? { requested_by: requestedBy } : {}),
+    ...(offerTo !== undefined ? { offer_to: offerTo } : {}),
+    ...(value.offer_start !== undefined ? { offer_start: value.offer_start as TodoStart | null } : {}),
+    ...(value.offer_gate !== undefined ? { offer_gate: value.offer_gate as TodoGate | null } : {}),
   };
 }
 
@@ -330,7 +376,7 @@ export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): Waitin
 
 const WAITING_ARCHIVED_KINDS = new Set<WaitingArchivedKind>(['ask', 'todo', 'review']);
 export const WAITING_ARCHIVED_OUTCOMES = new Set<KnownWaitingArchivedOutcomeKind>([
-  'answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed',
+  'answered', 'approved', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed',
   'agent_removed', 'sender_left', 'channel_archived', 'withdrawn', 'replaced', 'expired',
 ]);
 const WAITING_ARCHIVED_PLACEMENTS = new Set<WaitingArchivedPlacement>(['channel', 'general', 'dm', 'group_dm', 'workspace', 'redacted']);
@@ -421,6 +467,9 @@ export function parseWaitingArchivedPage(data: unknown, workspaceId: Uuid): Wait
 export class HomeToolsUnavailable extends Error {
   constructor() { super('home_tools_unavailable'); this.name = 'HomeToolsUnavailable'; }
 }
+export class HomeOperationRetired extends Error {
+  constructor() { super('operation_retired'); this.name = 'HomeOperationRetired'; }
+}
 export class HomeArchivedDeniedError extends Error {
   constructor() { super('home_waiting_archived_denied'); this.name = 'HomeArchivedDeniedError'; }
 }
@@ -436,11 +485,54 @@ export function homeToolsMissing(body: Record<string, unknown>): boolean {
 }
 
 function checkedCommandBody(status: number, body: Record<string, unknown>): Record<string, unknown> {
+  if (status === 0 && body.error === 'operation_retired') throw new HomeOperationRetired();
   if (homeToolsMissing(body)) throw new HomeToolsUnavailable();
   if (status !== 200 && !(body.status === 'refused' && isTodoRefusal(body.reason))) {
     throw new Error('home_request_failed');
   }
   return body;
+}
+
+function parseTodoDecision(value: unknown): TodoDecision | null {
+  if (value === null || value === undefined) return null;
+  if (!record(value) || (value.status !== 'approved' && value.status !== 'declined')
+    || typeof value.by !== 'string' || !isoTime(value.at)
+    || (value.note !== null && value.note !== undefined && typeof value.note !== 'string')) {
+    throw new Error('home_read_malformed');
+  }
+  return { status: value.status, by: value.by, at: value.at, note: value.note ?? null };
+}
+
+function parseReadTodo(value: unknown): Todo {
+  if (!record(value) || typeof value.todo_id !== 'string') throw new Error('home_read_malformed');
+  if (value.kind !== undefined && value.kind !== 'task' && value.kind !== 'approval') {
+    throw new Error('home_read_malformed');
+  }
+  if (value.decision_status !== undefined && value.decision_status !== null
+    && value.decision_status !== 'approved' && value.decision_status !== 'declined') {
+    throw new Error('home_read_malformed');
+  }
+  const decision = value.decision !== undefined
+    ? parseTodoDecision(value.decision)
+    : (value.decision_status === 'approved' || value.decision_status === 'declined')
+      && typeof value.decision_by_user === 'string' && isoTime(value.decision_at)
+      ? {
+          status: value.decision_status as TodoDecisionStatus,
+          by: value.decision_by_user,
+          at: value.decision_at,
+          note: typeof value.decision_note === 'string' ? value.decision_note : null,
+        }
+      : null;
+  const kind: TodoKind = value.kind === 'approval' ? 'approval' : 'task';
+  const decisionStatus: TodoDecisionStatus | null = value.decision_status === 'approved' || value.decision_status === 'declined'
+    ? value.decision_status
+    : decision?.status ?? null;
+  return {
+    ...(value as unknown as Todo),
+    kind,
+    decision_status: decisionStatus,
+    decision,
+  };
 }
 
 export function createHomeServer(
@@ -641,9 +733,8 @@ export function createHomeServer(
     async readTodo(workspaceId, todoId, commentOffset = 0) {
       const args: Record<string, unknown> = { todo_id: todoId, comment_offset: commentOffset };
       const body = parseOkBody(await householdTool(resolved, session, workspaceId, crypto.randomUUID(), 'todo_read', args, 'The to-do could not be loaded. Reload to try again.', false, pinOptions));
-      if (!record(body.todo) || typeof body.todo.todo_id !== 'string') throw new Error('home_read_malformed');
       return {
-        todo: body.todo as unknown as Todo,
+        todo: parseReadTodo(body.todo),
         comments: readArray<Comment>(body.comments),
         next_comment_offset: pageOffset(body.next_comment_offset),
       };
@@ -732,8 +823,22 @@ export function createHomeServer(
         kind: 'household_todo_answer',
         todo_id: input.todo_id,
         offer_id: input.offer_id,
+        base_version: input.base_version,
         answer: input.answer,
       }, 'The request may or may not have been answered. Reload to check.', pinOptions);
+      return parseWriteResult<Todo>(body);
+    },
+
+    async decideTodo(workspaceId, input, requestId) {
+      const cmd: Record<string, unknown> = {
+        kind: 'household_todo_decide',
+        todo_id: input.todo_id,
+        base_version: input.base_version,
+        decision: input.decision,
+      };
+      if (input.note !== undefined) cmd.note = input.note;
+      const body = await householdSurface(resolved, session, workspaceId, requestId, cmd,
+        'The decision may or may not have been saved. Reload to check.', pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -946,6 +1051,10 @@ export function createFixtureHomeServer(fixtures: HomeFixtures): HomeServer {
     },
 
     async answerRequest() {
+      return { status: 'refused', reason: 'not_permitted' };
+    },
+
+    async decideTodo() {
       return { status: 'refused', reason: 'not_permitted' };
     },
 
