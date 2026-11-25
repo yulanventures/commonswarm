@@ -162,7 +162,7 @@ export function environment(base, copy, log) {
   return {
     ...process.env,
     ...isolatedStateEnv(copy.root),
-    NODE_OPTIONS: `${existing}${existing ? " " : ""}--require=${preload}`,
+    NODE_OPTIONS: `${existing}${existing ? " " : ""}--require=${JSON.stringify(preload)}`,
     TIMEOUT_TABLE_BASE_URL: base,
     TIMEOUT_TABLE_PROFILE_ORIGIN: copy.profile.url,
     TIMEOUT_TABLE_FETCH_LOG: log,

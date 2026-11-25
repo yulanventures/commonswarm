@@ -59,7 +59,7 @@ test("preload rewrites only the origin and logs no header, body, query, or secre
   const code = `fetch(${JSON.stringify(`${original.url}/functions/v1/read?token=query-secret`)},{method:'POST',headers:{authorization:'Bearer secret-shaped-value'},body:'body-secret'}).then(r=>r.arrayBuffer()).then(()=>process.exit(0),()=>process.exit(1))`;
   const result = await runChild(process.execPath, ["-e", code], { env: {
     ...process.env,
-    NODE_OPTIONS: `--require=${join(repo, "scripts/timeout-table/preload.cjs")}`,
+    NODE_OPTIONS: `--require=${JSON.stringify(join(repo, "scripts/timeout-table/preload.cjs"))}`,
     TIMEOUT_TABLE_BASE_URL: target.url,
     TIMEOUT_TABLE_PROFILE_ORIGIN: original.url,
     TIMEOUT_TABLE_FETCH_LOG: log,
@@ -111,7 +111,7 @@ test("preload duration includes the response body and does not forward writes or
   await writeFile(log, "", { mode: 0o600 });
   const env = {
     ...process.env,
-    NODE_OPTIONS: `--require=${join(repo, "scripts/timeout-table/preload.cjs")}`,
+    NODE_OPTIONS: `--require=${JSON.stringify(join(repo, "scripts/timeout-table/preload.cjs"))}`,
     TIMEOUT_TABLE_BASE_URL: bodyUrl,
     TIMEOUT_TABLE_PROFILE_ORIGIN: original.url,
     TIMEOUT_TABLE_FETCH_LOG: log,
