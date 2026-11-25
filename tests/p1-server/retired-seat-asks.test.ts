@@ -113,7 +113,32 @@ const edgeLogRing: string[] = [];
 let edgeLogPartial = "";
 let envDir: string | undefined;
 let hostedHarnessPath: string | undefined;
+let corsHarnessPath: string | undefined;
 const activeConnections = new Set<postgres.Sql>();
+
+const CORS_HARNESS_SOURCE = `
+const input = JSON.parse(await new Response(Deno.stdin.readable).text());
+const command = await import(${JSON.stringify(commandUrl.href)});
+const results = [];
+try {
+  for (const req of input.requests) {
+    const res = await command.handleRequest(new Request(req.url, {
+      method: req.method,
+      headers: req.headers,
+      ...(req.body !== undefined ? { body: req.body } : {}),
+    }));
+    results.push({
+      label: req.label,
+      status: res.status,
+      acao: res.headers.get("access-control-allow-origin"),
+    });
+  }
+  console.log("CORS_RSA_RESULT:" + JSON.stringify(results));
+} finally {
+  await command.db.end({ timeout: 2 });
+}
+Deno.exit(0);
+`;
 
 const HOSTED_HARNESS_SOURCE = `
 const input = JSON.parse(await new Response(Deno.stdin.readable).text());
@@ -655,6 +680,62 @@ function runHostedSteps(steps: HostedStep[]): Array<{ status: number; body: Row 
   return JSON.parse((line ?? "").slice("HOSTED_RSA_RESULT:".length)) as Array<{ status: number; body: Row }>;
 }
 
+type CorsProbeRequest = {
+  label: string;
+  url: string;
+  method: "OPTIONS" | "POST";
+  headers: Record<string, string>;
+  body?: string;
+};
+
+type CorsProbeResult = {
+  label: string;
+  status: number;
+  acao: string | null;
+};
+
+function runCorsChecks(requests: CorsProbeRequest[]): CorsProbeResult[] {
+  assert.ok(corsHarnessPath, "cors harness not initialized");
+  const result = spawnSync(
+    "deno",
+    [
+      "run",
+      "--no-lock",
+      "--config",
+      "supabase/functions/command/deno.json",
+      "--allow-env",
+      "--allow-net",
+      "--allow-read",
+      corsHarnessPath,
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      input: JSON.stringify({ requests }),
+      env: {
+        PATH: process.env.PATH ?? "",
+        ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
+        SWARM_ENV: "test",
+        SWARM_COMMAND_ALLOWED_ORIGINS: ALLOWED_ORIGIN,
+        SWARM_DATABASE_URL: local.DB_URL,
+        SUPABASE_DB_URL: local.DB_URL,
+        SUPABASE_URL: local.API_URL,
+        SUPABASE_ANON_KEY: local.ANON_KEY,
+        SUPABASE_SERVICE_ROLE_KEY: local.SERVICE_ROLE_KEY,
+      },
+      timeout: 120_000,
+    },
+  );
+  assert.equal(result.status, 0, `cors harness failed:\n${result.stderr}\n${result.stdout}`);
+  const line = result.stdout
+    .trim()
+    .split("\n")
+    .reverse()
+    .find((entry) => entry.startsWith("CORS_RSA_RESULT:"));
+  assert.equal(typeof line, "string", `missing CORS_RSA_RESULT line: ${result.stdout}`);
+  return JSON.parse((line ?? "").slice("CORS_RSA_RESULT:".length)) as CorsProbeResult[];
+}
+
 async function readWaitingViewsAs(wsId: string, userId: string) {
   return sql.begin(async (tx) => {
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: userId })}, true)`;
@@ -976,6 +1057,8 @@ before(async () => {
   );
   hostedHarnessPath = join(envDir, "hosted-rsa-harness.ts");
   writeFileSync(hostedHarnessPath, HOSTED_HARNESS_SOURCE, { mode: 0o600 });
+  corsHarnessPath = join(envDir, "cors-rsa-harness.ts");
+  writeFileSync(corsHarnessPath, CORS_HARNESS_SOURCE, { mode: 0o600 });
 
   sql = openBoundedConnection("retired-seat-asks-test", false);
   admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
@@ -1101,9 +1184,10 @@ test(
           RAISE EXCEPTION 'role ${role} must not EXECUTE swarm.seat_is_disconnected_for_ask_clear';
         EXCEPTION WHEN insufficient_privilege THEN NULL;
         END;
-        -- All four trigger functions denied to all runtime/client roles
+        -- All five trigger functions denied to all runtime/client roles
         IF has_function_privilege('${role}', 'swarm.agent_ask_lifecycle_validate_refs()', 'EXECUTE')
            OR has_function_privilege('${role}', 'swarm.agent_workspace_memberships_seed_ask_lifecycle()', 'EXECUTE')
+           OR has_function_privilege('${role}', 'swarm.agent_workspace_memberships_cleanup_ask_lifecycle()', 'EXECUTE')
            OR has_function_privilege('${role}', 'swarm.agent_ask_clear_events_validate_refs()', 'EXECUTE')
            OR has_function_privilege('${role}', 'swarm.signals_bind_seat_lifecycle_epoch()', 'EXECUTE') THEN
           RAISE EXCEPTION 'role ${role} must not hold EXECUTE on retired-seat-asks trigger functions';
@@ -1705,6 +1789,13 @@ test(
     try {
       // 1. Re-add resurrection guard (remove -> clear -> add -> new ask stays open while old stays cleared)
       step("Suite 1b.1: re-add resurrection guard");
+      const readdSlug = "readd-chan";
+      const readdChResp = await sendCommand(owner.jwt, wsA, {
+        kind: "channel_create",
+        slug: readdSlug,
+        visibility: "open",
+      });
+      assert.equal(readdChResp.status, 200, respDiag("readdChResp", readdChResp));
       const readdBot = await createLocalAgent({ wsId: wsA, owner, name: "ReaddBot" });
       const preClearAsk = postedSignalId(
         "preClearAsk",
@@ -1715,6 +1806,7 @@ test(
           to_agent_principal_id: null,
           in_reply_to: null,
           about: null,
+          channel: readdSlug,
           body: "Ask before remove & clear?",
         }),
       );
@@ -1739,6 +1831,7 @@ test(
           to_agent_principal_id: null,
           in_reply_to: null,
           about: null,
+          channel: readdSlug,
           body: "Ask after re-add?",
         }),
       );
@@ -1760,6 +1853,7 @@ test(
         to_agent_principal_id: null,
         in_reply_to: postReaddAsk,
         about: null,
+        channel: readdSlug,
         body: "Answering post-readd ask",
       });
       assert.equal(answerPostReadd.status, 200, respDiag("answerPostReadd", answerPostReadd));
@@ -2080,6 +2174,28 @@ test(
       return Number(row!.calls);
     };
 
+    const settleFnCalls = async (sig: string, maxWaitMs = 1_500): Promise<number> => {
+      try {
+        await sql`SELECT pg_stat_force_next_flush()`;
+      } catch {
+        /* PG version without pg_stat_force_next_flush */
+      }
+      let prev = await readFnCalls(sig);
+      const deadline = Date.now() + maxWaitMs;
+      while (Date.now() < deadline) {
+        await delay(150);
+        try {
+          await sql`SELECT pg_stat_force_next_flush()`;
+        } catch {
+          /* PG version without pg_stat_force_next_flush */
+        }
+        const curr = await readFnCalls(sig);
+        if (curr === prev) return curr;
+        prev = curr;
+      }
+      return prev;
+    };
+
     const waitForFnCallsIncrement = async (sig: string, baseline: number, timeoutMs = 3_000): Promise<number> => {
       const deadline = Date.now() + timeoutMs;
       let latest = baseline;
@@ -2276,7 +2392,7 @@ test(
 
         // 1. Addressee B calls post_signal(in_reply_to)
         let since = await maxAuditId();
-        const aaBefore1 = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+        const aaBefore1 = await settleFnCalls("swarm.ask_answered(uuid,uuid)");
         const rReply = await sendCommand(addrB.jwt, wsId, {
           kind: "post_signal",
           signal_kind: "note",
@@ -2287,7 +2403,7 @@ test(
           channel: sharedSlug,
           body: "Post-cutoff reply by B",
         });
-        assert.equal(await readFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore1, `${label}: post_signal must not call ask_answered`);
+        assert.equal(await settleFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore1, `${label}: post_signal must not call ask_answered`);
         assert.equal(rReply.status, 403, respDiag(`${label}.reply`, rReply));
         results.reply = {
           status: rReply.status,
@@ -2298,13 +2414,13 @@ test(
 
         // 2. Addressee B calls answer_choice
         since = await maxAuditId();
-        const aaBefore2 = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+        const aaBefore2 = await settleFnCalls("swarm.ask_answered(uuid,uuid)");
         const rAns = await sendCommand(addrB.jwt, wsId, {
           kind: "answer_choice",
           signal_id: choiceId,
           option_id: "opt_no",
         });
-        assert.equal(await readFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore2, `${label}: answer_choice post-cutoff must have 0 ask_answered calls`);
+        assert.equal(await settleFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore2, `${label}: answer_choice post-cutoff must have 0 ask_answered calls`);
         assert.equal(rAns.status, 409, respDiag(`${label}.answer_choice`, rAns));
         assert.equal(rAns.body.error, "ask_expired");
         const [bUiRows] = await sql<{ cnt: string }[]>`
@@ -2321,12 +2437,12 @@ test(
 
         // 3. Reconnected seat calls reraise_ask
         since = await maxAuditId();
-        const aaBefore3 = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+        const aaBefore3 = await settleFnCalls("swarm.ask_answered(uuid,uuid)");
         const rReraise = await sendCommand(botToken2, wsId, {
           kind: "reraise_ask",
           signal_id: plainId,
         });
-        assert.equal(await readFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore3, `${label}: reraise_ask post-cutoff must have 0 ask_answered calls`);
+        assert.equal(await settleFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore3, `${label}: reraise_ask post-cutoff must have 0 ask_answered calls`);
         assert.equal(rReraise.status, 409, respDiag(`${label}.reraise`, rReraise));
         assert.equal(rReraise.body.error, "ask_withdrawn");
         results.reraise = {
@@ -2338,14 +2454,20 @@ test(
 
         // 4. Reconnected seat calls withdraw_ask
         since = await maxAuditId();
-        const aaBefore4 = await readFnCalls("swarm.ask_answered(uuid,uuid)");
-        const wcBefore4 = await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)");
+        const [aaBefore4, wcBefore4] = await Promise.all([
+          settleFnCalls("swarm.ask_answered(uuid,uuid)"),
+          settleFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)"),
+        ]);
         const rWithdraw = await sendCommand(botToken2, wsId, {
           kind: "withdraw_ask",
           signal_id: plainId,
         });
-        assert.equal(await readFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore4, `${label}: withdraw_ask post-cutoff must have 0 ask_answered calls`);
-        assert.equal(await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)"), wcBefore4, `${label}: withdraw_ask post-cutoff must have 0 ask_complete_for_withdrawal calls`);
+        const [aaAfter4, wcAfter4] = await Promise.all([
+          settleFnCalls("swarm.ask_answered(uuid,uuid)"),
+          settleFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)"),
+        ]);
+        assert.equal(aaAfter4, aaBefore4, `${label}: withdraw_ask post-cutoff must have 0 ask_answered calls`);
+        assert.equal(wcAfter4, wcBefore4, `${label}: withdraw_ask post-cutoff must have 0 ask_complete_for_withdrawal calls`);
         assert.equal(rWithdraw.status, 404, respDiag(`${label}.withdraw`, rWithdraw));
         results.withdraw = {
           status: rWithdraw.status,
@@ -2356,8 +2478,10 @@ test(
 
         // 5. Reconnected seat calls post_signal(supersedes)
         since = await maxAuditId();
-        const aaBefore5 = await readFnCalls("swarm.ask_answered(uuid,uuid)");
-        const wcBefore5 = await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)");
+        const [aaBefore5, wcBefore5] = await Promise.all([
+          settleFnCalls("swarm.ask_answered(uuid,uuid)"),
+          settleFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)"),
+        ]);
         const rSupersedes = await sendCommand(botToken2, wsId, {
           kind: "post_signal",
           signal_kind: "ask",
@@ -2369,8 +2493,12 @@ test(
           supersedes: plainId,
           body: "Supersedes cleared ask?",
         });
-        assert.equal(await readFnCalls("swarm.ask_answered(uuid,uuid)"), aaBefore5, `${label}: supersedes post-cutoff must have 0 ask_answered calls`);
-        assert.equal(await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)"), wcBefore5, `${label}: supersedes post-cutoff must have 0 ask_complete_for_withdrawal calls`);
+        const [aaAfter5, wcAfter5] = await Promise.all([
+          settleFnCalls("swarm.ask_answered(uuid,uuid)"),
+          settleFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)"),
+        ]);
+        assert.equal(aaAfter5, aaBefore5, `${label}: supersedes post-cutoff must have 0 ask_answered calls`);
+        assert.equal(wcAfter5, wcBefore5, `${label}: supersedes post-cutoff must have 0 ask_complete_for_withdrawal calls`);
         assert.equal(rSupersedes.status, 404, respDiag(`${label}.supersedes`, rSupersedes));
         results.supersedes = {
           status: rSupersedes.status,
@@ -2389,22 +2517,9 @@ test(
       assert.deepEqual(resF2, resF1, "F2 (unreadable answer) must be byte-identical to F1 (never answered) across status, body, ui_actions, and audit_log");
       assert.deepEqual(resF3, resF1, "F3 (readable answer) must be byte-identical to F1 (never answered) on post-cutoff refusals");
 
-      // Check Archived visibility for F1, F2, F3
-      const archA = ((await readWaitingViewsAs(wsId, addrA.id)).wa.items as Array<Row>) ?? [];
-      const archB = ((await readWaitingViewsAs(wsId, addrB.id)).wa.items as Array<Row>) ?? [];
-      const findArch = (items: Array<Row>, id: string) => items.find((i) => i.item_key === `ask:${id}`);
-
-      assert.equal(findArch(archB, f1Plain)?.outcome_kind, "seat_cleared");
-      assert.equal(findArch(archB, f1Plain)?.answered_by, null);
-      assert.equal(findArch(archB, f2Plain)?.outcome_kind, "seat_cleared", "B cannot see A's private answer -> seat_cleared");
-      assert.equal(findArch(archB, f2Plain)?.answered_by, null);
-      assert.equal(findArch(archA, f2Plain)?.outcome_kind, "answered", "A still sees their own answer in Archived");
-      assert.equal(findArch(archA, f3Plain)?.outcome_kind, "answered");
-      assert.equal(findArch(archB, f3Plain)?.outcome_kind, "answered", "readable F3 stays answered for B");
-      assert.equal((findArch(archB, f3Plain)?.answered_by as { id?: string } | null)?.id, addrA.id);
-
       // Addressee A retrying their own completed answer_choice on F3 -> 200 (same) and 409 choice_conflict (different), BOTH with 0 ask_answered calls!
-      const aaBeforeMine = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+      // Run BEFORE readWaitingViewsAs so read-side ask_answered calls do not flush asynchronously into this window.
+      const aaBeforeMine = await settleFnCalls("swarm.ask_answered(uuid,uuid)");
       const replaySameCmd = await sendCommand(
         addrA.jwt,
         wsId,
@@ -2426,10 +2541,24 @@ test(
       assert.equal(retryDiffOpt.status, 409, respDiag("retryDiffOpt", retryDiffOpt));
       assert.equal(retryDiffOpt.body.error, "choice_conflict");
       assert.equal(
-        await readFnCalls("swarm.ask_answered(uuid,uuid)"),
+        await settleFnCalls("swarm.ask_answered(uuid,uuid)"),
         aaBeforeMine,
         "caller-settled choiceLedgerReplay/mine retry must have 0 ask_answered calls",
       );
+
+      // Check Archived visibility for F1, F2, F3
+      const archA = ((await readWaitingViewsAs(wsId, addrA.id)).wa.items as Array<Row>) ?? [];
+      const archB = ((await readWaitingViewsAs(wsId, addrB.id)).wa.items as Array<Row>) ?? [];
+      const findArch = (items: Array<Row>, id: string) => items.find((i) => i.item_key === `ask:${id}`);
+
+      assert.equal(findArch(archB, f1Plain)?.outcome_kind, "seat_cleared");
+      assert.equal(findArch(archB, f1Plain)?.answered_by, null);
+      assert.equal(findArch(archB, f2Plain)?.outcome_kind, "seat_cleared", "B cannot see A's private answer -> seat_cleared");
+      assert.equal(findArch(archB, f2Plain)?.answered_by, null);
+      assert.equal(findArch(archA, f2Plain)?.outcome_kind, "answered", "A still sees their own answer in Archived");
+      assert.equal(findArch(archA, f3Plain)?.outcome_kind, "answered");
+      assert.equal(findArch(archB, f3Plain)?.outcome_kind, "answered", "readable F3 stays answered for B");
+      assert.equal((findArch(archB, f3Plain)?.answered_by as { id?: string } | null)?.id, addrA.id);
 
       // Positive control: live non-cutoff answered ask MUST increment ask_answered & ask_complete_for_withdrawal!
       step("Suite 2: positive probe control on live non-cutoff answered ask");
@@ -2448,7 +2577,7 @@ test(
         (await sendCommand(addrA.jwt, wsId, { kind: "answer_choice", signal_id: liveChoiceCtrl, option_id: "opt_yes" })).status,
         200,
       );
-      const aaBeforePos = await readFnCalls("swarm.ask_answered(uuid,uuid)");
+      const aaBeforePos = await settleFnCalls("swarm.ask_answered(uuid,uuid)");
       const bLateLive = await sendCommand(addrB.jwt, wsId, {
         kind: "answer_choice",
         signal_id: liveChoiceCtrl,
@@ -2459,7 +2588,7 @@ test(
       const aaAfterPos = await waitForFnCallsIncrement("swarm.ask_answered(uuid,uuid)", aaBeforePos);
       assert.ok(aaAfterPos > aaBeforePos, `positive control must increment ask_answered (${aaBeforePos} -> ${aaAfterPos})`);
 
-      const wcBeforePos = await readFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)");
+      const wcBeforePos = await settleFnCalls("swarm.ask_complete_for_withdrawal(uuid,uuid)");
       const wdLiveAnswered = await sendCommand(botToken2, wsId, {
         kind: "withdraw_ask",
         signal_id: liveChoiceCtrl,
@@ -2552,68 +2681,73 @@ test(
         await sql.begin(async (tx) => {
           await tx.unsafe(`SET LOCAL ROLE ${role}`);
           // Before a clear (current_epoch = trigEpoch, enabled = true): NULL rejected 42501 SEAT_LIFECYCLE_EPOCH_REQUIRED
-          await tx`SAVEPOINT sp_null_before`;
           await assert.rejects(
-            () => tx`
-              INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Omitted epoch?', '9999-12-31T23:59:59Z', NULL)
-            `,
+            () =>
+              tx.savepoint(async (sp) => {
+                await sp`
+                  INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
+                  VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Omitted epoch?', '9999-12-31T23:59:59Z', NULL)
+                `;
+              }),
             (err: { code?: string; message?: string }) =>
               err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_REQUIRED/.test(err?.message ?? ""),
             `${role}: omitted NULL before clear must fail 42501 SEAT_LIFECYCLE_EPOCH_REQUIRED`,
           );
-          await tx`ROLLBACK TO SAVEPOINT sp_null_before`;
 
           // Forged future epoch (current + 1) -> 42501 SEAT_LIFECYCLE_EPOCH_INVALID
-          await tx`SAVEPOINT sp_future`;
           await assert.rejects(
-            () => tx`
-              INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Forged future?', '9999-12-31T23:59:59Z', ${trigEpoch + 1}::bigint)
-            `,
+            () =>
+              tx.savepoint(async (sp) => {
+                await sp`
+                  INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
+                  VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Forged future?', '9999-12-31T23:59:59Z', ${trigEpoch + 1}::bigint)
+                `;
+              }),
             (err: { code?: string; message?: string }) =>
               err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_INVALID/.test(err?.message ?? ""),
             `${role}: forged future epoch must fail 42501 SEAT_LIFECYCLE_EPOCH_INVALID`,
           );
-          await tx`ROLLBACK TO SAVEPOINT sp_future`;
 
           // Non-positive epoch (0) -> 42501 SEAT_LIFECYCLE_EPOCH_INVALID
-          await tx`SAVEPOINT sp_zero`;
           await assert.rejects(
-            () => tx`
-              INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Zero epoch?', '9999-12-31T23:59:59Z', 0)
-            `,
+            () =>
+              tx.savepoint(async (sp) => {
+                await sp`
+                  INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
+                  VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Zero epoch?', '9999-12-31T23:59:59Z', 0)
+                `;
+              }),
             (err: { code?: string; message?: string }) =>
               err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_INVALID/.test(err?.message ?? ""),
             `${role}: epoch 0 must fail 42501 SEAT_LIFECYCLE_EPOCH_INVALID`,
           );
-          await tx`ROLLBACK TO SAVEPOINT sp_zero`;
 
           // Unexpected epoch on non-ask agent note & human ask -> 42501 SEAT_LIFECYCLE_EPOCH_UNEXPECTED
-          await tx`SAVEPOINT sp_unexp_note`;
           await assert.rejects(
-            () => tx`
-              INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, sender_lifecycle_epoch)
-              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', 'note', 'Note with epoch', '9999-12-31T23:59:59Z', 1)
-            `,
+            () =>
+              tx.savepoint(async (sp) => {
+                await sp`
+                  INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, sender_lifecycle_epoch)
+                  VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', 'note', 'Note with epoch', '9999-12-31T23:59:59Z', 1)
+                `;
+              }),
             (err: { code?: string; message?: string }) =>
               err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_UNEXPECTED/.test(err?.message ?? ""),
             `${role}: agent note with epoch must fail 42501 SEAT_LIFECYCLE_EPOCH_UNEXPECTED`,
           );
-          await tx`ROLLBACK TO SAVEPOINT sp_unexp_note`;
 
-          await tx`SAVEPOINT sp_unexp_human`;
           await assert.rejects(
-            () => tx`
-              INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-              VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${owner.id}::uuid, 'user', ${addressee.id}::uuid, 'ask', 'Human ask with epoch?', '9999-12-31T23:59:59Z', 1)
-            `,
+            () =>
+              tx.savepoint(async (sp) => {
+                await sp`
+                  INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
+                  VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${owner.id}::uuid, 'user', ${addressee.id}::uuid, 'ask', 'Human ask with epoch?', '9999-12-31T23:59:59Z', 1)
+                `;
+              }),
             (err: { code?: string; message?: string }) =>
               err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_UNEXPECTED/.test(err?.message ?? ""),
             `${role}: human ask with epoch must fail 42501 SEAT_LIFECYCLE_EPOCH_UNEXPECTED`,
           );
-          await tx`ROLLBACK TO SAVEPOINT sp_unexp_human`;
         });
       }
 
@@ -2625,16 +2759,17 @@ test(
       const delayedAskId = randomUUID();
       await sql.begin(async (tx) => {
         await tx`SET LOCAL ROLE swarm_command`;
-        await tx`SAVEPOINT sp_null_after`;
         await assert.rejects(
-          () => tx`
-            INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
-            VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Omitted after clear?', '9999-12-31T23:59:59Z', NULL)
-          `,
+          () =>
+            tx.savepoint(async (sp) => {
+              await sp`
+                INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
+                VALUES (${randomUUID()}::uuid, ${wsA}::uuid, ${trigBot.principalId}::uuid, 'agent', ${addressee.id}::uuid, 'ask', 'Omitted after clear?', '9999-12-31T23:59:59Z', NULL)
+              `;
+            }),
           (err: { code?: string; message?: string }) =>
             err?.code === "42501" && /SEAT_LIFECYCLE_EPOCH_REQUIRED/.test(err?.message ?? ""),
         );
-        await tx`ROLLBACK TO SAVEPOINT sp_null_after`;
 
         await tx`
           INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
@@ -3608,20 +3743,80 @@ test(
       });
       assert.equal(seatAdminRefused.status, 403, respDiag("seatAdminRefused", seatAdminRefused));
 
-      // 4. Browser CORS / Origin guard
+      // 4. Browser CORS / Origin guard (invoke real command/index.ts handleRequest directly so
+      //    local Supabase Kong's wildcard OPTIONS plugin does not mask our CORS handler)
       step("Suite 5.2: CORS origin header check (disallowed vs allowed origin)");
-      const preflightBad = await fetch(`${local.API_URL}/functions/v1/command`, {
-        method: "OPTIONS",
-        signal: AbortSignal.timeout(WAIT_TIMEOUT_MS),
-        headers: { origin: DISALLOWED_ORIGIN },
+      const commandEndpointUrl = `${local.API_URL}/functions/v1/command`;
+      const corsProbeBody = (commandId: string) =>
+        JSON.stringify({
+          command_id: commandId,
+          client_version: "0.1.93",
+          workspace_id: wsA,
+          stream: { kind: "workspace" },
+          command: {
+            kind: "clear_retired_seat_asks",
+            principal_id: randomUUID(),
+          },
+        });
+      const corsResults = runCorsChecks([
+        {
+          label: "options-disallowed",
+          url: commandEndpointUrl,
+          method: "OPTIONS",
+          headers: { origin: DISALLOWED_ORIGIN },
+        },
+        {
+          label: "options-allowed",
+          url: commandEndpointUrl,
+          method: "OPTIONS",
+          headers: { origin: ALLOWED_ORIGIN },
+        },
+        {
+          label: "post-disallowed",
+          url: commandEndpointUrl,
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${owner.jwt}`,
+            "content-type": "application/json",
+            origin: DISALLOWED_ORIGIN,
+          },
+          body: corsProbeBody(randomUUID()),
+        },
+        {
+          label: "post-allowed",
+          url: commandEndpointUrl,
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${owner.jwt}`,
+            "content-type": "application/json",
+            origin: ALLOWED_ORIGIN,
+          },
+          body: corsProbeBody(randomUUID()),
+        },
+      ]);
+      const corsByLabel = new Map(corsResults.map((r) => [r.label, r]));
+      assert.deepEqual(corsByLabel.get("options-disallowed"), {
+        label: "options-disallowed",
+        status: 204,
+        acao: null,
       });
-      assert.equal(preflightBad.headers.get("access-control-allow-origin"), null, "disallowed origin must not get ACAO");
-      const preflightGood = await fetch(`${local.API_URL}/functions/v1/command`, {
-        method: "OPTIONS",
-        signal: AbortSignal.timeout(WAIT_TIMEOUT_MS),
-        headers: { origin: ALLOWED_ORIGIN },
+      assert.deepEqual(corsByLabel.get("options-allowed"), {
+        label: "options-allowed",
+        status: 204,
+        acao: ALLOWED_ORIGIN,
       });
-      assert.equal(preflightGood.headers.get("access-control-allow-origin"), ALLOWED_ORIGIN);
+      assert.equal(corsByLabel.get("post-disallowed")?.status, 404);
+      assert.equal(
+        corsByLabel.get("post-disallowed")?.acao,
+        null,
+        "POST with disallowed origin must not get ACAO",
+      );
+      assert.equal(corsByLabel.get("post-allowed")?.status, 404);
+      assert.equal(
+        corsByLabel.get("post-allowed")?.acao,
+        ALLOWED_ORIGIN,
+        "POST with allowed origin must reflect allowed origin in ACAO",
+      );
 
       // 5. Non-member -> 403 forbidden
       step("Suite 5.3: non-member 403 and uniform 404 probes");

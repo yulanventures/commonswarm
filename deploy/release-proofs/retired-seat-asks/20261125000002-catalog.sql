@@ -67,6 +67,13 @@ SELECT
       AND NOT t.tgisinternal
   )
   AND EXISTS (
+    SELECT 1 FROM pg_trigger t
+    WHERE t.tgrelid = 'swarm.agent_workspace_memberships'::regclass
+      AND t.tgname = 'agent_workspace_memberships_cleanup_ask_lifecycle'
+      AND t.tgenabled <> 'D'
+      AND NOT t.tgisinternal
+  )
+  AND EXISTS (
     SELECT 1 FROM pg_proc p
     WHERE p.oid = to_regprocedure('swarm.agent_ask_lifecycle_validate_refs()')
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
@@ -86,6 +93,17 @@ SELECT
   AND NOT has_function_privilege('authenticated', 'swarm.agent_workspace_memberships_seed_ask_lifecycle()', 'EXECUTE')
   AND NOT has_function_privilege('swarm_read', 'swarm.agent_workspace_memberships_seed_ask_lifecycle()', 'EXECUTE')
   AND NOT has_function_privilege('swarm_command', 'swarm.agent_workspace_memberships_seed_ask_lifecycle()', 'EXECUTE')
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.agent_workspace_memberships_cleanup_ask_lifecycle()')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+      AND 'search_path=pg_catalog' = ANY(p.proconfig)
+  )
+  AND NOT has_function_privilege('public', 'swarm.agent_workspace_memberships_cleanup_ask_lifecycle()', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'swarm.agent_workspace_memberships_cleanup_ask_lifecycle()', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'swarm.agent_workspace_memberships_cleanup_ask_lifecycle()', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_read', 'swarm.agent_workspace_memberships_cleanup_ask_lifecycle()', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.agent_workspace_memberships_cleanup_ask_lifecycle()', 'EXECUTE')
   AND EXISTS (
     SELECT 1 FROM pg_proc p
     WHERE p.oid = to_regprocedure('swarm.agent_ask_clear_events_validate_refs()')

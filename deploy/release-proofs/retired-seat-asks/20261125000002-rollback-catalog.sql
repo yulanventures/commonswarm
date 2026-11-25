@@ -8,6 +8,7 @@ SELECT
   AND to_regclass('swarm.agent_ask_clear_events') IS NULL
   AND to_regprocedure('swarm.agent_ask_lifecycle_validate_refs()') IS NULL
   AND to_regprocedure('swarm.agent_workspace_memberships_seed_ask_lifecycle()') IS NULL
+  AND to_regprocedure('swarm.agent_workspace_memberships_cleanup_ask_lifecycle()') IS NULL
   AND to_regprocedure('swarm.agent_ask_clear_events_validate_refs()') IS NULL
   AND to_regprocedure('swarm.signals_bind_seat_lifecycle_epoch()') IS NULL
   AND to_regprocedure('swarm.seat_is_disconnected_for_ask_clear(uuid,uuid)') IS NULL
@@ -31,6 +32,12 @@ SELECT
     SELECT 1 FROM pg_trigger t
     WHERE t.tgrelid = 'swarm.agent_workspace_memberships'::regclass
       AND t.tgname = 'agent_workspace_memberships_seed_ask_lifecycle'
+      AND NOT t.tgisinternal
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_trigger t
+    WHERE t.tgrelid = 'swarm.agent_workspace_memberships'::regclass
+      AND t.tgname = 'agent_workspace_memberships_cleanup_ask_lifecycle'
       AND NOT t.tgisinternal
   )
   AND EXISTS (

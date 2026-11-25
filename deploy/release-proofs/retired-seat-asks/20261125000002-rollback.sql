@@ -523,6 +523,8 @@ DROP TRIGGER IF EXISTS agent_ask_clear_events_validate_refs ON swarm.agent_ask_c
 DROP TABLE IF EXISTS swarm.agent_ask_clear_events;
 DROP FUNCTION IF EXISTS swarm.agent_ask_clear_events_validate_refs();
 
+DROP TRIGGER IF EXISTS agent_workspace_memberships_cleanup_ask_lifecycle ON swarm.agent_workspace_memberships;
+DROP FUNCTION IF EXISTS swarm.agent_workspace_memberships_cleanup_ask_lifecycle();
 DROP TRIGGER IF EXISTS agent_workspace_memberships_seed_ask_lifecycle ON swarm.agent_workspace_memberships;
 DROP FUNCTION IF EXISTS swarm.agent_workspace_memberships_seed_ask_lifecycle();
 DROP TRIGGER IF EXISTS agent_ask_lifecycle_validate_refs ON swarm.agent_ask_lifecycle;

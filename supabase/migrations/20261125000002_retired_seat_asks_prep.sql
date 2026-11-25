@@ -119,6 +119,28 @@ ALTER FUNCTION swarm.agent_workspace_memberships_seed_ask_lifecycle() OWNER TO s
 REVOKE ALL ON FUNCTION swarm.agent_workspace_memberships_seed_ask_lifecycle()
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 
+CREATE FUNCTION swarm.agent_workspace_memberships_cleanup_ask_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  DELETE FROM swarm.agent_ask_lifecycle
+  WHERE workspace_id = OLD.workspace_id
+    AND principal_id = OLD.principal_id;
+  RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER agent_workspace_memberships_cleanup_ask_lifecycle
+  AFTER DELETE ON swarm.agent_workspace_memberships
+  FOR EACH ROW EXECUTE FUNCTION swarm.agent_workspace_memberships_cleanup_ask_lifecycle();
+
+ALTER FUNCTION swarm.agent_workspace_memberships_cleanup_ask_lifecycle() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.agent_workspace_memberships_cleanup_ask_lifecycle()
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
 -- 2. Append-only cutoff table (no FKs -> zero parent row locks).
 CREATE TABLE swarm.agent_ask_clear_events (
   workspace_id uuid NOT NULL,
@@ -699,7 +721,7 @@ BEGIN
     RETURN jsonb_build_object('status', 'seat_still_live');
   END IF;
 
-  v_cleared_at := clock_timestamp();
+  v_cleared_at := date_trunc('milliseconds', clock_timestamp());
 
   INSERT INTO swarm.agent_ask_clear_events (
     workspace_id, principal_id, cutoff_epoch, cleared_at, cleared_by_user_id
@@ -765,7 +787,7 @@ AS $$
         ON ce.workspace_id = w.workspace_id
        AND ce.principal_id = p_principal_id
        AND ce.cutoff_epoch = p_cutoff_epoch
-       AND ce.cleared_at = p_cleared_at
+       AND date_trunc('milliseconds', ce.cleared_at) = date_trunc('milliseconds', p_cleared_at)
        AND ce.cleared_by_user_id = p_actor_user_id
       WHERE w.workspace_id = p_workspace_id
         AND w.archived_at IS NULL
