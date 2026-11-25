@@ -410,7 +410,15 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
   `;
 
   runSql(
-    sqlPhase("dismissals-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +
+    sqlPhase(
+      "dismissals-rollback-later-migrations",
+      repoSql("deploy/release-proofs/todo-approvals/20261125000004-rollback.sql") +
+        "\n" +
+        repoSql("deploy/release-proofs/ask-withdrawals/20261125000001-rollback.sql") +
+        "\n" +
+        repoSql("deploy/release-proofs/waiting-autoclear/20261124000002-rollback.sql"),
+    ) +
+      sqlPhase("dismissals-initial-proofs", catalogAssert(false) + "\n" + repoSql(`${proofRoot}-functional.sql`)) +
       sqlPhase("dismissals-parity-fixture", fixtureSql) +
       sqlPhase(
         "dismissals-snapshot-after",

@@ -315,7 +315,8 @@ test("waiting_todos_page paginates past 20, preserves stable channel origin acro
       }));
       assert.equal("origin_channel_id" in doingBoiler, false, "todo_set_state outcome must strip origin_channel_id");
 
-      // C1 witness: authorized to-do editor outside #private-vault gets redacted conflict and committed write responses.
+      // C1 witness: authorized to-do editor outside #private-vault gets redacted conflict, pending-offer freeze (#742 C3),
+      // and redacted committed write responses after accepting the offer.
       const outsiderConflict = await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
         kind: "todo_update",
         todo_id: privOutsiderTodo.todo_id,
@@ -327,14 +328,38 @@ test("waiting_todos_page paginates past 20, preserves stable channel origin acro
         assert.equal("origin_channel_id" in outsiderConflict.outcome.current, false, "conflict current must not leak private origin_channel_id");
         assert.equal("origin_placement" in outsiderConflict.outcome.current, false, "conflict current must not leak private origin_placement");
       }
-      const outsiderCommit = committedTodo(await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
+      const outsiderFrozen = await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
         kind: "todo_update",
         todo_id: privOutsiderTodo.todo_id,
         base_version: privOutsiderTodo.version,
+        title: "Edit while offer pending",
+      });
+      assert.deepEqual(
+        outsiderFrozen.outcome,
+        { status: "refused", reason: "offer_pending_frozen" },
+        "todo_update while a pending offer exists must refuse offer_pending_frozen (#742 Condition 3)",
+      );
+      await tx`SAVEPOINT sp_outsider_edit_after_accept`;
+      assert.ok(privOutsiderTodo.offer, "assigning to another user creates a pending offer");
+      const outsiderAccepted = committedTodo(await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
+        kind: "household_todo_answer",
+        todo_id: privOutsiderTodo.todo_id,
+        offer_id: privOutsiderTodo.offer.offer_id,
+        base_version: privOutsiderTodo.version,
+        answer: "accept",
+      }));
+      assert.equal("origin_channel_id" in outsiderAccepted, false, "outsider offer accept must not leak private origin_channel_id");
+      assert.equal("origin_placement" in outsiderAccepted, false, "outsider offer accept must not leak private origin_placement");
+      const outsiderCommit = committedTodo(await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
+        kind: "todo_update",
+        todo_id: privOutsiderTodo.todo_id,
+        base_version: outsiderAccepted.version,
         title: "Outsider private-channel task (edited)",
       }));
       assert.equal("origin_channel_id" in outsiderCommit, false, "outsider successful write must not leak private origin_channel_id");
       assert.equal("origin_placement" in outsiderCommit, false, "outsider successful write must not leak private origin_placement");
+      await tx`ROLLBACK TO SAVEPOINT sp_outsider_edit_after_accept`;
+      await tx`SET LOCAL ROLE swarm_command`;
 
       // C1 witness: replay after the original caller loses channel access never leaks private origin_channel_id.
       await tx`SAVEPOINT sp_replay_after_channel_removal`;

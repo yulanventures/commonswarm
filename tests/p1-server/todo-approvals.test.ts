@@ -35,7 +35,7 @@ import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readin
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
-type Person = { id: string; jwt: string };
+type Person = { id: string; jwt: string; displayName: string };
 type Row = Record<string, unknown>;
 type Tx = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -378,7 +378,8 @@ async function withHeldLock<T>(
 }
 
 async function createUser(label: string): Promise<Person> {
-  const email = `${label}-${randomUUID()}@example.test`;
+  const displayName = `${label}-${randomUUID()}`;
+  const email = `${displayName}@example.test`;
   const password = `T-${randomBytes(24).toString("base64url")}!`;
   const created = await admin.auth.admin.createUser({ email, password, email_confirm: true });
   assert.ifError(created.error);
@@ -387,7 +388,7 @@ async function createUser(label: string): Promise<Person> {
   });
   const signed = await client.auth.signInWithPassword({ email, password });
   assert.ifError(signed.error);
-  return { id: created.data.user!.id, jwt: signed.data.session!.access_token };
+  return { id: created.data.user!.id, jwt: signed.data.session!.access_token, displayName };
 }
 
 async function sendCommand(
@@ -870,17 +871,17 @@ test(
       ${dbAssert(`
         SELECT
           has_function_privilege('authenticated', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
-          AND NOT has_function_privilege('PUBLIC', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
+          AND NOT has_function_privilege('public', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
           AND NOT has_function_privilege('anon', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
           AND NOT has_function_privilege('swarm_read', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
           AND NOT has_function_privilege('swarm_command', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
           AND has_function_privilege('authenticated', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
-          AND NOT has_function_privilege('PUBLIC', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
+          AND NOT has_function_privilege('public', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
           AND NOT has_function_privilege('anon', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
           AND NOT has_function_privilege('swarm_read', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
           AND NOT has_function_privilege('swarm_command', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
           AND has_function_privilege('authenticated', 'swarm_read.home_overview()', 'EXECUTE')
-          AND NOT has_function_privilege('PUBLIC', 'swarm_read.home_overview()', 'EXECUTE')
+          AND NOT has_function_privilege('public', 'swarm_read.home_overview()', 'EXECUTE')
           AND NOT has_function_privilege('anon', 'swarm_read.home_overview()', 'EXECUTE')
           AND NOT has_function_privilege('swarm_read', 'swarm_read.home_overview()', 'EXECUTE')
           AND NOT has_function_privilege('swarm_command', 'swarm_read.home_overview()', 'EXECUTE')
@@ -1542,14 +1543,30 @@ test(
         assert.equal(sig!.body.includes(secretNote), false, "zero note leakage");
         assert.equal(sig!.body.includes(secretTitle), false, "zero title leakage");
 
-        const [filing] = await sql<{ audience: string; kind: string }[]>`
-          SELECT cs.audience, c.kind
+        const [filing] = await sql<{ conversation_id: string; audience: string; kind: string }[]>`
+          SELECT cs.conversation_id, cs.audience, c.kind
           FROM swarm.conversation_signals cs
           JOIN swarm.conversations c ON c.conversation_id = cs.conversation_id
           WHERE cs.workspace_id = ${fx.wsId}::uuid AND cs.signal_id = ${signalId}::uuid
         `;
-        assert.equal(filing!.audience, "private", `${scenario.label}: private DM filing`);
+        assert.equal(filing!.audience, "addressed", `${scenario.label}: addressed DM filing`);
         assert.equal(filing!.kind, "dm", `${scenario.label}: canonical 1:1 DM`);
+        const dmMembers = await sql<{ member_user_id: string | null; member_agent_principal_id: string | null }[]>`
+          SELECT member_user_id, member_agent_principal_id
+          FROM swarm.conversation_members
+          WHERE workspace_id = ${fx.wsId}::uuid
+            AND conversation_id = ${filing!.conversation_id}::uuid
+            AND left_at IS NULL
+        `;
+        assert.equal(dmMembers.length, 2, `${scenario.label}: strictly 1:1 DM (2 members)`);
+        const memberKeys = dmMembers
+          .map((m) => (m.member_user_id ? `user:${m.member_user_id}` : `agent:${m.member_agent_principal_id}`))
+          .sort();
+        const expectedKeys = [
+          `user:${decider.id}`,
+          `${scenario.expectedParty.kind}:${scenario.expectedParty.id}`,
+        ].sort();
+        assert.deepEqual(memberKeys, expectedKeys, `${scenario.label}: DM members are strictly decider and requester`);
 
         if (scenario.isAgent) {
           const [deliv] = await sql<{ count: number }[]>`
@@ -2237,7 +2254,7 @@ test(
       assert.deepEqual(wtAt.offer_to, { kind: "agent", id: aliceAgent.id, name: "AliceAgent" });
       assert.equal(wtAt.offer_start, "queue");
       assert.deepEqual(wtAt.offer_gate, { kind: "at", at: scheduledAtIso });
-      assert.deepEqual(wtAt.requested_by, { kind: "user", id: bob.id, name: "Bob" });
+      assert.deepEqual(wtAt.requested_by, { kind: "user", id: bob.id, name: bob.displayName });
 
       assert.equal(wtHold.version, holdOfferTodo.version);
       assert.deepEqual(wtHold.offer_gate, { kind: "hold", note: holdGateNote });
