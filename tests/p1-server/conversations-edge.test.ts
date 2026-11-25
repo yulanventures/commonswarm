@@ -35,7 +35,16 @@ let principal: string;
 let agentToken: string;
 const realtimeClients: SupabaseClient[] = [];
 
-type Listener = { name: string; frames: unknown[]; client: SupabaseClient; channel: RealtimeChannel };
+type Listener = {
+  name: string;
+  topic: string;
+  event: string;
+  frames: unknown[];
+  statuses: string[];
+  subscribedAt: number;
+  client: SupabaseClient;
+  channel: RealtimeChannel;
+};
 
 /** A real Realtime socket on a private topic, authenticated as the one it is for (a person's session, or
  * anon for an agent's wake topic, which the wake id itself authorizes), recording every frame of `event`. */
@@ -44,25 +53,106 @@ async function listen(name: string, bearer: string, topic: string, event: string
   realtimeClients.push(client);
   await client.realtime.setAuth(bearer);
   const frames: unknown[] = [];
+  const statuses: string[] = [];
   const channel = client.channel(topic, { config: { private: true, broadcast: { ack: false, self: false } } });
   channel.on("broadcast", { event }, (message) => { frames.push(message.payload); });
+  let settled = false;
   const status = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${name}: Realtime subscribe timed out`)), 15_000);
-    channel.subscribe((next) => {
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(new Error(`${name}: Realtime subscribe timed out (statuses=${JSON.stringify(statuses)})`));
+    }, 15_000);
+    channel.subscribe((next, err) => {
+      statuses.push(err ? `${next}:${String(err)}` : next);
+      if (settled) return;
       if (next !== "SUBSCRIBED" && next !== "CHANNEL_ERROR" && next !== "TIMED_OUT") return;
+      settled = true;
       clearTimeout(timer);
       resolve(next);
     });
   });
-  assert.equal(status, "SUBSCRIBED", `${name} joins ${topic}`);
-  return { name, frames, client, channel };
+  assert.equal(status, "SUBSCRIBED", `${name} joins ${topic} (statuses=${JSON.stringify(statuses)})`);
+  const subscribedAt = Date.now();
+  await delay(250);
+  return { name, topic, event, frames, statuses, subscribedAt, client, channel };
 }
 
-async function framesArrive(listeners: Listener[], before: number[], label: string): Promise<void> {
-  const deadline = Date.now() + 15_000;
+/** Warm up and verify the local Postgres realtime.send -> Realtime LISTEN -> private RLS -> WebSocket bridge. */
+async function ensureRealtimeBridgeReady(bearer: string, topic: string): Promise<void> {
+  const client = createClient(local.API_URL, local.ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  const frames: unknown[] = [];
+  const statuses: string[] = [];
+  const channel = client.channel(topic, { config: { private: true, broadcast: { ack: false, self: false } } });
+  channel.on("broadcast", { event: "probe" }, (message) => { frames.push(message.payload); });
+  try {
+    await client.realtime.setAuth(bearer);
+    let settled = false;
+    const status = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        settled = true;
+        reject(new Error(`realtime bridge probe: subscribe timed out (topic=${topic}, statuses=${JSON.stringify(statuses)})`));
+      }, 15_000);
+      channel.subscribe((next, err) => {
+        statuses.push(err ? `${next}:${String(err)}` : next);
+        if (settled) return;
+        if (next !== "SUBSCRIBED" && next !== "CHANNEL_ERROR" && next !== "TIMED_OUT") return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(next);
+      });
+    });
+    assert.equal(status, "SUBSCRIBED", `realtime bridge probe joins ${topic} (statuses=${JSON.stringify(statuses)})`);
+    await delay(250);
+
+    const deadline = Date.now() + 20_000;
+    while (frames.length === 0 && Date.now() < deadline) {
+      await sql`SELECT realtime.send('{"v":1,"probe":true}'::jsonb, 'probe', ${topic}, true)`;
+      const attemptDeadline = Math.min(deadline, Date.now() + 1_000);
+      while (frames.length === 0 && Date.now() < attemptDeadline) {
+        await delay(50);
+      }
+    }
+    if (frames.length === 0) {
+      const [row] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM realtime.messages WHERE topic = ${topic}`;
+      throw new Error(
+        `realtime bridge probe failed within 20000ms (topic=${topic}, state=${channel.state}, statuses=${JSON.stringify(statuses)}, queued=${row?.n ?? 0})`,
+      );
+    }
+  } finally {
+    await client.removeChannel(channel).catch(() => {});
+    await client.realtime.disconnect();
+  }
+}
+
+async function framesArrive(
+  listeners: Listener[],
+  before: number[],
+  label: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   while (listeners.some((l, i) => l.frames.length <= before[i]!)) {
     if (Date.now() > deadline) {
-      throw new Error(`${label}: no frame on ${listeners.filter((l, i) => l.frames.length <= before[i]!).map((l) => l.name).join(", ")}`);
+      const missed = listeners.filter((l, i) => l.frames.length <= before[i]!);
+      const diagnostics = await Promise.all(missed.map(async (l) => {
+        const [row] = await sql<{ queued: number; latest: string | null }[]>`
+          SELECT count(*)::int AS queued, max(inserted_at)::text AS latest
+          FROM realtime.messages
+          WHERE topic = ${l.topic}`;
+        return {
+          name: l.name,
+          topic: l.topic,
+          state: l.channel.state,
+          statuses: l.statuses,
+          elapsedMs: Date.now() - l.subscribedAt,
+          queued: row?.queued ?? 0,
+          latest: row?.latest ?? null,
+        };
+      }));
+      throw new Error(
+        `${label}: no frame on ${missed.map((l) => l.name).join(", ")} after ${Date.now() - startedAt}ms (${JSON.stringify(diagnostics)})`,
+      );
     }
     await delay(100);
   }
@@ -258,6 +348,9 @@ test("an old-edge post to a group someone left is refused: no message, no delive
     SELECT (SELECT count(*)::int FROM realtime.messages
       WHERE coalesce(payload -> 'payload' ->> 'signal_id', payload ->> 'signal_id') = ${id}) AS frames,
       (SELECT count(*)::int FROM swarm.signal_deliveries WHERE signal_id = ${id}::uuid) AS deliveries`)[0]!;
+
+  // Warm up the local Realtime bridge on the owner's own member topic before opening the four test sockets.
+  await ensureRealtimeBridgeReady(owner.jwt, `cswarm-member:${workspace}:${owner.id}`);
 
   // The wire: real sockets, each joined as the one its topic is for.
   const onWorkspace = await listen("workspace topic (a group member)", other.jwt, `cswarm-signals:${workspace}`, "signal");
