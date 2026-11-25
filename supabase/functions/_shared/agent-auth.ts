@@ -21,6 +21,7 @@ export interface AgentAuthRow {
   unexpired: boolean;
   managed_at: Date | null;
   transport: "local" | "hosted_mcp";
+  ask_lifecycle_epoch: number | null;
 }
 
 /**
@@ -65,7 +66,7 @@ export async function loadAgentCredential(
   if (snapshotKey(await expected.rediscover()) !== snapshotKey(expected.snapshot)) throw new LocalAuthDiscoveryChanged();
   const exact = await discoverLocalCredential(tx, tokenHash);
   if (!exact || !expected.snapshot.bindings.some(r=>r.token_id===exact.token_id)) throw new LocalAuthDiscoveryChanged();
-  const agent = await lockedCredentialFacts(tx,tokenHash,exact,allowExpiredRenewal,true,expected.connectionOnly===true);
+  const agent = await lockedCredentialFacts(tx,tokenHash,exact,allowExpiredRenewal,true,expected.connectionOnly===true,expected.targetWorkspace ?? null);
   if (agent && !expected.connectionOnly && expected.targetWorkspace) {
     if (!await localCredentialTargetLive(tx,agent,expected.targetWorkspace)) throw new LocalCredentialDenied();
     agent.principal_workspace_id=expected.targetWorkspace;
@@ -93,7 +94,7 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
   if(snapshotKey({...current,objectStreams:initial.objectStreams,todoStreams:initial.todoStreams,todoBindings:initial.todoBindings})!==snapshotKey(initial)) throw new LocalAuthDiscoveryChanged();
   const exact=await discoverLocalCredential(tx,hash);
   if(!exact || !initial.bindings.some(r=>r.token_id===exact.token_id)) throw new LocalAuthDiscoveryChanged();
-  const agent = await lockedCredentialFacts(tx,hash,exact,allowExpiredRenewal,false,plan.connectionOnly===true);
+  const agent = await lockedCredentialFacts(tx,hash,exact,allowExpiredRenewal,false,plan.connectionOnly===true,plan.targetWorkspace ?? null);
   if (agent && !plan.connectionOnly && plan.targetWorkspace) {
     if (!await localCredentialTargetLive(tx,agent,plan.targetWorkspace)) throw new LocalCredentialDenied();
     agent.principal_workspace_id=plan.targetWorkspace;
@@ -101,16 +102,18 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
   return agent;
 }
 async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCredentialIds,
-  allowExpiredRenewal:boolean,stampUse:boolean,connectionOnly=false):Promise<(AgentAuthRow & {first_use:boolean})|null> {
+  allowExpiredRenewal:boolean,stampUse:boolean,connectionOnly=false,targetWorkspace:string|null=null):Promise<(AgentAuthRow & {first_use:boolean})|null> {
   // All waits precede this statement. Family policy, unlike a bearer deadline,
   // is terminal. Expired proof is admitted only for silent renewal; an unused
   // predecessorless root additionally needs the exact permanent family below.
-  const rows = await tx<(AgentAuthRow & { first_use:boolean; eligible_renewal:boolean })[]>`
+  const rows = await tx<(Omit<AgentAuthRow, "ask_lifecycle_epoch"> & { ask_lifecycle_epoch: string | number | null; first_use:boolean; eligible_renewal:boolean })[]>`
     SELECT t.token_id,t.principal_id,t.run_id,r.device_id,p.owner_user_id,
       p.workspace_id AS principal_workspace_id,t.lineage_id,t.scopes,t.surrender_only,
       t.revoked_at AS token_revoked_at,p.revoked_at AS principal_revoked_at,
       r.ended_at AS run_ended_at,d.revoked_at AS device_revoked_at,
       t.expires_at>clock_timestamp() AS unexpired,p.managed_at,p.transport,
+      CASE WHEN ${targetWorkspace}::uuid IS NULL THEN NULL::bigint
+        ELSE swarm.seat_ask_lifecycle_epoch(${targetWorkspace}::uuid, p.principal_id) END AS ask_lifecycle_epoch,
       t.first_used_at IS NULL AS first_use,
       (g.kind='standing' AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
         AND g.connection_expired_at IS NULL AND g.revoked_at IS NULL AND NOT g.suspension_active
@@ -150,8 +153,8 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
         (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
          ('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id),('renewal_grant',t.renewal_grant_id)))`;
-  const agent=rows[0];
-  if(!agent) {
+  const rawAgent=rows[0];
+  if(!rawAgent) {
     const known=await tx<{credential_invalid:boolean}[]>`SELECT
       (t.revoked_at IS NOT NULL OR t.surrender_only OR g.revoked_at IS NOT NULL OR g.suspension_active
         OR g.connection_expired_at IS NOT NULL OR g.connection_expires_at<=clock_timestamp()) IS TRUE AS credential_invalid
@@ -160,6 +163,12 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
     if(known.length) throw new LocalCredentialDenied(known[0]!.credential_invalid);
     return null;
   }
+  const agent: AgentAuthRow & { first_use: boolean; eligible_renewal: boolean } = {
+    ...rawAgent,
+    ask_lifecycle_epoch: rawAgent.ask_lifecycle_epoch === null || rawAgent.ask_lifecycle_epoch === undefined
+      ? null
+      : Number(rawAgent.ask_lifecycle_epoch),
+  };
   if (!agent.unexpired && !(allowExpiredRenewal && agent.eligible_renewal)) return null;
   const recoverPending = allowExpiredRenewal && !agent.unexpired && agent.eligible_renewal && agent.first_use;
   if (stampUse && (agent.unexpired || recoverPending) && agent.first_use) {

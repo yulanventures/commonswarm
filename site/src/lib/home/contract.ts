@@ -185,6 +185,7 @@ export type KnownWaitingArchivedOutcomeKind =
   | 'channel_archived'
   | 'withdrawn'
   | 'replaced'
+  | 'seat_cleared'
   | 'expired';
 export type WaitingArchivedOutcomeKind = KnownWaitingArchivedOutcomeKind | (string & {});
 export type WaitingArchivedPlacement = 'channel' | 'general' | 'dm' | 'group_dm' | 'workspace' | 'redacted';

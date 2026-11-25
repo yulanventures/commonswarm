@@ -71,6 +71,7 @@ export interface ResolvedHostedSeat {
   owner_user_id: string;
   principal_id: string;
   name: string;
+  ask_lifecycle_epoch: number | null;
 }
 
 function grantTool(value: string): value is HostedGrantTool {
@@ -133,29 +134,38 @@ async function resolveSeat(
   if (!allowed || !seatTool(binding.tool) || !await providerActive(binding)) return null;
   const databaseTool = sqlSeatTool(binding.tool, use);
   const rows = use === "command" && binding.tool === "check"
-    ? await tx<ResolvedHostedSeat[]>`
-      SELECT * FROM swarm.resolve_hosted_mcp_check_authorization(
+    ? await tx<(Omit<ResolvedHostedSeat, "ask_lifecycle_epoch"> & { ask_lifecycle_epoch: string | number | null })[]>`
+      SELECT r.*, swarm.seat_ask_lifecycle_epoch(r.workspace_id, r.principal_id) AS ask_lifecycle_epoch
+      FROM swarm.resolve_hosted_mcp_check_authorization(
         ${binding.grantId}::uuid,
         ${binding.handle}
-      )
+      ) AS r
     `
     : use === "command"
-    ? await tx<ResolvedHostedSeat[]>`
-      SELECT * FROM swarm.resolve_hosted_seat_command_authorization(
+    ? await tx<(Omit<ResolvedHostedSeat, "ask_lifecycle_epoch"> & { ask_lifecycle_epoch: string | number | null })[]>`
+      SELECT r.*, swarm.seat_ask_lifecycle_epoch(r.workspace_id, r.principal_id) AS ask_lifecycle_epoch
+      FROM swarm.resolve_hosted_seat_command_authorization(
         ${binding.grantId}::uuid,
         ${binding.handle},
         ${databaseTool}
-      )
+      ) AS r
     `
-    : await tx<ResolvedHostedSeat[]>`
-      SELECT * FROM swarm.resolve_hosted_seat_read_authorization(
+    : await tx<(Omit<ResolvedHostedSeat, "ask_lifecycle_epoch"> & { ask_lifecycle_epoch: string | number | null })[]>`
+      SELECT r.*, NULL::bigint AS ask_lifecycle_epoch
+      FROM swarm.resolve_hosted_seat_read_authorization(
         ${binding.grantId}::uuid,
         ${binding.handle},
         ${databaseTool}
-      )
+      ) AS r
     `;
   const row = rows[0];
-  return row?.provider_grant_id === binding.providerGrantId ? row : null;
+  if (row?.provider_grant_id !== binding.providerGrantId) return null;
+  return {
+    ...row,
+    ask_lifecycle_epoch: row.ask_lifecycle_epoch === null || row.ask_lifecycle_epoch === undefined
+      ? null
+      : Number(row.ask_lifecycle_epoch),
+  };
 }
 
 /**

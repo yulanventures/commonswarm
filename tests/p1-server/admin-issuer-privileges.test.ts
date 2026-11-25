@@ -147,6 +147,11 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.ask_withdrawal_effective_channel_ids(uuid,uuid[])', 'EXECUTE', false],
   // - restore_waiting_item (5-arg): restore bound to a dismissal instance; the four-argument form delegates to it.
   ['swarm_command', 'FUNCTION', 'swarm.restore_waiting_item(uuid,uuid,text,uuid,uuid)', 'EXECUTE', false],
+  // Retired-seat ask clearing (20261125000002): four narrow command-only definers; zero table grants.
+  ['swarm_command', 'FUNCTION', 'swarm.seat_ask_lifecycle_epoch(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.advance_seat_lifecycle_epoch(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.clear_retired_seat_asks(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.seat_ask_clear_release_allowed(uuid,uuid,uuid,bigint,timestampwithtimezone)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'DELETE', false],

@@ -58,12 +58,13 @@ const postNotice: HouseholdTodoNoticePort = async (tx, workspace, identity, inte
   const signal = randomUUID();
   const first = intent.to[0]!;
   await tx`
-    INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until)
+    INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until,sender_lifecycle_epoch)
     VALUES (
       ${signal}::uuid,${workspace}::uuid,${identity.principal_id ?? identity.user_id}::uuid,
       ${identity.principal_id ? "agent" : "user"},
       ${first.kind === "user" ? first.id : null}::uuid,${first.kind === "agent" ? first.id : null}::uuid,
-      ${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day'
+      ${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day',
+      ${identity.principal_id && intent.kind === "ask" ? 1 : null}::bigint
     )
   `;
   for (const [position, to] of intent.to.entries()) {
@@ -812,10 +813,10 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
         INSERT INTO swarm.signals (
-          id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at
+          id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at, sender_lifecycle_epoch
         ) VALUES (
           ${gen1AskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid,
-          'ask', 'Gen 1 group ask: approve boiler?', statement_timestamp() + interval '1 day', statement_timestamp()
+          'ask', 'Gen 1 group ask: approve boiler?', statement_timestamp() + interval '1 day', statement_timestamp(), 1
         )
       `;
       await tx`
@@ -930,10 +931,10 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
       await tx`ALTER TABLE swarm.signal_recipients DISABLE TRIGGER signal_recipients_settle_conversation`;
       await tx`
         INSERT INTO swarm.signals (
-          id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at
+          id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at, sender_lifecycle_epoch
         ) VALUES (
           ${legacyAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid,
-          'ask', 'Legacy unmapped ask control?', statement_timestamp() + interval '1 day', statement_timestamp() - interval '5 seconds'
+          'ask', 'Legacy unmapped ask control?', statement_timestamp() + interval '1 day', statement_timestamp() - interval '5 seconds', 1
         )
       `;
       await tx`

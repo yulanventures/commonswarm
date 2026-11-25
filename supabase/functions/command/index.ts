@@ -267,6 +267,16 @@ import {
   storedAskWithdrawalReplayTarget,
   type WithdrawAskCommand,
 } from "./ask-withdrawals.ts";
+import {
+  applyClearRetiredSeatAsks,
+  type ClearRetiredSeatAsksCommand,
+  isRetiredSeatAskCommandKind,
+  parseRetiredSeatAskCommand,
+  reauthorizeRetiredSeatAskClearReplay,
+  RETIRED_SEAT_ASK_COMMAND_KINDS,
+  retiredSeatAskAuditDetail,
+  retiredSeatAskReplayFields,
+} from "./retired-seat-asks.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
@@ -667,6 +677,7 @@ type ValidatedCommand =
   | ReviewCheckCommand
   | WaitingDismissalCommand
   | WithdrawAskCommand
+  | ClearRetiredSeatAsksCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -1479,6 +1490,7 @@ const COMMAND_KINDS = [
   ...REVIEW_CHECK_COMMAND_KINDS,
   ...WAITING_DISMISSAL_COMMAND_KINDS,
   ...ASK_WITHDRAWAL_COMMAND_KINDS,
+  ...RETIRED_SEAT_ASK_COMMAND_KINDS,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2417,6 +2429,10 @@ function validateCommand(
 
   if (isAskWithdrawalCommandKind(cmd.kind)) {
     return parseAskWithdrawalCommand(cmd);
+  }
+
+  if (isRetiredSeatAskCommandKind(cmd.kind)) {
+    return parseRetiredSeatAskCommand(cmd);
   }
 
   if (cmd.kind === SIGNALS_SEEN_KIND) {
@@ -4459,6 +4475,8 @@ function storedResponse(value: unknown): StoredResponse {
     ...waitingDismissalReplayFields(response),
     // Sender ask withdrawals & replace (supersedes): preserve withdrawal/replace replay fields.
     ...askWithdrawalReplayFields(response),
+    // Retired/disconnected seat ask clearing: blind wire fields only (strips internal cutoff_epoch).
+    ...retiredSeatAskReplayFields(response),
   };
 }
 
@@ -4636,6 +4654,7 @@ function hostedSeatAuth(seat: ResolvedHostedSeat): AuthContext {
     unexpired: true,
     managed_at: null,
     transport: "hosted_mcp",
+    ask_lifecycle_epoch: seat.ask_lifecycle_epoch,
   };
   return {
     credentialKind: "hosted_seat",
@@ -6581,6 +6600,7 @@ async function updateWorkspaceProjection(
           ${grantId}::uuid
         )
       `;
+      await tx`SELECT swarm.advance_seat_lifecycle_epoch(${token.principal_id}::uuid, NULL::uuid)`;
     }
   }
   return projection;
@@ -8985,6 +9005,7 @@ async function reconnectExistingAgentSeat(
       ${grantId}::uuid
     )
   `;
+  await tx`SELECT swarm.advance_seat_lifecycle_epoch(${principalId}::uuid, NULL::uuid)`;
   const spent = await tx<{ seats_used: number }[]>`
     UPDATE swarm.agent_join_credentials
     SET seats_used = seats_used + 1
@@ -10931,16 +10952,18 @@ async function resumeRenewalGrant(
     );
   }
 
-  const resumedRows = await tx<{ resumed_at: Date }[]>`
-    SELECT resumed_at
+  const resumedRows = await tx<{ principal_id: string; resumed_at: Date }[]>`
+    SELECT principal_id, resumed_at
     FROM swarm.renewal_grants
     WHERE renewal_grant_id = ${renewalGrantId}::uuid
       AND workspace_id = ${workspaceId}::uuid
   `;
   const resumedAt = resumedRows[0]?.resumed_at;
-  if (!resumedAt) {
+  const resumedPrincipalId = resumedRows[0]?.principal_id;
+  if (!resumedAt || !resumedPrincipalId) {
     throw new Error("grant resume reported success without a resumed_at stamp");
   }
+  await tx`SELECT swarm.advance_seat_lifecycle_epoch(${resumedPrincipalId}::uuid, NULL::uuid)`;
 
   const response: StoredResponse = {
     ok: true,
@@ -13519,7 +13542,8 @@ async function postSignal(
         to_user_id, to_agent_principal_id, in_reply_to, reply_status,
         about, kind, body, until, created_at,
         channel_id, thread_root_id, broadcast_to_channel,
-        parent_signal_id, chain_root_id, chain_hop, chain_participants
+        parent_signal_id, chain_root_id, chain_hop, chain_participants,
+        sender_lifecycle_epoch
       )
     /* SELECT ... WHERE, not VALUES, so the thread horizon and every declared
      * parent rule are evaluated in the writing statement. A handler pre-check
@@ -13545,7 +13569,10 @@ async function postSignal(
         ${parentSignalId}::uuid,
         chain.chain_root_id,
         chain.chain_hop,
-        chain.chain_participants
+        chain.chain_participants,
+        ${signalCredentialKind === "agent" && command.signal_kind === "ask"
+          ? auth.agent?.ask_lifecycle_epoch ?? null
+          : null}::bigint
       FROM candidate
       CROSS JOIN chain_context AS chain
       WHERE (
@@ -14081,7 +14108,6 @@ async function reraiseAsk(
     thread_root_id: string | null;
     live: boolean;
     withdrawn: boolean;
-    answered: boolean;
     too_soon: boolean;
     next_allowed_at: Date | null;
   }[]>`
@@ -14089,7 +14115,6 @@ async function reraiseAsk(
       s.channel_id, s.thread_root_id,
       s.until > statement_timestamp() AS live,
       swarm.ask_is_withdrawn(s.workspace_id, s.id) AS withdrawn,
-      swarm.ask_answered(s.workspace_id, s.id) AS answered,
       coalesce(x.last_raised_at > statement_timestamp() - interval '24 hours', false) AS too_soon,
       x.last_raised_at + interval '24 hours' AS next_allowed_at
     FROM swarm.signals s
@@ -14126,7 +14151,10 @@ async function reraiseAsk(
     return decided({ status: 409, body: { error: "ask_expired",
       message: "That ask has expired, so it can't be re-raised. Send a new ask if it still matters." } });
   }
-  if (ask.answered) {
+  const [answeredRow] = await tx<{ answered: boolean }[]>`
+    SELECT swarm.ask_answered(${route.workspaceId}::uuid, ${ask.id}::uuid) AS answered
+  `;
+  if (answeredRow?.answered) {
     await audit("domain", "reraise_ask_answered");
     return decided({ status: 409, body: { error: "ask_answered",
       message: "That ask already has an answer, so there's nothing to re-raise." } });
@@ -15078,13 +15106,13 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
   const [ask] = await tx<{
     id: string; from_kind: "user" | "agent"; from_principal: string; to_user_id: string | null;
     to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
-    until: Date; live: boolean; withdrawn: boolean; answered: boolean; options: ChoiceOption[]; multi: boolean;
+    until: Date; live: boolean; withdrawn: boolean; options: ChoiceOption[]; multi: boolean;
     channel_visibility: ChannelVisibility | null; channel_archived_at: Date | null;
   }[]>`
     SELECT s.id, s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id,
       s.thread_root_id, s.until, s.until > statement_timestamp() AS live,
       swarm.ask_is_withdrawn(s.workspace_id, s.id) AS withdrawn,
-      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options, c.multi,
+      c.options, c.multi,
       ch.visibility AS channel_visibility, ch.archived_at AS channel_archived_at
     FROM swarm.ask_choices c
     JOIN swarm.signals s ON s.id = c.signal_id AND s.workspace_id = c.workspace_id
@@ -15170,10 +15198,14 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     return ctx.decided({ status, body: { error, message } });
   };
   // The canonical answered rule (a typed reply counts) or an earlier completed choice: too late.
-  const [won] = await tx<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM swarm.ui_actions WHERE signal_id = ${ask.id}::uuid AND state = 'completed'
+  const [completion] = await tx<{ n: number; answered: boolean }[]>`
+    SELECT
+      (SELECT count(*)::int FROM swarm.ui_actions WHERE signal_id = ${ask.id}::uuid AND state = 'completed') AS n,
+      swarm.ask_answered(${route.workspaceId}::uuid, ${ask.id}::uuid) AS answered
   `;
-  if (ask.answered || won!.n > 0) return await fail(409, "ask_answered", "This ask already has an answer.");
+  if (completion!.answered || completion!.n > 0) {
+    return await fail(409, "ask_answered", "This ask already has an answer.");
+  }
   if (unknownIds.length > 0) return await fail(400, "unknown_option", "That isn't one of this ask's choices.");
   if (!ask.multi && optionIds.length + (command.other_text === null ? 0 : 1) !== 1) {
     return await fail(400, "one_answer_only", "This ask takes one answer: one choice, or Other text.");
@@ -16109,6 +16141,22 @@ async function handleHostedManagement(
           ${folded.consent_receipt_id}::uuid, ${new Date(folded.consented_at)}, NULL
         )
       `;
+      const consentedSeats = await tx<{ workspace_id: string; principal_id: string }[]>`
+        SELECT DISTINCT am.workspace_id, am.principal_id
+        FROM swarm.hosted_mcp_grant_agents AS ga
+        JOIN swarm.agent_workspace_memberships AS am
+          ON am.principal_id = ga.principal_id
+         AND am.owner_user_id = ga.owner_user_id
+        WHERE ga.grant_id = ${folded.grant_id}::uuid
+          AND ga.owner_user_id = ${folded.owner_user_id}::uuid
+          AND ga.revoked_at IS NULL
+          AND am.workspace_id = ${folded.workspace_id}::uuid
+          AND am.revoked_at IS NULL
+        ORDER BY am.workspace_id ASC, am.principal_id ASC
+      `;
+      for (const boundSeat of consentedSeats) {
+        await tx`SELECT swarm.advance_seat_lifecycle_epoch(${boundSeat.principal_id}::uuid, ${boundSeat.workspace_id}::uuid)`;
+      }
     } else if (event.type === "HostedMcpGrantActivated") {
       if (grant === null) throw new Error("activation event has no grant projection");
       const folded = reduceHostedAuthority(hostedProjectionBefore(grant), event)
@@ -16122,6 +16170,23 @@ async function handleHostedManagement(
       `;
       // A reconnect from the same client restores agents stranded by a retired refresh family.
       await tx`SELECT swarm.inherit_stranded_hosted_agents(${command.grant_id}::uuid)`;
+      const activatedWorkspaces = [...new Set([route.workspaceId, ...grant.selected_workspace_ids])];
+      const activatedSeats = await tx<{ workspace_id: string; principal_id: string }[]>`
+        SELECT DISTINCT am.workspace_id, am.principal_id
+        FROM swarm.hosted_mcp_grant_agents AS ga
+        JOIN swarm.agent_workspace_memberships AS am
+          ON am.principal_id = ga.principal_id
+         AND am.owner_user_id = ga.owner_user_id
+        WHERE ga.grant_id = ${command.grant_id}::uuid
+          AND ga.owner_user_id = ${grant.owner_user_id}::uuid
+          AND ga.revoked_at IS NULL
+          AND am.workspace_id = ANY(${activatedWorkspaces}::uuid[])
+          AND am.revoked_at IS NULL
+        ORDER BY am.workspace_id ASC, am.principal_id ASC
+      `;
+      for (const activatedSeat of activatedSeats) {
+        await tx`SELECT swarm.advance_seat_lifecycle_epoch(${activatedSeat.principal_id}::uuid, ${activatedSeat.workspace_id}::uuid)`;
+      }
     } else if (event.type === "HostedMcpGrantRevoked") {
       if (grant === null) throw new Error("revocation event has no grant projection");
       const folded = reduceHostedAuthority(hostedProjectionBefore(grant), event)
@@ -16656,6 +16721,9 @@ async function claimHostedSeat(
           ${new Date(foldedSeat.created_at)}, NULL
         )
       `;
+      if (input.command.agent_id) {
+        await tx`SELECT swarm.advance_seat_lifecycle_epoch(${principalId}::uuid, ${route.workspaceId}::uuid)`;
+      }
       await appendRegistrationEvents(tx, route, frame, decision.events);
     }
     const response: StoredResponse = {
@@ -16844,6 +16912,26 @@ async function handleTransaction(
           return 'business-refusal';
         if (target.transport==='local' && target.workspace_id!==localWorkspace && target.owner_user_id!==verifiedHuman.userId) return 'forbidden';
       }
+      if (kind==='clear_retired_seat_asks') {
+        if (!targetPrincipal) return 'business-refusal';
+        const [target]=await tx<{owner_user_id:string}[]>`
+          SELECT ap.owner_user_id
+          FROM swarm.agent_workspace_memberships AS am
+          JOIN swarm.agent_principals AS ap
+            ON ap.principal_id = am.principal_id
+           AND ap.owner_user_id = am.owner_user_id
+          WHERE am.workspace_id = ${localWorkspace}::uuid
+            AND am.principal_id = ${targetPrincipal}::uuid
+            AND NOT EXISTS (
+              SELECT 1
+              FROM swarm.agent_join_credentials AS jc
+              WHERE jc.registrar_principal_id = ap.principal_id
+            )
+        `;
+        if (!target || (target.owner_user_id !== verifiedHuman.userId && !['owner','admin'].includes(admission.role))) {
+          return 'business-refusal';
+        }
+      }
       return 'allowed';
     };
     const humanAdmission = await humanLocalAdmission();
@@ -16859,6 +16947,40 @@ async function handleTransaction(
       || agentTokenHash !== null && kind==='change_role'
       // Seat admin kinds not executed in 2b refuse after authentication without locking their targets.
       || seatAdminAgent && !SEAT_ADMIN_EXECUTED_KIND_SET.has(kind);
+    let clearSeatReplay = false;
+    let clearSeatMemberTargets: string[] = [];
+    if (verifiedHuman !== null && localWorkspace && kind === "clear_retired_seat_asks") {
+      if (COMMAND_ID_RE.test(commandId)) {
+        const [existingClear] = await tx<{ command_id: string }[]>`
+          SELECT command_id
+          FROM swarm.idempotency_keys
+          WHERE principal_kind = 'user'
+            AND principal_id = ${verifiedHuman.userId}
+            AND command_id = ${commandId}
+          LIMIT 1
+        `;
+        clearSeatReplay = existingClear !== undefined;
+      }
+      if (!clearSeatReplay && !actorOnlyRefusal && typeof rawLocal?.principal_id === "string" && UUID_RE.test(rawLocal.principal_id)) {
+        const [clearTarget] = await tx<{ owner_user_id: string }[]>`
+          SELECT ap.owner_user_id
+          FROM swarm.agent_workspace_memberships AS am
+          JOIN swarm.agent_principals AS ap
+            ON ap.principal_id = am.principal_id
+           AND ap.owner_user_id = am.owner_user_id
+          WHERE am.workspace_id = ${localWorkspace}::uuid
+            AND am.principal_id = ${rawLocal.principal_id}::uuid
+            AND NOT EXISTS (
+              SELECT 1
+              FROM swarm.agent_join_credentials AS jc
+              WHERE jc.registrar_principal_id = ap.principal_id
+            )
+        `;
+        if (clearTarget && clearTarget.owner_user_id !== verifiedHuman.userId) {
+          clearSeatMemberTargets = [clearTarget.owner_user_id];
+        }
+      }
+    }
     if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
       || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
       return {status:400,body:{error:'invalid_request'}};
@@ -16917,11 +17039,13 @@ async function handleTransaction(
     const args=record(rawLocal?.arguments) ?? rawLocal;
     const consent=record(rawLocal?.connection);
     const principalTargets=new Set<string>();
-    for (const value of [rawLocal?.principal_id,args?.principal_id,consent?.principal_id,
-      record(args?.assignee)?.kind==='agent' ? record(args?.assignee)?.id:null,
-      record(args?.to)?.kind==='agent' ? record(args?.to)?.id:null,
-      record(record(args?.assign)?.to)?.kind==='agent' ? record(record(args?.assign)?.to)?.id:null]) {
-      if(!actorOnlyRefusal && typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
+    if (kind !== "clear_retired_seat_asks") {
+      for (const value of [rawLocal?.principal_id,args?.principal_id,consent?.principal_id,
+        record(args?.assignee)?.kind==='agent' ? record(args?.assignee)?.id:null,
+        record(args?.to)?.kind==='agent' ? record(args?.to)?.id:null,
+        record(record(args?.assign)?.to)?.kind==='agent' ? record(record(args?.assign)?.to)?.id:null]) {
+        if(!actorOnlyRefusal && typeof value==='string' && UUID_RE.test(value)) principalTargets.add(value);
+      }
     }
     // Existing to-do assignment is DB-owned metadata, reselected after each wait.
     const todoId=!actorOnlyRefusal && typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
@@ -16957,6 +17081,7 @@ async function handleTransaction(
       "claim_wake_lease",
       "renew_wake_lease",
       "release_wake_lease",
+      "clear_retired_seat_asks",
     ].includes(kind);
     const isOperationalWorkspaceKind =
       isNonStreamWorkspaceKind || kind === RENEW_AGENT_TOKEN_KIND;
@@ -17013,11 +17138,13 @@ async function handleTransaction(
         household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
         streamIds: isNonStreamWorkspaceKind ? [] : localStreams.map(r=>r.stream_id),
         workspaceMode: household || revocation || localExpiry
-          || (verifiedHuman && kind !== SIGNALS_SEEN_KIND) || seatAdminAgent
+          || (verifiedHuman && kind !== SIGNALS_SEEN_KIND && kind !== "post_signal" && kind !== "ask_choice" && kind !== "answer_choice" && kind !== "clear_retired_seat_asks") || seatAdminAgent
           || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && !isOperationalWorkspaceKind ? 'update':'share',
         ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
         ...(revocation ? {revocation}:{}),
-        memberTargets:removeUser ? [removeUser] : !actorOnlyRefusal && kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
+        memberTargets:removeUser ? [removeUser]
+          : !actorOnlyRefusal && kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]
+          : clearSeatMemberTargets,
         // Seat admin: the grantor's admin account and the agent's grants lock right after users, and every principal
         // (the actor and any target) FOR UPDATE: the serialization point #353's grant and end use.
         ...(seatAdminAgent ? {seatAdmin:true}:{}),
@@ -17903,6 +18030,68 @@ async function handleTransaction(
         kind === RENEW_AGENT_TOKEN_KIND &&
         await strandedSuccessorOf(tx, existing.response) !== null;
       if (!recovering) {
+        if (isRetiredSeatAskCommandKind(kind)) {
+          if (!matches) {
+            await insertAudit(tx, {
+              auth,
+              commandKind: kind,
+              workspaceId: route.workspaceId,
+              streamId: route.streamId,
+              outcome: "conflict",
+              reason: "command_id_conflict",
+              detail: ignoredIdentity,
+              hash,
+              channelIds: undefined,
+            });
+            return decided({ status: 409, body: { error: "command_id_conflict" } });
+          }
+          const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+          if (viewer === null) {
+            return { status: 403, body: { error: "forbidden" } };
+          }
+          const clearCmd = command as ClearRetiredSeatAsksCommand;
+          const reauthorizedClear = await reauthorizeRetiredSeatAskClearReplay(
+            tx,
+            route.workspaceId,
+            viewer,
+            record(existing.response) ?? {},
+            clearCmd.principal_id,
+          );
+          if (reauthorizedClear !== null) {
+            await insertAudit(tx, {
+              auth,
+              commandKind: kind,
+              workspaceId: route.workspaceId,
+              streamId: route.streamId,
+              outcome: "authz",
+              reason: "seat_not_found",
+              detail: ignoredIdentity,
+              hash,
+              channelIds: undefined,
+            });
+            return reauthorizedClear;
+          }
+          await insertAudit(tx, {
+            auth,
+            commandKind: kind,
+            workspaceId: route.workspaceId,
+            streamId: route.streamId,
+            outcome: "replayed",
+            reason: null,
+            detail: retiredSeatAskAuditDetail(clearCmd.principal_id, ignoredIdentity),
+            hash,
+            channelIds: undefined,
+          });
+          return decided({
+            status: 200,
+            body: {
+              status: "accepted",
+              ...storedResponse(existing.response),
+              events: [],
+              min_client_version: minClientVersion,
+            },
+          });
+        }
         const replayChannelIds = await replayAuditChannelIds(
           tx,
           existing.workspace_id,
@@ -18615,6 +18804,83 @@ async function handleTransaction(
         body: {
           status: "accepted",
           ...response,
+          events: [],
+          min_client_version: minClientVersion,
+        },
+      };
+    }
+
+    if (isRetiredSeatAskCommandKind(command.kind)) {
+      const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+      if (viewer === null) {
+        return { status: 403, body: { error: "forbidden" } };
+      }
+      const clearCmd = command as ClearRetiredSeatAsksCommand;
+      const outcome = await applyClearRetiredSeatAsks(
+        tx,
+        route.workspaceId,
+        viewer,
+        clearCmd.principal_id,
+      );
+      if (!outcome.ok) {
+        await insertAudit(tx, {
+          auth,
+          commandKind: kind,
+          workspaceId: route.workspaceId,
+          streamId: route.streamId,
+          outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
+          reason: outcome.reason,
+          detail: ignoredIdentity,
+          hash,
+          channelIds: undefined,
+        });
+        const refusal: HttpResult = {
+          status: outcome.status,
+          body: { error: outcome.error, message: outcome.message },
+        };
+        return outcome.status === 404 ? refusal : decided(refusal);
+      }
+      const stored: StoredResponse = {
+        ok: true,
+        event_ids: [],
+        ...outcome.storedResponse,
+      };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(stored as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth,
+        commandKind: kind,
+        workspaceId: route.workspaceId,
+        streamId: route.streamId,
+        outcome: "accepted",
+        detail: retiredSeatAskAuditDetail(clearCmd.principal_id, ignoredIdentity),
+        hash,
+        channelIds: undefined,
+      });
+      return {
+        status: 200,
+        body: {
+          status: "accepted",
+          ok: true,
+          event_ids: [],
+          ...outcome.wireResponse,
           events: [],
           min_client_version: minClientVersion,
         },
@@ -20873,6 +21139,18 @@ async function handleTransaction(
           localState.hostedAgent.workspaceId,
           localState.hostedAgent.principalId,
         );
+      }
+    }
+    if (
+      hostedSeatCapability !== null &&
+      localState.hostedAgent !== null &&
+      (kind === "post_signal" || kind === "ask_choice") &&
+      result.status >= 200 &&
+      result.status < 300
+    ) {
+      const finalHostedSeat = await revalidateHostedSeatCommand(tx, hostedSeatCapability);
+      if (finalHostedSeat === null) {
+        throw new LocalCommandRefused({ status: 403, body: { error: "forbidden" } });
       }
     }
     if (agentTokenHash!==null && localState.localPlan && localState.authenticatedAgent && !['renew_agent_token','revoke_agent_token','revoke_agent_principal','acquire_agent_session','release_agent_session'].includes(kind)) {

@@ -830,7 +830,9 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "set_channel_lead",
   // Per-person Waiting on you dismissals (its own command module, never available to agents).
   "dismiss_waiting_item",
-  "restore_waiting_item"
+  "restore_waiting_item",
+  // Blind retired/disconnected seat ask clearing (human-only, never available to agents or seat admins).
+  "clear_retired_seat_asks"
 ]);
 function isAgentScopeDenylisted(scope) {
   const words = scopeWords(scope);

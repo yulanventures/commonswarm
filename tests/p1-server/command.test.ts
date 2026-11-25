@@ -2226,7 +2226,7 @@ test("wake-relation-contract: sender_owner_relation matrix, capabilities, and cu
         INSERT INTO swarm.signals (
           id, workspace_id, from_principal, from_kind,
           to_user_id, to_agent_principal_id, in_reply_to,
-          about, kind, body, until
+          about, kind, body, until, sender_lifecycle_epoch
         ) VALUES (
           ${unknownSignalId}::uuid,
           ${f.workspaceA}::uuid,
@@ -2238,7 +2238,8 @@ test("wake-relation-contract: sender_owner_relation matrix, capabilities, and cu
           'wake-relation',
           'ask',
           'relation-unresolved-agent',
-          statement_timestamp() + interval '1 day'
+          statement_timestamp() + interval '1 day',
+          1
         )
       `;
       await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");

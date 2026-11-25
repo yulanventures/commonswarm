@@ -401,12 +401,14 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       try {
         await sql`INSERT INTO swarm.signals (
             id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
-            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel,
+            sender_lifecycle_epoch
           ) VALUES (
             ${id}::uuid, ${workspace}::uuid, ${from.id}::uuid, ${from.kind}, ${dmToUser}::uuid, ${dmToAgent}::uuid,
             ${root?.id ?? null}::uuid, ${i % 5 === 0 ? "site/src/components/app" : null}, ${kind}, ${BODIES[i % BODIES.length]!},
             statement_timestamp() - (${minutesAgo} * interval '1 minute') + interval '25 days', statement_timestamp() - (${minutesAgo} * interval '1 minute'),
-            ${channel}::uuid, ${root?.id ?? null}::uuid, false)`;
+            ${channel}::uuid, ${root?.id ?? null}::uuid, false,
+            ${from.kind === "agent" && kind === "ask" ? 1 : null}::bigint)`;
         inserted += 1;
         if (!root && !dmToAgent && !dmToUser) roots.push({ id, channel });
         if (root) ids["message.thread"] ??= root.id;
@@ -729,39 +731,40 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           await sql.begin(async (tx) => {
             await tx`INSERT INTO swarm.signals (
                 id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
-                about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+                about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel,
+                sender_lifecycle_epoch
               ) VALUES (
                 ${expired}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
                 NULL, 'ask', 'Should I book the chimney sweep for this week?',
-                statement_timestamp() - interval '1 minute', statement_timestamp() - interval '7 minutes', ${channel}::uuid, NULL, false
+                statement_timestamp() - interval '1 minute', statement_timestamp() - interval '7 minutes', ${channel}::uuid, NULL, false, 1
               ), (
                 ${answered}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
                 NULL, 'ask', 'When should I send the boiler quotes to everyone?',
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 minutes', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 minutes', ${channel}::uuid, NULL, false, 1
               ), (
                 ${reply}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent!}::uuid, ${answered}::uuid,
                 NULL, 'note', 'Selected: Tomorrow',
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '350 seconds', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '350 seconds', ${channel}::uuid, NULL, false, NULL
               ), (
                 ${multiAnswered}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
                 NULL, 'ask', 'Which doors should I leave unlocked for the delivery?',
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '5 minutes', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '5 minutes', ${channel}::uuid, NULL, false, 1
               ), (
                 ${multiReply}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent!}::uuid, ${multiAnswered}::uuid,
                 NULL, 'note', ${`Selected: Hallway, Meter cupboard\nOther: ${multiOther}`},
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '290 seconds', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '290 seconds', ${channel}::uuid, NULL, false, NULL
               ), (
                 ${long}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
                 NULL, 'ask', 'Which boiler visit should I book? The quotes differ in what they cover.',
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '4 minutes', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '4 minutes', ${channel}::uuid, NULL, false, 1
               ), (
                 ${open}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
                 NULL, 'ask', 'Which boiler service quote should I book?',
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '3 minutes', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '3 minutes', ${channel}::uuid, NULL, false, 1
               ), (
                 ${multi}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
                 NULL, 'ask', ${"The engineer arrives on Friday at 9am and needs room to work around the pipes.\n\nWhich spaces should be clear for the engineer?"},
-                statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes', ${channel}::uuid, NULL, false
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes', ${channel}::uuid, NULL, false, 1
               )`;
             for (const row of [{ id: expired, options: plain, multi: false }, { id: answered, options: plain, multi: false },
               { id: multiAnswered, options: rooms, multi: true }, { id: long, options: longest, multi: false },

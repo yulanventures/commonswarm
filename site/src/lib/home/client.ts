@@ -377,7 +377,7 @@ export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): Waitin
 const WAITING_ARCHIVED_KINDS = new Set<WaitingArchivedKind>(['ask', 'todo', 'review']);
 export const WAITING_ARCHIVED_OUTCOMES = new Set<KnownWaitingArchivedOutcomeKind>([
   'answered', 'approved', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed',
-  'agent_removed', 'sender_left', 'channel_archived', 'withdrawn', 'replaced', 'expired',
+  'agent_removed', 'sender_left', 'channel_archived', 'withdrawn', 'replaced', 'seat_cleared', 'expired',
 ]);
 const WAITING_ARCHIVED_PLACEMENTS = new Set<WaitingArchivedPlacement>(['channel', 'general', 'dm', 'group_dm', 'workspace', 'redacted']);
 

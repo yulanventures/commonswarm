@@ -48,6 +48,9 @@ function signalSql(workspace: string, from: string, id: string, fields: Record<s
     id: `'${id}'`, workspace_id: `'${workspace}'`, from_principal: `'${from}'`, from_kind: "'user'", kind: "'note'",
     body: "'Synthetic message'", created_at: "statement_timestamp()-interval '1 minute'", until: "statement_timestamp()+interval '1 day'", ...fields,
   };
+  if (values.from_kind === "'agent'" && values.kind === "'ask'") {
+    values.sender_lifecycle_epoch ??= "1";
+  }
   return `INSERT INTO swarm.signals(${Object.keys(values).join(',')}) VALUES (${Object.values(values).join(',')});`;
 }
 function localCredential(workspace: string, owner: string, principal: string) {

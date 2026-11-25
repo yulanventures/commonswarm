@@ -57,12 +57,13 @@ const postNotice: HouseholdTodoNoticePort = async (tx, workspace, identity, inte
   const signal = randomUUID();
   const first = intent.to[0]!;
   await tx`
-    INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until)
+    INSERT INTO swarm.signals(id,workspace_id,from_principal,from_kind,to_user_id,to_agent_principal_id,about,kind,body,until,sender_lifecycle_epoch)
     VALUES (
       ${signal}::uuid,${workspace}::uuid,${identity.principal_id ?? identity.user_id}::uuid,
       ${identity.principal_id ? "agent" : "user"},
       ${first.kind === "user" ? first.id : null}::uuid,${first.kind === "agent" ? first.id : null}::uuid,
-      ${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day'
+      ${intent.about},${intent.kind},${intent.body},statement_timestamp()+interval '1 day',
+      ${identity.principal_id && intent.kind === "ask" ? 1 : null}::bigint
     )
   `;
   for (const [position, to] of intent.to.entries()) {
@@ -260,16 +261,16 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`SET LOCAL ROLE swarm_command`;
 
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${choiceAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Which boiler options?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-300)}::timestamptz),
-          (${plainAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Should we schedule Tuesday?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-290)}::timestamptz),
-          (${staleAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Old quote question?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-280)}::timestamptz),
-          (${openAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Still open question?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-270)}::timestamptz),
-          (${privAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Private vault ask?', ${chPriv}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-260)}::timestamptz),
-          (${gen1MayaAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered before leave?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-250)}::timestamptz),
-          (${gen1PostLeaveAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered after leave?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-240)}::timestamptz),
-          (${noConsentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${noConsentId}::uuid, 'ask', 'No-consent ask?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-230)}::timestamptz)
+          (${choiceAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Which boiler options?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-300)}::timestamptz, 1),
+          (${plainAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Should we schedule Tuesday?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-290)}::timestamptz, 1),
+          (${staleAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Old quote question?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-280)}::timestamptz, 1),
+          (${openAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Still open question?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-270)}::timestamptz, 1),
+          (${privAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Private vault ask?', ${chPriv}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-260)}::timestamptz, 1),
+          (${gen1MayaAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered before leave?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-250)}::timestamptz, 1),
+          (${gen1PostLeaveAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered after leave?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-240)}::timestamptz, 1),
+          (${noConsentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${noConsentId}::uuid, 'ask', 'No-consent ask?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-230)}::timestamptz, 1)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
@@ -693,12 +694,12 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`SET CONSTRAINTS ALL DEFERRED`;
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${crossDmAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Public ask answered in Maya-Scout DM?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-220)}::timestamptz),
-          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${mayaId}::uuid, 'ask', 'Public ask answered in private vault?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-215)}::timestamptz),
-          (${crossUiAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Choice ask with ui_action reply in Maya-Scout DM?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-210)}::timestamptz),
-          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Unmapped ask with unmapped reply to revoked Scout?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-205)}::timestamptz)
+          (${crossDmAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Public ask answered in Maya-Scout DM?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-220)}::timestamptz, 1),
+          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${mayaId}::uuid, 'ask', 'Public ask answered in private vault?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-215)}::timestamptz, 1),
+          (${crossUiAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Choice ask with ui_action reply in Maya-Scout DM?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-210)}::timestamptz, 1),
+          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Unmapped ask with unmapped reply to revoked Scout?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-205)}::timestamptz, 1)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)

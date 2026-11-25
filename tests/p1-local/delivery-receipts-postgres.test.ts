@@ -187,7 +187,7 @@ test("delivery receipt authorization matrix holds on real Postgres", async () =>
         await tx`
           INSERT INTO swarm.signals (
             id, workspace_id, from_principal, from_kind,
-            to_agent_principal_id, kind, body, until
+            to_agent_principal_id, kind, body, until, sender_lifecycle_epoch
           ) VALUES
             (
               ${agentSignal}::uuid,
@@ -197,7 +197,8 @@ test("delivery receipt authorization matrix holds on real Postgres", async () =>
               ${recipient}::uuid,
               'ask',
               'agent addressed',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour',
+              1
             ),
             (
               ${humanSignal}::uuid,
@@ -207,7 +208,8 @@ test("delivery receipt authorization matrix holds on real Postgres", async () =>
               ${recipient}::uuid,
               'note',
               'human addressed',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour',
+              NULL
             ),
             (
               ${broadcastSignal}::uuid,
@@ -217,7 +219,8 @@ test("delivery receipt authorization matrix holds on real Postgres", async () =>
               NULL,
               'note',
               'agent broadcast',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour',
+              NULL
             )
         `;
 
@@ -486,37 +489,37 @@ test("human seen upsert keeps first time and receipt reads keep the authorizatio
         await tx`
           INSERT INTO swarm.signals (
             id, workspace_id, from_principal, from_kind,
-            to_user_id, to_agent_principal_id, kind, body, until
+            to_user_id, to_agent_principal_id, kind, body, until, sender_lifecycle_epoch
           ) VALUES
             (
               ${directSignal}::uuid, ${workspaceId}::uuid, ${sender}::uuid, 'agent',
               ${userId}::uuid, NULL, 'ask', 'direct to recipient',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour', 1
             ),
             (
               ${broadcastSignal}::uuid, ${workspaceId}::uuid, ${sender}::uuid, 'agent',
               NULL, NULL, 'note', 'broadcast to members',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour', NULL
             ),
             (
               ${otherHumanSignal}::uuid, ${workspaceId}::uuid, ${sender}::uuid, 'agent',
               ${otherMemberId}::uuid, NULL, 'ask', 'direct to another member',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour', 1
             ),
             (
               ${agentSignal}::uuid, ${workspaceId}::uuid, ${sender}::uuid, 'agent',
               NULL, ${agentRecipient}::uuid, 'ask', 'direct to an agent',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour', 1
             ),
             (
               ${revokedSignal}::uuid, ${workspaceId}::uuid, ${sender}::uuid, 'agent',
               ${revokedMemberId}::uuid, NULL, 'ask', 'direct to revoked member',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour', 1
             ),
             (
               ${foreignSignal}::uuid, ${otherWorkspaceId}::uuid, ${userId}::uuid, 'user',
               ${userId}::uuid, NULL, 'note', 'foreign workspace row',
-              statement_timestamp() + interval '1 hour'
+              statement_timestamp() + interval '1 hour', NULL
             )
         `;
 
