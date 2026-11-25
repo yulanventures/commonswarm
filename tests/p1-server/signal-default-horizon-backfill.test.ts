@@ -212,28 +212,28 @@ test("20261120000007 W1 pre-edge path: sub-ms clamped replies, explicit/expired 
       await tx`SET LOCAL ROLE swarm_command`;
 
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${explicit3dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Explicit 3d ask?', ${chId}::uuid, ${iso(explicit3dAskUntil)}::timestamptz, ${iso(explicit3dAskCreated)}::timestamptz),
-          (${subMsDefault7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Pre-C6 sub-ms default 7d open ask?', ${chId}::uuid, ${subMsRootUntilIso}::timestamptz, ${subMsRootCreatedIso}::timestamptz),
-          (${default7dSoonAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Default 7d ask expiring soon?', ${chId}::uuid, ${iso(default7dSoonUntil)}::timestamptz, ${iso(default7dSoonCreated)}::timestamptz),
-          (${default30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 sub-ms default 30d open note', ${chId}::uuid, ${note30dUntilIso}::timestamptz, ${note30dCreatedIso}::timestamptz),
-          (${expiredDefault7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Already expired default 7d ask?', ${chId}::uuid, ${iso(expiredAskUntil)}::timestamptz, ${iso(expiredAskCreated)}::timestamptz),
-          (${expiredDefault30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Already expired default 30d note', ${chId}::uuid, ${iso(expiredNoteUntil)}::timestamptz, ${iso(expiredNoteCreated)}::timestamptz),
-          (${workingOnStandaloneId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', NULL, 'working-on', 'Active working-on status', ${chId}::uuid, ${iso(workingOnStandaloneUntil)}::timestamptz, ${iso(workingOnStandaloneCreated)}::timestamptz)
+          (${explicit3dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Explicit 3d ask?', ${chId}::uuid, ${iso(explicit3dAskUntil)}::timestamptz, ${iso(explicit3dAskCreated)}::timestamptz, 1),
+          (${subMsDefault7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Pre-C6 sub-ms default 7d open ask?', ${chId}::uuid, ${subMsRootUntilIso}::timestamptz, ${subMsRootCreatedIso}::timestamptz, 1),
+          (${default7dSoonAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Default 7d ask expiring soon?', ${chId}::uuid, ${iso(default7dSoonUntil)}::timestamptz, ${iso(default7dSoonCreated)}::timestamptz, 1),
+          (${default30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 sub-ms default 30d open note', ${chId}::uuid, ${note30dUntilIso}::timestamptz, ${note30dCreatedIso}::timestamptz, NULL),
+          (${expiredDefault7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Already expired default 7d ask?', ${chId}::uuid, ${iso(expiredAskUntil)}::timestamptz, ${iso(expiredAskCreated)}::timestamptz, 1),
+          (${expiredDefault30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Already expired default 30d note', ${chId}::uuid, ${iso(expiredNoteUntil)}::timestamptz, ${iso(expiredNoteCreated)}::timestamptz, NULL),
+          (${workingOnStandaloneId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', NULL, 'working-on', 'Active working-on status', ${chId}::uuid, ${iso(workingOnStandaloneUntil)}::timestamptz, ${iso(workingOnStandaloneCreated)}::timestamptz, NULL)
       `;
 
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, kind, body, channel_id, thread_root_id, in_reply_to, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, kind, body, channel_id, thread_root_id, in_reply_to, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${clampedReplyOnExplicit3dAskId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'Clamped reply on explicit 3d ask', ${chId}::uuid, ${explicit3dAskId}::uuid, NULL, ${iso(explicit3dAskUntil)}::timestamptz, ${iso(clampedOn3dCreated)}::timestamptz),
-          (${default30dInReplyToNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, ${agentId}::uuid, 'note', 'Pre-C6 non-threaded default 30d reply note', ${chId}::uuid, NULL, ${explicit3dAskId}::uuid, ${iso(inReplyToNoteUntil)}::timestamptz, ${iso(inReplyToNoteCreated)}::timestamptz),
-          (${msTruncClampedReplyOn7dAskId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'MS-truncated default-clamped reply on sub-ms 7d ask', ${chId}::uuid, ${subMsDefault7dAskId}::uuid, NULL, ${msTruncOn7dUntilIso}::timestamptz, ${msTruncOn7dCreatedIso}::timestamptz),
-          (${explicit1dReplyOn7dAskId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'Explicit 1d reply on 7d ask', ${chId}::uuid, ${subMsDefault7dAskId}::uuid, NULL, ${iso(explicit1dOn7dUntil)}::timestamptz, ${iso(explicit1dOn7dCreated)}::timestamptz),
-          (${workingOnClampedReplyId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', NULL, NULL, 'working-on', 'Working-on reply clamped to 7d ask', ${chId}::uuid, ${default7dSoonAskId}::uuid, NULL, ${iso(default7dSoonUntil)}::timestamptz, ${iso(workingOnClampedCreated)}::timestamptz),
-          (${msTruncClampedReplyOn30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'MS-truncated default-clamped reply on sub-ms 30d note', ${chId}::uuid, ${default30dNoteId}::uuid, NULL, ${msTruncOn30dUntilIso}::timestamptz, ${msTruncOn30dCreatedIso}::timestamptz),
-          (${preC6Default7dAskReplyOn30dNoteId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, NULL, 'ask', 'Pre-C6 default 7d ask reply on 30d note?', ${chId}::uuid, ${default30dNoteId}::uuid, NULL, ${iso(preC6AskReplyOn30dUntil)}::timestamptz, ${iso(preC6AskReplyOn30dCreated)}::timestamptz),
-          (${expiredClampedReplyId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'Expired clamped reply on expired 30d note', ${chId}::uuid, ${expiredDefault30dNoteId}::uuid, NULL, ${iso(expiredNoteUntil)}::timestamptz, ${iso(expiredReplyCreated)}::timestamptz)
+          (${clampedReplyOnExplicit3dAskId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'Clamped reply on explicit 3d ask', ${chId}::uuid, ${explicit3dAskId}::uuid, NULL, ${iso(explicit3dAskUntil)}::timestamptz, ${iso(clampedOn3dCreated)}::timestamptz, NULL),
+          (${default30dInReplyToNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, ${agentId}::uuid, 'note', 'Pre-C6 non-threaded default 30d reply note', ${chId}::uuid, NULL, ${explicit3dAskId}::uuid, ${iso(inReplyToNoteUntil)}::timestamptz, ${iso(inReplyToNoteCreated)}::timestamptz, NULL),
+          (${msTruncClampedReplyOn7dAskId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'MS-truncated default-clamped reply on sub-ms 7d ask', ${chId}::uuid, ${subMsDefault7dAskId}::uuid, NULL, ${msTruncOn7dUntilIso}::timestamptz, ${msTruncOn7dCreatedIso}::timestamptz, NULL),
+          (${explicit1dReplyOn7dAskId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'Explicit 1d reply on 7d ask', ${chId}::uuid, ${subMsDefault7dAskId}::uuid, NULL, ${iso(explicit1dOn7dUntil)}::timestamptz, ${iso(explicit1dOn7dCreated)}::timestamptz, NULL),
+          (${workingOnClampedReplyId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', NULL, NULL, 'working-on', 'Working-on reply clamped to 7d ask', ${chId}::uuid, ${default7dSoonAskId}::uuid, NULL, ${iso(default7dSoonUntil)}::timestamptz, ${iso(workingOnClampedCreated)}::timestamptz, NULL),
+          (${msTruncClampedReplyOn30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'MS-truncated default-clamped reply on sub-ms 30d note', ${chId}::uuid, ${default30dNoteId}::uuid, NULL, ${msTruncOn30dUntilIso}::timestamptz, ${msTruncOn30dCreatedIso}::timestamptz, NULL),
+          (${preC6Default7dAskReplyOn30dNoteId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, NULL, 'ask', 'Pre-C6 default 7d ask reply on 30d note?', ${chId}::uuid, ${default30dNoteId}::uuid, NULL, ${iso(preC6AskReplyOn30dUntil)}::timestamptz, ${iso(preC6AskReplyOn30dCreated)}::timestamptz, 1),
+          (${expiredClampedReplyId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, NULL, 'note', 'Expired clamped reply on expired 30d note', ${chId}::uuid, ${expiredDefault30dNoteId}::uuid, NULL, ${iso(expiredNoteUntil)}::timestamptz, ${iso(expiredReplyCreated)}::timestamptz, NULL)
       `;
 
       await tx`RESET ROLE`;
@@ -277,10 +277,10 @@ test("20261120000007 W1 pre-edge path: sub-ms clamped replies, explicit/expired 
 
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${postRerunExplicit7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-release explicit 7d ask with zero permanent rows?', ${chId}::uuid, ${iso(postRerun7dUntil)}::timestamptz, ${iso(postRerunCreated)}::timestamptz),
-          (${postRerunExplicit30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-release explicit 30d note with zero permanent rows', ${chId}::uuid, ${iso(postRerun30dUntil)}::timestamptz, ${iso(postRerunCreated)}::timestamptz)
+          (${postRerunExplicit7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-release explicit 7d ask with zero permanent rows?', ${chId}::uuid, ${iso(postRerun7dUntil)}::timestamptz, ${iso(postRerunCreated)}::timestamptz, 1),
+          (${postRerunExplicit30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-release explicit 30d note with zero permanent rows', ${chId}::uuid, ${iso(postRerun30dUntil)}::timestamptz, ${iso(postRerunCreated)}::timestamptz, NULL)
       `;
       await tx`RESET ROLE`;
 
@@ -328,12 +328,12 @@ test("20261120000007 Condition 1 fail-closed: missing checksum with post-C6 writ
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${preC6Ambiguous7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Ambiguous 7d ask without trusted cutoff?', ${chId}::uuid, ${iso(preUntil)}::timestamptz, ${iso(preCreated)}::timestamptz),
-          (${postC6BeforeFirstPerm7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-C6 explicit 7d ask written BEFORE first permanent signal?', ${chId}::uuid, ${iso(postBeforePerm7dUntil)}::timestamptz, ${iso(postBeforePerm7dCreated)}::timestamptz),
-          (${postC6BeforeFirstPerm30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit 30d note written BEFORE first permanent signal', ${chId}::uuid, ${iso(postBeforePerm30dUntil)}::timestamptz, ${iso(postBeforePerm30dCreated)}::timestamptz),
-          (${firstPermanentSignalId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'First permanent signal written after explicit post-C6 writes', ${chId}::uuid, ${PERMANENT_UNTIL_ISO}::timestamptz, ${iso(firstPermCreated)}::timestamptz)
+          (${preC6Ambiguous7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Ambiguous 7d ask without trusted cutoff?', ${chId}::uuid, ${iso(preUntil)}::timestamptz, ${iso(preCreated)}::timestamptz, 1),
+          (${postC6BeforeFirstPerm7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-C6 explicit 7d ask written BEFORE first permanent signal?', ${chId}::uuid, ${iso(postBeforePerm7dUntil)}::timestamptz, ${iso(postBeforePerm7dCreated)}::timestamptz, 1),
+          (${postC6BeforeFirstPerm30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit 30d note written BEFORE first permanent signal', ${chId}::uuid, ${iso(postBeforePerm30dUntil)}::timestamptz, ${iso(postBeforePerm30dCreated)}::timestamptz, NULL),
+          (${firstPermanentSignalId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'First permanent signal written after explicit post-C6 writes', ${chId}::uuid, ${PERMANENT_UNTIL_ISO}::timestamptz, ${iso(firstPermCreated)}::timestamptz, NULL)
       `;
       await tx`RESET ROLE`;
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
@@ -427,22 +427,22 @@ test("20261120000007 Condition 1 & 2: trusted release checksum boundary fences B
       await tx`SET CONSTRAINTS ALL DEFERRED`;
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${preRoot7dId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Pre-C6 sub-ms 7d root?', ${chId}::uuid, ${preRoot7dUntilIso}::timestamptz, ${preRoot7dCreatedIso}::timestamptz),
-          (${preRoot30dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 30d root', ${chId}::uuid, ${iso(preRoot30dUntilMs)}::timestamptz, ${iso(preRoot30dCreatedMs)}::timestamptz),
-          (${postC6Top7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-C6 explicit 7d ask?', ${chId}::uuid, ${iso(postC6Top7dUntil)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz),
-          (${postC6Top30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit 30d note', ${chId}::uuid, ${iso(postC6Top30dUntil)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz)
+          (${preRoot7dId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Pre-C6 sub-ms 7d root?', ${chId}::uuid, ${preRoot7dUntilIso}::timestamptz, ${preRoot7dCreatedIso}::timestamptz, 1),
+          (${preRoot30dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 30d root', ${chId}::uuid, ${iso(preRoot30dUntilMs)}::timestamptz, ${iso(preRoot30dCreatedMs)}::timestamptz, NULL),
+          (${postC6Top7dAskId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-C6 explicit 7d ask?', ${chId}::uuid, ${iso(postC6Top7dUntil)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz, 1),
+          (${postC6Top30dNoteId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit 30d note', ${chId}::uuid, ${iso(postC6Top30dUntil)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz, NULL)
       `;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, thread_root_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, thread_root_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${preReplyMsTruncOn7dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 ms-truncated clamped reply', ${chId}::uuid, ${preRoot7dId}::uuid, ${preRoot7dMsTruncUntilIso}::timestamptz, ${iso(preReplyCreatedMs)}::timestamptz),
-          (${preReplyExactOn30dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 exact-ceiling clamped reply', ${chId}::uuid, ${preRoot30dId}::uuid, ${iso(preRoot30dUntilMs)}::timestamptz, ${iso(preReplyCreatedMs)}::timestamptz),
-          (${postC6ReplyMsTruncCeilingOn7dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit reply matching ms-truncated root ceiling', ${chId}::uuid, ${preRoot7dId}::uuid, ${preRoot7dMsTruncUntilIso}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz),
-          (${postC6ReplyExactCeilingOn7dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit reply matching exact root ceiling', ${chId}::uuid, ${preRoot7dId}::uuid, ${preRoot7dUntilIso}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz),
-          (${postC6ReplyExactCeilingOn30dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit reply matching exact 30d root ceiling', ${chId}::uuid, ${preRoot30dId}::uuid, ${iso(preRoot30dUntilMs)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz),
-          (${postC6Reply7dDurationOn30dId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-C6 explicit 7d ask reply on pre-C6 30d root?', ${chId}::uuid, ${preRoot30dId}::uuid, ${iso(postC6Reply7dUntil)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz)
+          (${preReplyMsTruncOn7dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 ms-truncated clamped reply', ${chId}::uuid, ${preRoot7dId}::uuid, ${preRoot7dMsTruncUntilIso}::timestamptz, ${iso(preReplyCreatedMs)}::timestamptz, NULL),
+          (${preReplyExactOn30dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Pre-C6 exact-ceiling clamped reply', ${chId}::uuid, ${preRoot30dId}::uuid, ${iso(preRoot30dUntilMs)}::timestamptz, ${iso(preReplyCreatedMs)}::timestamptz, NULL),
+          (${postC6ReplyMsTruncCeilingOn7dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit reply matching ms-truncated root ceiling', ${chId}::uuid, ${preRoot7dId}::uuid, ${preRoot7dMsTruncUntilIso}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz, NULL),
+          (${postC6ReplyExactCeilingOn7dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit reply matching exact root ceiling', ${chId}::uuid, ${preRoot7dId}::uuid, ${preRoot7dUntilIso}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz, NULL),
+          (${postC6ReplyExactCeilingOn30dId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'Post-C6 explicit reply matching exact 30d root ceiling', ${chId}::uuid, ${preRoot30dId}::uuid, ${iso(preRoot30dUntilMs)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz, NULL),
+          (${postC6Reply7dDurationOn30dId}::uuid, ${wsId}::uuid, ${agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Post-C6 explicit 7d ask reply on pre-C6 30d root?', ${chId}::uuid, ${preRoot30dId}::uuid, ${iso(postC6Reply7dUntil)}::timestamptz, ${iso(postC6CreatedMs)}::timestamptz, 1)
       `;
       await tx`RESET ROLE`;
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
@@ -525,10 +525,10 @@ test("20261120000007 Condition 3: deterministic lock-wait expiry race observed v
 
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at, sender_lifecycle_epoch)
         VALUES
-          (${expiringDuringWaitId}::uuid, ${wsId}::uuid, ${seeded.agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Expires while waiting on lock?', ${seeded.chId}::uuid, ${expiringUntilIso}::timestamptz, ${iso(expiringCreatedMs)}::timestamptz),
-          (${liveControlId}::uuid, ${wsId}::uuid, ${seeded.agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Still live after lock clears?', ${seeded.chId}::uuid, ${iso(liveUntilMs)}::timestamptz, ${iso(liveCreatedMs)}::timestamptz)
+          (${expiringDuringWaitId}::uuid, ${wsId}::uuid, ${seeded.agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Expires while waiting on lock?', ${seeded.chId}::uuid, ${expiringUntilIso}::timestamptz, ${iso(expiringCreatedMs)}::timestamptz, 1),
+          (${liveControlId}::uuid, ${wsId}::uuid, ${seeded.agentId}::uuid, 'agent', ${ownerId}::uuid, 'ask', 'Still live after lock clears?', ${seeded.chId}::uuid, ${iso(liveUntilMs)}::timestamptz, ${iso(liveCreatedMs)}::timestamptz, 1)
       `;
       await tx`RESET ROLE`;
     });

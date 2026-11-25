@@ -362,9 +362,9 @@ test("a typed reply first means a later click is too late; after expiry an answe
   const expiringAsk = async () => {
     const id = randomUUID();
     await sql.begin(async (tx) => {
-      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
         VALUES (${id}::uuid, ${f.workspaceA}::uuid, ${f.principal}::uuid, 'agent', ${f.ownerId}::uuid,
-          'ask', 'Quick: ship?', statement_timestamp() + interval '4 seconds')`;
+          'ask', 'Quick: ship?', statement_timestamp() + interval '4 seconds', 1)`;
       await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
         VALUES (${id}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
     });
@@ -408,9 +408,9 @@ test("a click whose asker is gone says so: reply_refused names why", async () =>
     // filing trigger off inside this transaction only.
     await sql.begin(async (tx) => {
       await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
-      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, sender_lifecycle_epoch)
         VALUES (${askId}::uuid, ${f.workspaceA}::uuid, ${randomUUID()}::uuid, ${fromKind}, ${f.ownerId}::uuid,
-          'ask', 'Still shipping?', statement_timestamp() + interval '1 hour')`;
+          'ask', 'Still shipping?', statement_timestamp() + interval '1 hour', ${fromKind === "agent" ? 1 : null}::bigint)`;
       await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
         VALUES (${askId}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
       await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");

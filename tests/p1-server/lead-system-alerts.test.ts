@@ -1683,10 +1683,10 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
   const queuedAskId = randomUUID();
   const todoNoticeId = randomUUID();
   await sql`
-    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, about, to_agent_principal_id, until, created_at)
+    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, about, to_agent_principal_id, until, created_at, sender_lifecycle_epoch)
     VALUES
-      (${queuedAskId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'ask', 'Please review PR', NULL, NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '15 minutes'),
-      (${todoNoticeId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Added a to-do to your queue.', ${`todo:${randomUUID()}`}, NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '12 minutes')
+      (${queuedAskId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'ask', 'Please review PR', NULL, NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '15 minutes', 1),
+      (${todoNoticeId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Added a to-do to your queue.', ${`todo:${randomUUID()}`}, NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '12 minutes', NULL)
   `;
   const queuedLeaseId = randomUUID();
   await sql`
