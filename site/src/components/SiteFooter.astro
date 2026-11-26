@@ -118,6 +118,7 @@ const COLUMNS = [
       { href: "/download", label: "Download" },
       { href: CREATE_ACCOUNT_HREF, label: "Sign up" },
       { href: "/app", label: "Log in" },
+      { href: "/support", label: "Support" },
     ],
   },
   {
@@ -125,6 +126,8 @@ const COLUMNS = [
     links: [
       { href: REPO, label: "GitHub", external: true },
       { href: `${REPO}/blob/main/LICENSE`, label: "MIT license", external: true },
+      { href: "/llms.txt", label: "llms.txt" },
+      { href: "/api.md", label: "API" },
     ],
   },
   {
@@ -167,7 +170,6 @@ const COLUMNS = [
       { href: "/terms", label: "Terms of Service" },
       { href: "/privacy", label: "Privacy" },
       { href: "/acceptable-use", label: "Acceptable use" },
-      { href: "/support", label: "Support" },
     ],
   },
 ];
@@ -217,12 +219,6 @@ const year = new Date().getFullYear();
     </div>
 
     <div class="ft__bar">
-      <p class="ft__status">
-        <span class="ft__pip" aria-hidden="true"></span>
-        <span>
-          <strong>Signup is open.</strong> Free for 10 workspaces, no card.
-        </span>
-      </p>
       <p class="ft__legal">
         © {year} Yulan Ventures, LLC · MIT · no cookies, no ad tracking
       </p>
@@ -383,54 +379,10 @@ const year = new Date().getFullYear();
     flex-wrap: wrap;
     justify-content: space-between;
     align-items: baseline;
-    gap: var(--s-4);
-    /* Was --s-16 (64px). The rule sat 81px under the taller column with nothing in between,
-       which read as the footer running out rather than closing. --s-6 puts it a card's
-       padding below the last link — close enough to belong to the block above it. */
+    gap: var(--s-2) var(--s-6);
     margin-top: var(--s-6);
     padding-top: var(--s-6);
     border-top: 1px solid var(--border);
-  }
-
-  .ft__status {
-    display: flex;
-    align-items: baseline;
-    gap: var(--s-3);
-    max-width: 54ch;
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    color: var(--text-muted);
-  }
-
-  .ft__status strong {
-    color: var(--text);
-    font-weight: var(--weight-semibold);
-  }
-
-  /* ★ GREEN, NOT AMBER, AND THE COLOUR HAS TO AGREE WITH THE SENTENCE.
-     The superseded comment read: "Amber, not green: this is 'not finished yet', not 'all
-     good'." That was written when the line beside it said signup was NOT open. The line now
-     reads "Signup is open. Free for 10 workspaces, no card." — a statement of current
-     availability — and an amber status dot in front of it says the opposite: it reads as a
-     caveat on the very thing the sentence asserts. That is the D-023 failure mode in colour
-     rather than in words, and D-023 is what happens when a reader believes the availability
-     signal over the availability text.
-
-     Semantic colour is used here because it means something specific: --success is the token
-     for "this landed and is true now", and it is used for exactly that on the landing page's
-     fresh signal. The dot remains DECORATIVE — the sentence carries the whole meaning and
-     nothing is lost without colour — so this changes what the page implies, not what it
-     states. If the deployed gate (SWARM_SELF_SERVE) ever flips, this dot moves back with the
-     sentence; the two are one claim. */
-  .ft__pip {
-    flex: none;
-    inline-size: 6px;
-    block-size: 6px;
-    border-radius: var(--radius-pill);
-    background: var(--success);
-    box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 15%, transparent);
-    /* Baseline alignment puts a 6px box on the text baseline; nudge it onto the x-height. */
-    transform: translateY(-0.15em);
   }
 
   .ft__legal {
@@ -441,7 +393,6 @@ const year = new Date().getFullYear();
   }
 
   .ft__tm {
-    flex-basis: 100%;
     font-size: var(--t-xs);
     line-height: var(--lh-xs);
     color: var(--text-muted);

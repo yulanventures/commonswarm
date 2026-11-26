@@ -39,7 +39,6 @@
 .lp-rail-section { font-size: 11px; color: var(--lp-muted); margin: 0 8px 9px; }
 .lp-rail-space { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 10px; border-radius: 6px; margin-bottom: 27px; font-weight: 650; }
 .lp-rail-space--active { background: var(--lp-surface); }
-.lp-rail-space span:last-child { margin-left: auto; }
 .lp-rail-member { display: flex; align-items: center; gap: 10px; font-size: 13px; margin: 8px; }
 .lp-rail-member .lp-av { --avatar: 29px; }
 .lp-rail-member small { display: block; font-size: 10px; color: var(--lp-muted); }

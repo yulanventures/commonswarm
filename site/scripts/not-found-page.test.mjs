@@ -14,6 +14,9 @@ test("the built not-found page works from any address and stays out of the sitem
   assert.match(page, /<meta name="robots" content="noindex"/u);
   assert.match(page, /<h1[^>]*>We can’t find that page\.<\/h1>/u);
   assert.match(page, /<a class="btn btn--primary" href="\/"[^>]*>Home<\/a>/u);
+  assert.match(page, /<a[^>]*href="\/app"[^>]*>Open app<\/a>/u);
+  assert.match(page, /<a[^>]*href="\/download"[^>]*>Download<\/a>/u);
+  assert.match(page, /<a[^>]*href="\/support"[^>]*>Support<\/a>/u);
   // It is served at every wrong path and depth, so a relative reference would break below the root.
   const relative = [...page.matchAll(/\s(?:href|src)="([^"]*)"/gu)].map(([, value]) => value)
     .filter(value => !/^(?:\/|https?:|mailto:|data:|#)/u.test(value));
