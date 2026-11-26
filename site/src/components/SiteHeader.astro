@@ -167,12 +167,6 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
         <Button href={cta.href} variant="primary" size="lg" block class="mnav__cta">
           {cta.label}
         </Button>
-        {/* D-023: this note used to say signup was not open to everyone and the flow was a
-            preview. That became false when SWARM_SELF_SERVE=1 went live on 2026-07-28, but
-            the shared header kept publishing it on every marketing and legal page. Keep the
-            availability statement aligned with the deployed gate; the free-tier limits are
-            the useful context under the action. */}
-        <p class="mnav__note">Signup is open.</p>
       </div>
     </div>
   </div>
@@ -690,14 +684,6 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
     display: flex;
     flex-direction: column;
     gap: var(--s-4);
-  }
-
-  .mnav__note {
-    margin: 0;
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    color: var(--text-muted);
-    text-align: center;
   }
 
   /* Entry only. The exit is deliberately instant: an exit animation has to be waited on

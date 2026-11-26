@@ -1,115 +1,23 @@
 ---
 /*
- * WhatHappens — the honest walkthrough. Trust is the product on this page, so every claim
- * below is read straight out of install.sh (repo root; commented POSIX sh) and is stated
- * in the order the script actually does it. Line references are to that file:
- *
- * RE-READ AGAINST install.sh BEFORE THE NEXT DEPLOY. The script was rewritten for the
- * CommonSwarm rename in a different lane while this page was being edited, and it was still
- * uncommitted when these numbers were taken. Every reference below was re-checked against it
- * at that moment — the step boundaries survived the rewrite unchanged — but the file grew
- * more than once, which is exactly why a line count would go stale silently.
- *
- *   1. node check BEFORE any download, with the searched PATH printed  -> `command -v node` +
- *      the die() message that prints "$PATH" and names version managers (l.26-40)
- *   2. NODE_MAJOR >= 22                                                -> l.42-47
- *   3. two curl calls into mktemp -d, trap rm -rf on EXIT INT TERM     -> l.61-69
- *   4. missing checksum file => stop                                   -> l.68-69
- *   5. shasum or sha256sum; neither => stop; mismatch => stop and
- *      print both hashes. No flag and no env var disables this.        -> l.74-86
- *   6. walks every parent of INSTALL_DIR for a package.json with
- *      "type":"module" and stops if it finds one                       -> l.97-107
- *   7. chmod +x then mv into $INSTALL_DIR (default $HOME/.local/bin)   -> l.108-110
- *   8. reads --version back OUT OF the installed file                  -> l.115-121
- *   9. PATH advice printed, per $SHELL. It prints the line; it does
- *      not edit any file.                                             -> l.126-136
- *  10. ends with next steps for invited people, browser signup,
- *      terminal signup, and local help
- *
- * The invite path uses `cswarm accept --link-stdin`, so the capability does not enter shell
- * history. The other paths match AfterInstall.astro: open /app in a browser, or run
- * `cswarm login` followed by `cswarm new "<project name>"`. The installer also points at
- * `cswarm --help`, which works without an account or network.
- *
- * The name and the identifiers below were checked against the rewritten script, not assumed:
- * it installs `cswarm` (l.65, l.109), verifies `cswarm.sha256` (l.68, l.74), and reads
- * CSWARM_INSTALL_DIR and CSWARM_VERSION (l.13-14). ~/.cswarm is storage.ts:92 and :601.
- *
- * "Two network requests" is the two curl calls at l.65 and l.68 — the only network calls in
- * the file. Do not soften that into "minimal network activity"; the number is checkable and
- * the number is the point. Still two after the rewrite.
- *
- * ~/.cswarm is where the CLI keeps sign-in state, NOT something the installer creates:
- * src/cloud/storage.ts:92 (credentials.d) and :601 (agent-state), created 0700 with 0600
- * files. Stated here because "what is on my machine afterwards" is the question a reader is
- * actually asking. The directory was `~/.coswarm` before the rename; storage.ts now joins
- * homedir() with ".cswarm" at both sites, and carries its own note saying the old directory
- * is deliberately not read. The 0700/0600 line numbers were not re-taken after that file
- * moved and may have drifted; the modes themselves were not re-checked here.
+ * WhatHappens: concise security and filesystem facts verified against root install.sh.
  */
 
-const steps = [
-  {
-    t: "Checks Node before downloading",
-    d: "CommonSwarm ships JavaScript, so it requires Node 22 or newer. If node is missing, the script prints the PATH it searched and names version managers (nvm, fnm, asdf) that only load in interactive shells.",
-  },
-  {
-    t: "Downloads two files into a temp directory",
-    d: "The cswarm executable and its published cswarm.sha256. Those are the only two network requests the script makes. The temp directory is removed when the script exits.",
-  },
-  {
-    t: "Verifies the SHA-256 checksum",
-    d: "If the checksum file is missing, your machine has neither shasum nor sha256sum, or the hashes disagree, it stops, installs nothing, and prints both hashes. No flag or environment variable skips this check.",
-  },
-  {
-    t: "Checks the install path for ESM conflicts",
-    d: "The bundle is CommonJS, and Node selects CJS or ESM from the nearest package.json. The script walks every parent of the install directory and stops with an explanation if one declares \"type\": \"module\".",
-  },
-  {
-    t: "Moves one file into place",
-    d: "~/.local/bin/cswarm, marked executable. No sudo, nothing outside your home directory, no node_modules tree, no background service, and no login items. Set CSWARM_INSTALL_DIR to choose another path, or CSWARM_VERSION to pin a release.",
-  },
-  {
-    t: "Prints the installed version and exits",
-    d: "It reads --version straight off disk from the file it installed. If ~/.local/bin is not on your PATH, it prints the exact line for your shell without editing any profile file.",
-  },
-];
-
-const nots = [
-  "No sudo, at any point",
-  "No shell profile is edited",
-  "Two network requests, both to the release",
-  "No background service, no login item",
+const facts = [
+  "Checks Node 22+ before downloading.",
+  "Downloads cswarm and cswarm.sha256, then verifies SHA-256.",
+  "Installs ~/.local/bin/cswarm with no sudo, no shell profile edits, and no background service.",
 ];
 ---
 
 <section class="wh section section--tight" id="what-happens" aria-labelledby="wh-title">
   <div class="page">
-    <div class="wh__head">
-      <h2 class="h-section" id="wh-title">What happens on your machine</h2>
-    </div>
-
-    <ol class="wh__steps reveal-stagger">
-      {
-        steps.map((s, i) => (
-          <li class="wh__step">
-            <span class="wh__n mono" aria-hidden="true">
-              {String(i + 1).padStart(2, "0")}
-            </span>
-            <div class="wh__body">
-              <h3 class="wh__t">{s.t}</h3>
-              <p class="wh__d">{s.d}</p>
-            </div>
-          </li>
-        ))
-      }
-    </ol>
-
-    <div class="wh__foot">
-      <ul class="wh__nots">
+    <div class="wh__card">
+      <h2 class="wh__h" id="wh-title">What the script does</h2>
+      <ul class="wh__list">
         {
-          nots.map((n) => (
-            <li class="wh__not">
+          facts.map((item) => (
+            <li class="wh__item">
               <svg
                 class="wh__tick"
                 viewBox="0 0 16 16"
@@ -123,99 +31,41 @@ const nots = [
                   stroke="currentColor"
                   stroke-width="2.2"
                   stroke-linecap="round"
-                  stroke-linejoin="round"></path>
+                  stroke-linejoin="round"
+                />
               </svg>
-              {n}
+              <span>{item}</span>
             </li>
           ))
         }
       </ul>
       <p class="wh__uninstall">
-        <strong>Removing it is one file.</strong> Delete
-        <span class="mono">~/.local/bin/cswarm</span>. If you signed in, the CLI stores credentials
-        in <span class="mono">~/.cswarm</span> (0700 directory, 0600 files), so
-        <span class="mono">rm -rf ~/.cswarm</span> clears the rest.
+        Uninstall: <code class="mono">rm ~/.local/bin/cswarm &amp;&amp; rm -rf ~/.cswarm</code>
       </p>
     </div>
   </div>
 </section>
 
 <style>
-  /* INTEGRATION: this was `.section` (--pad-section, 128px at 1440) with a one-sided
-     override pulling the bottom edge back to --pad-section-tight. Measured across all four
-     routes, EVERY other top-level section on the site is .section--tight (86.4px) — the
-     landing page’s five sections, and /download’s own OtherWays. This page alone read
-     128 / 86.4 / 86.4 / 86.4 / 128 down the scroll. It is .section--tight now, so the
-     override is gone and the rhythm is one number everywhere. */
-
-  .wh__head {
-    max-width: 44rem;
+  .wh__card {
+    max-width: 46rem;
     margin-inline: auto;
-    text-align: center;
+    padding: var(--pad-card-lg);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
   }
 
-  .wh__head .h-section {
-    margin: var(--s-4) 0 0;
-  }
-
-  .wh__lede {
-    margin: var(--stack-sm) auto 0;
+  .wh__h {
+    margin: 0 0 var(--s-4);
     font-size: var(--t-lg);
     line-height: var(--lh-lg);
-  }
-
-  .wh__steps {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--s-10) var(--s-12);
-    margin: var(--s-16) 0 0;
-    padding: 0;
-    list-style: none;
-    counter-reset: none;
-  }
-
-  .wh__step {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: var(--s-4);
-    align-items: start;
-  }
-
-  .wh__n {
-    font-size: var(--t-xs);
-    font-weight: 600;
-    line-height: 1.6;
-    color: var(--text-muted);
-    padding-top: 2px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .wh__t {
-    margin: 0;
-    font-size: var(--t-base);
-    font-weight: 600;
     letter-spacing: var(--track-head);
+    font-weight: var(--weight-head);
     color: var(--text);
   }
 
-  .wh__d {
-    margin: var(--s-2) 0 0;
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    color: var(--text-muted);
-  }
-
-  .wh__foot {
-    margin-top: var(--s-16);
-    padding-top: var(--s-8);
-    border-top: 1px solid var(--border);
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: var(--s-8) var(--s-12);
-    align-items: start;
-  }
-
-  .wh__nots {
+  .wh__list {
     display: grid;
     gap: var(--s-3);
     margin: 0;
@@ -223,49 +73,38 @@ const nots = [
     list-style: none;
   }
 
-  .wh__not {
+  .wh__item {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: var(--s-3);
     font-size: var(--t-sm);
-    line-height: var(--lh-sm);
+    line-height: var(--lh-base);
     color: var(--text);
   }
 
   .wh__tick {
     flex: none;
     color: var(--success);
+    transform: translateY(1px);
   }
 
   .wh__uninstall {
-    margin: 0;
+    margin: var(--s-5) 0 0;
+    padding-top: var(--s-4);
+    border-top: 1px solid var(--border);
     font-size: var(--t-sm);
     line-height: var(--lh-base);
     color: var(--text-muted);
+    overflow-wrap: anywhere;
   }
 
-  @media (max-width: 56rem) {
-    .wh__steps {
-      grid-template-columns: minmax(0, 1fr);
-      gap: var(--s-8);
-      max-width: 42rem;
-      margin-inline: auto;
-    }
-
-    .wh__foot {
-      grid-template-columns: minmax(0, 1fr);
-      max-width: 42rem;
-      margin-inline: auto;
-    }
+  .wh__uninstall code {
+    color: var(--text);
   }
 
-  @media (max-width: 30rem) {
-    .wh__steps {
-      margin-top: var(--s-10);
-    }
-
-    .wh__step {
-      gap: var(--s-3);
+  @media (max-width: 40rem) {
+    .wh__card {
+      padding: var(--s-5);
     }
   }
 </style>

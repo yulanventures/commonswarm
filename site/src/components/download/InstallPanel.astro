@@ -66,16 +66,12 @@ const PLATFORMS = [
     heading: "On macOS",
     notes: [
       {
-        k: "Open Terminal",
-        v: "Press Command-Space, type `Terminal`, then press Return. This is the app where you paste the commands on this page.",
+        k: "Check Node.js",
+        v: "Run `node -v` in Terminal (requires 22+).",
       },
       {
-        k: "Check Node.js before installing",
-        v: "Run `node -v`. If the first number is 22 or higher (for example, `v22…` or `v24…`), you’re ready. If it says command not found or shows an older version, use the Node.js link above.",
-      },
-      {
-        k: "Keep that window open",
-        v: "Use the install command on this page, paste it into the same Terminal window, and press Return. The installer checks Node.js again before it downloads anything.",
+        k: "Install path",
+        v: "Writes `~/.local/bin/cswarm`.",
       },
     ],
   },
@@ -85,16 +81,12 @@ const PLATFORMS = [
     heading: "On Linux",
     notes: [
       {
-        k: "Open Terminal",
-        v: "Open your app menu and search for `Terminal`. This is the app where you paste the commands on this page.",
+        k: "Check Node.js",
+        v: "Run `node -v` (requires 22+).",
       },
       {
-        k: "Check Node.js before installing",
-        v: "Run `node -v`. If the first number is 22 or higher (for example, `v22…` or `v24…`), you’re ready. Linux package managers often ship older versions, so check the number first.",
-      },
-      {
-        k: "Keep that window open",
-        v: "Use the install command on this page, paste it into the same Terminal window, and press Enter. The installer checks Node.js again before it downloads anything.",
+        k: "Install path",
+        v: "Writes `~/.local/bin/cswarm`.",
       },
     ],
   },
@@ -104,16 +96,12 @@ const PLATFORMS = [
     heading: "On Windows, via WSL",
     notes: [
       {
-        k: "Open WSL, not PowerShell",
-        v: "Open Start and choose your Linux app, such as Ubuntu. If you do not have one yet, use Microsoft’s WSL setup guide linked above.",
+        k: "Use WSL",
+        v: "Run inside WSL (not PowerShell) with Node 22+ installed in WSL (`node -v`).",
       },
       {
-        k: "Check Node.js inside WSL",
-        v: "Run `node -v` there. A Node.js copy installed only on Windows does not count; CommonSwarm needs version 22 or newer inside WSL.",
-      },
-      {
-        k: "Keep that window open",
-        v: "Use the install command on this page, paste it into that same WSL window, and press Enter. The file stays inside your WSL home folder.",
+        k: "Install path",
+        v: "Writes `~/.local/bin/cswarm` inside your WSL home folder.",
       },
     ],
   },
@@ -881,7 +869,7 @@ const PLATFORMS = [
         if (/iphone|ipad|ipod|android/.test(hay)) {
           /* Honest rather than helpful-looking: you cannot install a CLI here. */
           detect.textContent =
-            "The cswarm CLI needs a supported computer. You can open the CommonSwarm workspace in your browser.";
+            "The cswarm CLI requires a desktop computer. Use /app in your browser on mobile.";
           detect.dataset.mode = "device";
           detect.hidden = false;
         } else {
@@ -893,7 +881,7 @@ const PLATFORMS = [
           if (guess) {
             select(guess, false);
             const label = tabs.find((t) => t.dataset.dlTab === guess)?.textContent?.trim();
-            detect.textContent = `Showing ${label} because that’s what this browser reports. Pick another if it’s wrong.`;
+            detect.textContent = `Detected ${label}.`;
             detect.dataset.mode = "auto";
             detect.hidden = false;
           }

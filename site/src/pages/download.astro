@@ -77,11 +77,10 @@ const description =
           </Button>
         </div>
         <p class="dl-mac__intel">
-          On an Intel Mac? <a href={DESKTOP_MAC_X64_URL}>Download the Intel build.</a>
+          <a href={DESKTOP_MAC_X64_URL}>Intel Mac build</a>
         </p>
         <p class="dl-mac__note">
-          This preview is not yet verified by Apple. Open it once, then choose
-          <strong>Open Anyway</strong> in System Settings &gt; Privacy &amp; Security.
+          Unverified preview: open once, then choose <strong>Open Anyway</strong> in System Settings &gt; Privacy &amp; Security.
         </p>
       </div>
     </div>
@@ -95,7 +94,7 @@ const description =
   <section class="dl-releases" aria-label="All builds">
     <div class="page dl-releases__inner">
       <p class="dl-releases__line">
-        All builds are on the <a href={RELEASES_URL}>GitHub releases page</a>.
+        All builds on <a href={RELEASES_URL}>GitHub Releases</a>.
       </p>
     </div>
   </section>
@@ -174,7 +173,7 @@ const description =
   }
 
   .dl-mac__intel {
-    margin: var(--s-4) 0 0;
+    margin: var(--s-2) 0 0;
     font-size: var(--t-sm);
     line-height: var(--lh-base);
     color: var(--text-muted);
@@ -182,6 +181,9 @@ const description =
 
   .dl-mac__intel a,
   .dl-releases__line a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
     color: var(--text);
     font-weight: var(--weight-medium);
     text-decoration: underline;

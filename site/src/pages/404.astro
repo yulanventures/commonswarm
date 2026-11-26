@@ -14,7 +14,14 @@ import "../styles/public-theme.css";
   <meta slot="head" name="robots" content="noindex" />
   <section class="page nf" aria-labelledby="nf-title">
     <h1 id="nf-title">We can’t find that page.</h1>
-    <a class="btn btn--primary" href="/">Home</a>
+    <nav class="nf__actions" aria-label="Recovery links">
+      <a class="btn btn--primary" href="/">Home</a>
+      <ul class="nf__links">
+        <li><a class="nf__link" href="/app">Open app</a></li>
+        <li><a class="nf__link" href="/download">Download</a></li>
+        <li><a class="nf__link" href="/support">Support</a></li>
+      </ul>
+    </nav>
   </section>
 </Base>
 
@@ -38,5 +45,67 @@ import "../styles/public-theme.css";
     line-height: 1.05;
     letter-spacing: -0.045em;
     text-wrap: balance;
+  }
+
+  .nf__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s-4) var(--s-6);
+  }
+
+  .nf__actions .btn {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+
+  .nf__links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s-2) var(--s-4);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .nf__link {
+    display: inline-flex;
+    align-items: center;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    padding-inline: var(--s-2);
+    color: var(--text-muted);
+    font-size: var(--t-base);
+    font-weight: var(--weight-medium);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 4px;
+    border-radius: var(--radius-sm);
+    transition:
+      color var(--dur-1) var(--ease-standard),
+      text-decoration-color var(--dur-1) var(--ease-standard);
+  }
+
+  .nf__link:hover {
+    color: var(--text);
+    text-decoration-color: currentColor;
+  }
+
+  .nf__actions a:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  @media (max-width: 36rem) {
+    .nf__actions {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: var(--s-4);
+    }
+
+    .nf__links {
+      gap: var(--s-1) var(--s-3);
+    }
   }
 </style>
