@@ -1061,7 +1061,10 @@ import "../../styles/kylon-image-viewer.css";
       />
       <label for="dashboard-channel-edit-description">Description (optional)</label>
       <textarea id="dashboard-channel-edit-description" data-channel-edit-description rows="4"></textarea>
-      <label for="dashboard-channel-lead" data-channel-lead-label hidden>Channel lead</label>
+      <div class="dashboard__channel-lead-head" data-channel-lead-head hidden>
+        <label for="dashboard-channel-lead" data-channel-lead-label hidden>Channel lead</label>
+        <button type="button" class="dashboard__text-button" data-channel-lead-members hidden>Add members</button>
+      </div>
       <select id="dashboard-channel-lead" data-channel-lead-select hidden></select>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
@@ -1803,7 +1806,7 @@ import "../../styles/kylon-image-viewer.css";
     type ConversationHistoryState,
   } from "../../lib/conversation-history";
   import { CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
-    type ChannelLead } from "../../lib/channel-lead";
+    privateChannelNonMemberLeadAgents, type ChannelLead } from "../../lib/channel-lead";
   import {
     pendingAccessRows,
     loadPendingAccess,
@@ -19241,6 +19244,15 @@ import "../../styles/kylon-image-viewer.css";
                 : c,
             );
           }
+          if (initialConv.kind === "private_channel" && initialConv.channelId) {
+            const key = privateMembersKey(initialConv.channelId);
+            if (key) {
+              privateChannelAgentIds.set(
+                key,
+                new Set(nextMembers.filter((m) => m.kind === "agent").map((m) => m.id)),
+              );
+            }
+          }
           renderHomeShell();
           renderHomeRail();
           void refreshConversations(workspaceId, true, true, pinned);
@@ -20119,19 +20131,73 @@ import "../../styles/kylon-image-viewer.css";
       const select = one<HTMLSelectElement>("[data-channel-lead-select]");
       if (!select) return;
       select.hidden = !channel || !manageable;
+      const head = one<HTMLElement>("[data-channel-lead-head]"); if (head) head.hidden = select.hidden;
       const label = one<HTMLElement>("[data-channel-lead-label]"); if (label) label.hidden = select.hidden;
-      if (!channel || !manageable) { select.replaceChildren(); return; }
+      const membersButton = one<HTMLButtonElement>("[data-channel-lead-members]");
+      if (!channel || !manageable) {
+        if (membersButton) membersButton.hidden = true;
+        select.replaceChildren();
+        return;
+      }
       const stored = channelLead(channel);
       const selected = keep && select.value ? select.value : channelLeadValue(stored);
       const members = channel.visibility === "private" ? knownPrivateChannelMembers(channel.channelId) : null;
-      select.replaceChildren(...channelLeadOptions({ agents, workspaceLead: activeWorkspaceLeadAgent(), stored, selected,
-        memberAgentIds: members, visibility: channel.visibility ?? null }).map(option => {
+      const options = channelLeadOptions({
+        agents,
+        workspaceLead: activeWorkspaceLeadAgent(),
+        stored,
+        selected,
+        memberAgentIds: members,
+        visibility: channel.visibility ?? null,
+      });
+      const nodes: Array<HTMLOptionElement | HTMLOptGroupElement> = options.map(option => {
         const element = new Option(option.label, option.value);
         element.disabled = option.disabled === true;
         return element;
-      }));
+      });
+      const existingAgentIds = new Set(
+        options
+          .map((option) => channelLeadFromValue(option.value))
+          .flatMap((lead) => (lead?.mode === "agent" ? [lead.principalId] : [])),
+      );
+      const nonMemberAgents = privateChannelNonMemberLeadAgents({
+        agents,
+        memberAgentIds: members,
+        visibility: channel.visibility ?? null,
+        excludeIds: existingAgentIds,
+      });
+      if (nonMemberAgents.length > 0) {
+        const group = document.createElement("optgroup");
+        group.label = "Not in channel";
+        for (const agent of nonMemberAgents) {
+          const element = new Option(agent.name, `agent:${agent.principalId}`);
+          element.disabled = true;
+          group.append(element);
+        }
+        nodes.push(group);
+      }
+      select.replaceChildren(...nodes);
       select.value = selected;
       select.disabled = channelDialogPending || channel.archivedAt !== null;
+      if (membersButton) {
+        const hasNonMemberAgents =
+          nonMemberAgents.length > 0 ||
+          privateChannelNonMemberLeadAgents({
+            agents,
+            memberAgentIds: members,
+            visibility: channel.visibility ?? null,
+          }).length > 0;
+        const conv = conversationForChannel(channel.channelId);
+        const canManageMembers =
+          channel.visibility === "private" &&
+          channel.archivedAt === null &&
+          hasNonMemberAgents &&
+          conv !== null &&
+          conv.joined === true &&
+          !sampleMode;
+        membersButton.hidden = !canManageMembers;
+        membersButton.disabled = channelDialogPending;
+      }
     };
     const privateMembersKey = (channelId: string): string | null =>
       session && activeWorkspaceId ? `${session.user.id}:${activeWorkspaceId}:${channelId}` : null;
@@ -20224,6 +20290,7 @@ import "../../styles/kylon-image-viewer.css";
       for (const input of all<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("[data-channel-dialog] input, [data-channel-dialog] textarea, [data-channel-dialog] select")) input.disabled = channelDialogPending;
       // An archived channel takes no new lead (and its Save never turns on for one).
       const leadSelect = one<HTMLSelectElement>("[data-channel-lead-select]"); if (leadSelect) leadSelect.disabled = channelDialogPending || channel?.archivedAt != null;
+      const leadMembersButton = one<HTMLButtonElement>("[data-channel-lead-members]"); if (leadMembersButton) leadMembersButton.disabled = channelDialogPending || channel?.archivedAt != null;
       const state = one<HTMLElement>("[data-channel-settings-status]"); if (state) state.hidden = !channel?.archivedAt;
       const save = one<HTMLButtonElement>("[data-channel-rename-submit]"); if (save) save.hidden = !manageable;
       const close = one<HTMLButtonElement>("[data-channel-settings-close]"); if (close) close.textContent = manageable ? "Cancel" : "Close";
@@ -24583,6 +24650,24 @@ import "../../styles/kylon-image-viewer.css";
     });
     for (const input of all<HTMLElement>("[data-channel-rename-slug], [data-channel-edit-description]")) input.addEventListener("input", syncChannelSettingsSubmit);
     one<HTMLSelectElement>("[data-channel-lead-select]")?.addEventListener("change", syncChannelSettingsSubmit);
+    one<HTMLButtonElement>("[data-channel-lead-members]")?.addEventListener("click", () => {
+      const channel = channelById(channels, managedChannelId);
+      if (!channel || channelDialogPending) return;
+      const returnOpener = channelDialogReturn?.element ?? null;
+      channelDialogSucceeded = true;
+      closeChannelDialog();
+      if (
+        homeRoute.view !== "chat" ||
+        activeWorkspaceView !== "signals" ||
+        activeDmConversationId !== null ||
+        activeChannelId !== channel.channelId
+      ) {
+        selectChannel(channel.channelId);
+      }
+      if (typeof openConversationMembersSheet === "function") {
+        void openConversationMembersSheet(returnOpener);
+      }
+    });
     one<HTMLFormElement>("[data-channel-create-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelCreate(); });
     one<HTMLFormElement>("[data-channel-rename-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelSettings(); });
     one<HTMLFormElement>("[data-channel-archive-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelArchive(); });
@@ -27280,6 +27365,17 @@ import "../../styles/kylon-image-viewer.css";
   .dashboard__channel-archived .dashboard__button,
   .dashboard__channel-unavailable .dashboard__button {
     min-block-size: 2.75rem;
+  }
+
+  .dashboard__channel-lead-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-2);
+  }
+
+  .dashboard__channel-lead-head[hidden] {
+    display: none;
   }
 
   .dashboard__channel-form label {

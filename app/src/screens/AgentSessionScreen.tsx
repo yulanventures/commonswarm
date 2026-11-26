@@ -4,12 +4,17 @@ import { AppFrame } from '../components/AppFrame';
 import { ApprovalCard } from '../components/ApprovalCard';
 import { Avatar } from '../components/Avatar';
 import { Composer } from '../components/Composer';
+import { EmptyWorkspaceState } from '../components/EmptyWorkspaceState';
 import { QueueLine } from '../components/QueueLine';
 import { SessionDetailsPanel } from '../components/SessionDetailsPanel';
 import { SessionHeader } from '../components/SessionHeader';
 import { StepList } from '../components/StepList';
 import { PEOPLE } from '../data/fixtures';
-import { WORKSPACE_UNAVAILABLE_TEXT, useSessionSnapshot } from '../data/queries';
+import {
+  WORKSPACE_UNAVAILABLE_TEXT,
+  useRealSidebarData,
+  useSessionSnapshot,
+} from '../data/queries';
 import type {
   AgentStepsEvent,
   AgentTextEvent,
@@ -104,12 +109,7 @@ function renderDeliveryNote(event: AgentTextEvent): string | null {
   return null;
 }
 
-export function AgentSessionScreen() {
-  const { id } = useParams<{ id: string }>();
-  const snapshot = useSessionSnapshot();
-  const unavailableWorkspaceId = useAppStore(
-    (state) => state.unavailableWorkspaceId,
-  );
+function AgentSessionScreenBody({ id }: { id: string | undefined }) {
   const isPhone = useIsPhone();
   const agents = useAppStore((state) => state.agents);
   const agent = agents.find((item) => item.id === id) ?? agents[0];
@@ -122,22 +122,6 @@ export function AgentSessionScreen() {
       timeline.scrollTop = timeline.scrollHeight;
     }
   }, [agent?.id, eventCount, isPhone]);
-
-  if (
-    snapshot.state.status === 'authenticated' &&
-    unavailableWorkspaceId !== null
-  ) {
-    return (
-      <AppFrame>
-        <div
-          data-testid="workspace-unavailable-pane"
-          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
-        >
-          {WORKSPACE_UNAVAILABLE_TEXT}
-        </div>
-      </AppFrame>
-    );
-  }
 
   if (!agent) return null;
 
@@ -338,7 +322,6 @@ export function AgentSessionScreen() {
           placeholder={`Message ${agent.name}. @ people, # channels, / commands`}
           phonePlaceholder={`Message ${agent.name}`}
           inputLabel={`Message ${agent.name}`}
-          sendActiveWhenEmpty
           onSend={() => appActions.sendAgentMessage(agent.id)}
           agentControls={{
             agentId: agent.id,
@@ -349,4 +332,46 @@ export function AgentSessionScreen() {
       </div>
     </AppFrame>
   );
+}
+
+function RealAgentSessionScreen({ id }: { id: string | undefined }) {
+  const sidebar = useRealSidebarData();
+
+  if (sidebar.workspaceUnavailable) {
+    return (
+      <AppFrame>
+        <div
+          data-testid="workspace-unavailable-pane"
+          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
+        >
+          {WORKSPACE_UNAVAILABLE_TEXT}
+        </div>
+      </AppFrame>
+    );
+  }
+
+  if (
+    !sidebar.workspacesLoading &&
+    !sidebar.workspacesError &&
+    sidebar.workspaces.length === 0
+  ) {
+    return (
+      <AppFrame>
+        <EmptyWorkspaceState />
+      </AppFrame>
+    );
+  }
+
+  return <AgentSessionScreenBody id={id} />;
+}
+
+export function AgentSessionScreen() {
+  const { id } = useParams<{ id: string }>();
+  const snapshot = useSessionSnapshot();
+
+  if (snapshot.state.status === 'authenticated') {
+    return <RealAgentSessionScreen id={id} />;
+  }
+
+  return <AgentSessionScreenBody id={id} />;
 }

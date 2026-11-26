@@ -125,16 +125,6 @@ export function SessionDetailsPanel({ agent }: SessionDetailsPanelProps) {
           ))}
         </section>
       ) : null}
-
-      <div className="flex-1" />
-
-      <a
-        href={`#/agents/${agent.id}`}
-        onClick={(event) => event.preventDefault()}
-        className="text-sm text-link no-underline transition-quiet hover:text-link-hover"
-      >
-        Open this session on your phone
-      </a>
     </div>
   );
 }

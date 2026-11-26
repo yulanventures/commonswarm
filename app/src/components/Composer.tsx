@@ -16,7 +16,6 @@ interface ComposerProps {
   phonePlaceholder?: string;
   inputLabel: string;
   disabled?: boolean;
-  sendActiveWhenEmpty?: boolean;
   onSend: () => void;
   agentControls?: {
     agentId: string;
@@ -32,7 +31,6 @@ export function Composer({
   phonePlaceholder,
   inputLabel,
   disabled = false,
-  sendActiveWhenEmpty = false,
   onSend,
   agentControls,
   channelChipLabel,
@@ -113,7 +111,7 @@ export function Composer({
   };
 
   const hasText = !disabled && draft.trim().length > 0;
-  const sendEnabled = !disabled && (hasText || sendActiveWhenEmpty);
+  const sendEnabled = hasText;
   const activeOptionId = isSlashOpen
     ? `${listboxId}-option-${safeActiveIndex}`
     : undefined;
@@ -155,9 +153,9 @@ export function Composer({
           />
           <button
             type="button"
-            disabled={disabled}
+            disabled={!sendEnabled}
             aria-label="Send"
-            onClick={disabled ? undefined : onSend}
+            onClick={sendEnabled ? onSend : undefined}
             className={`flex h-btn-md w-touch shrink-0 items-center justify-center rounded-modal border-0 text-phone-title font-bold leading-none transition-quiet disabled:cursor-not-allowed ${
               sendEnabled
                 ? 'bg-accent text-on-accent hover:opacity-90'
@@ -301,9 +299,9 @@ export function Composer({
 
           <button
             type="button"
-            disabled={disabled}
+            disabled={!sendEnabled}
             aria-label="Send"
-            onClick={disabled ? undefined : onSend}
+            onClick={sendEnabled ? onSend : undefined}
             className={`flex size-avatar-lg shrink-0 items-center justify-center rounded-full border-0 text-phone-title font-bold leading-none transition-quiet disabled:cursor-not-allowed ${
               sendEnabled
                 ? 'bg-accent text-on-accent hover:opacity-90'

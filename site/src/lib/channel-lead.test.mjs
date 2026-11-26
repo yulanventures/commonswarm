@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CommandAttempts, UNNAMED_LEAD_LABEL, WORKSPACE_LEAD_UNCONFIRMED_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue,
-  namedChannelLead, parseChannelLeadColumns, setChannelLeadCommand,
+  namedChannelLead, parseChannelLeadColumns, privateChannelNonMemberLeadAgents, setChannelLeadCommand,
 } from "./channel-lead.ts";
 import { CommandOutcomeUnknown, setChannelLead, workspaceChannels } from "./commonswarm.ts";
 
@@ -187,4 +187,41 @@ test("one command id per selection: kept while unanswered, fresh after an answer
   assert.equal(attempts.commandId("u:w:c", `agent:${A}`, fresh), "id-3", "another selection is a new attempt");
   attempts.settle("u:w:c");
   assert.equal(attempts.commandId("u:w:c", `agent:${A}`, fresh), "id-4", "an answered attempt is over");
+});
+
+test("privateChannelNonMemberLeadAgents lists eligible non-member workspace agents for private channels, sorted and excluding duplicates", () => {
+  assert.deepEqual(
+    privateChannelNonMemberLeadAgents({ agents, memberAgentIds: new Set([B]), visibility: "open" }),
+    [],
+    "open channels have no non-member group",
+  );
+  assert.deepEqual(
+    privateChannelNonMemberLeadAgents({ agents, memberAgentIds: null, visibility: "private" }),
+    [],
+    "returns empty while private channel members are not yet known",
+  );
+  assert.deepEqual(
+    privateChannelNonMemberLeadAgents({ agents, memberAgentIds: new Set([B]), visibility: "private" }).map((a) => a.principalId),
+    [A, W],
+    "returns eligible local non-turn-only non-members sorted by name (omitting hosted and turn-only agents)",
+  );
+  assert.deepEqual(
+    privateChannelNonMemberLeadAgents({
+      agents,
+      memberAgentIds: new Set([B]),
+      visibility: "private",
+      excludeIds: new Set([A]),
+    }).map((a) => a.principalId),
+    [W],
+    "excludes agent IDs already emitted in the select options",
+  );
+  const sameName = [
+    { principalId: "22222222-2222-4222-8222-222222222222", name: "Scout", transport: "local", turnOnly: false },
+    { principalId: "11111111-1111-4111-8111-111111111111", name: "Scout", transport: "local", turnOnly: false },
+  ];
+  assert.deepEqual(
+    privateChannelNonMemberLeadAgents({ agents: sameName, memberAgentIds: new Set(), visibility: "private" }).map((a) => a.principalId),
+    ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+    "breaks name ties by principalId",
+  );
 });

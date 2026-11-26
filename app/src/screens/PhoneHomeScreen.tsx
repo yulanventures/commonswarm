@@ -6,7 +6,7 @@ export function PhoneHomeScreen() {
   const isPhone = useIsPhone();
 
   if (!isPhone) {
-    return <Navigate to="/agents/atlas" replace />;
+    return <Navigate to="/" replace />;
   }
 
   return <AppFrame isPhoneHome>{null}</AppFrame>;

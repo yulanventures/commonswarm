@@ -484,7 +484,7 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
     expect(screen.getByRole('heading', { level: 1 })).not.toHaveTextContent('#');
     expect(screen.getByRole('combobox', { name: 'Message Builder' })).toBeDisabled();
 
-    // Click empty channel -> header + disabled composer only, zero message rows.
+    // Click empty channel -> header, empty state, and disabled composer with zero message rows.
     await user.click(screen.getByRole('link', { name: /quiet/ }));
     await waitFor(() => {
       expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('# quiet');
@@ -493,7 +493,12 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       expect(screen.queryByTestId('conversation-loading')).not.toBeInTheDocument();
     });
     expect(screen.queryAllByTestId('message-row')).toHaveLength(0);
-    expect(screen.getByTestId('message-list').textContent).toBe('');
+    expect(screen.getByTestId('conversation-empty')).toHaveTextContent(
+      'No messages yet',
+    );
+    expect(
+      screen.getByRole('combobox', { name: 'Message # quiet' }),
+    ).toHaveAttribute('placeholder', 'Read-only preview');
 
     allWireCalls.push(...harness.wireCalls);
     controller.dispose();

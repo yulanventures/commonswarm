@@ -12,6 +12,7 @@ import { CommandOutcomeUnknown } from '../../lib/commonswarm';
 import { GENERAL_CHANNEL_ID, channelById, channelSubmitProblem, channelSubmitSlug, mayManageChannel } from '../../lib/channels';
 import {
   CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
+  privateChannelNonMemberLeadAgents,
 } from '../../lib/channel-lead';
 
 /** `optional`: declarations an older source may lack, so a test run against it fails on behaviour, not on a missing name. */
@@ -33,12 +34,12 @@ async function dashboardFunctions(names: string[], optional: string[] = []): Pro
 const focused: El[] = [];
 class El {
   children: El[] = []; parent: El | null = null; dataset: Record<string, string> = {}; attrs = new Map<string, string>();
-  listeners = new Map<string, () => void>(); textContent = ''; className = ''; title = ''; type = ''; hidden = false;
+  listeners = new Map<string, () => void>(); textContent = ''; className = ''; title = ''; type = ''; label = ''; hidden = false;
   disabled = false; open = false; #value = '';
   constructor(readonly tag: string) {}
-  get options(): El[] { return this.children; }
+  get options(): El[] { return this.descendants().filter(node => node.tag === 'option'); }
   get value(): string { return this.#value; }
-  set value(next: string) { this.#value = this.tag !== 'select' || this.children.some(option => option.value === next) ? next : ''; }
+  set value(next: string) { this.#value = this.tag !== 'select' || this.options.some(option => option.value === next) ? next : ''; }
   append(...nodes: El[]) { for (const node of nodes) { node.remove(); node.parent = this; this.children.push(node); } }
   insertBefore(node: El, before: El | null) {
     if (!before) { this.append(node); return; }
@@ -76,6 +77,7 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
   const node = (selector: string, tag: string) => { const el = new El(tag); nodes.set(selector, el); return el; };
   const dialog = node('[data-channel-dialog]', 'dialog');
   const select = node('[data-channel-lead-select]', 'select'), label = node('[data-channel-lead-label]', 'label');
+  const leadHead = node('[data-channel-lead-head]', 'div'), leadMembers = node('[data-channel-lead-members]', 'button');
   const slug = node('[data-channel-rename-slug]', 'input'), description = node('[data-channel-edit-description]', 'textarea');
   const save = node('[data-channel-rename-submit]', 'button');
   const copy = node('[data-home-workspace-shell] .hm-ws-header__copy', 'div');
@@ -83,6 +85,7 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
   const context = createContext({
     GENERAL_CHANNEL_ID, channelById, channelSubmitProblem, channelSubmitSlug, mayManageChannel,
     CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
+    privateChannelNonMemberLeadAgents,
     Option,
     document: { createElement: (tag: string) => new El(tag) },
     one: (selector: string) => nodes.get(selector) ?? null,
@@ -94,6 +97,7 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
     refreshChannels: async (...args: unknown[]) => { calls.refreshed.push(args); },
     renderChannelRail: () => {}, renderChannelHead: () => {}, renderHomeShell: () => {}, renderChannelDirectoryDialog: () => {},
     activeChannelArchived: () => false,
+    conversationForChannel: (channelId: string) => ({ conversationId: `conv-${channelId}`, channelId, joined: true }),
     openEntityPanel: (...args: unknown[]) => { calls.entity.push(args); },
     openRosterDialog: () => { calls.roster++; },
     updateChannel: async (...args: unknown[]) => { calls.updateChannel.push(args); throw new Error('channel_update was not expected'); },
@@ -133,10 +137,15 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
     dialog.open = true;
     slug.value = run<string>(`channelById(channels, '${channelId}').slug`); description.value = '';
   };
-  const options = () => select.children.map(option => option.disabled ? [option.value, option.textContent, 'disabled'] : [option.value, option.textContent]);
+  const optionTuple = (option: El) => option.disabled ? [option.value, option.textContent, 'disabled'] : [option.value, option.textContent];
+  const options = () => select.options.map(optionTuple);
+  const selectableOptions = () => select.options.filter(option => !option.disabled).map(optionTuple);
+  const optgroups = () => select.children
+    .filter(child => child.tag === 'optgroup')
+    .map(group => ({ label: group.label, options: group.children.map(optionTuple) }));
   const pill = () => copy.children.find(child => Object.hasOwn(child.dataset, 'channelLeadPill')) ?? null;
   const pillText = () => { const found = pill(); return found ? found.descendants().map(n => n.textContent).filter(Boolean).join('|') : null; };
-  return { calls, context, run, dialog, select, label, save, copy, openSettings, options, pill, pillText };
+  return { calls, context, run, dialog, select, label, leadHead, leadMembers, save, copy, openSettings, options, selectableOptions, optgroups, pill, pillText };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 /** A value made inside the vm, as plain data this realm can compare. */
@@ -145,7 +154,9 @@ const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
 test('the Channel lead select offers the workspace lead, No lead and the agents that may lead, and only to managers', async () => {
   const d = await dashboard();
   d.openSettings(OPEN);
-  assert.equal(d.select.hidden, false); assert.equal(d.label.hidden, false);
+  assert.equal(d.select.hidden, false); assert.equal(d.label.hidden, false); assert.equal(d.leadHead.hidden, false);
+  assert.equal(d.leadMembers.hidden, true, 'open channels never show Add members');
+  assert.deepEqual(d.optgroups(), [], 'open channels never show a Not in channel optgroup');
   assert.deepEqual(d.options(), [['workspace', 'Workspace lead (Atlas)'], ['none', 'No lead'], [`agent:${ATLAS}`, 'Atlas'], [`agent:${BUILDER}`, 'Builder']],
     'hosted and turn-only agents are not offered');
   assert.equal(d.select.value, 'workspace', 'an unset channel shows the default');
@@ -154,12 +165,14 @@ test('the Channel lead select offers the workspace lead, No lead and the agents 
   // A member who did not create the channel: no control at all.
   d.run(`session = { user: { id: '${U2}' } };`);
   d.openSettings(OTHER);
-  assert.equal(d.select.hidden, true); assert.equal(d.label.hidden, true); assert.equal(d.select.children.length, 0);
+  assert.equal(d.select.hidden, true); assert.equal(d.label.hidden, true); assert.equal(d.leadHead.hidden, true);
+  assert.equal(d.leadMembers.hidden, true); assert.equal(d.select.children.length, 0);
   assert.equal(d.run('channelLeadChange()'), null);
   // The member who created it manages it.
   d.run(`channels = channels.map(row => row.channelId === '${OTHER}' ? { ...row, createdByPrincipal: '${U2}' } : row);`);
   d.openSettings(OTHER);
-  assert.equal(d.select.hidden, false);
+  assert.equal(d.select.hidden, false); assert.equal(d.leadHead.hidden, false);
+  assert.equal(d.leadMembers.hidden, true); assert.deepEqual(d.optgroups(), []);
 });
 
 test('a private channel offers only its member agents, keeping the stored lead while they load and naming no unconfirmed lead', async () => {
@@ -169,18 +182,24 @@ test('a private channel offers only its member agents, keeping the stored lead w
   assert.deepEqual(d.calls.members, [['w1', LOCKED]]);
   assert.deepEqual(d.options(), [['workspace', 'Workspace lead'], ['none', 'No lead'], [`agent:${BUILDER}`, 'Builder']],
     'before members are known the workspace lead is not named');
+  assert.deepEqual(d.optgroups(), [], 'before members finish loading there is no Not in channel optgroup');
+  assert.equal(d.leadMembers.hidden, true, 'Add members stays hidden while members are loading');
   assert.equal(d.select.value, `agent:${BUILDER}`, 'the stored lead is selected before members are known');
   d.select.value = 'none';
   answer([BUILDER]); await tick();
-  assert.deepEqual(d.options(), [['workspace', 'Workspace lead (none)'], ['none', 'No lead'], [`agent:${BUILDER}`, 'Builder']],
-    'Atlas is not a member: it is not offered and leads nobody here as the workspace lead');
+  assert.deepEqual(d.selectableOptions(), [['workspace', 'Workspace lead (none)'], ['none', 'No lead'], [`agent:${BUILDER}`, 'Builder']],
+    'Atlas is not a member: it is not selectable and leads nobody here as the workspace lead');
+  assert.deepEqual(d.optgroups(), [{ label: 'Not in channel', options: [[`agent:${ATLAS}`, 'Atlas', 'disabled']] }],
+    'non-member eligible workspace agent appears disabled under Not in channel');
+  assert.equal(d.leadMembers.hidden, false, 'Add members is shown when non-member eligible agents exist on a private channel');
   assert.equal(d.select.value, 'none', 'the members read keeps what the person chose');
 
   // An answer for a dialog that has since closed changes nothing.
   d.openSettings(LOCKED);
   d.run('channelDialogEpoch++;');
   answer([BUILDER, ATLAS]); await tick();
-  assert.deepEqual(d.options().map(([value]) => value), ['workspace', 'none', `agent:${BUILDER}`]);
+  assert.deepEqual(d.selectableOptions().map(([value]) => value), ['workspace', 'none', `agent:${BUILDER}`]);
+  assert.deepEqual(d.optgroups(), [{ label: 'Not in channel', options: [[`agent:${ATLAS}`, 'Atlas', 'disabled']] }]);
 });
 
 test('a stored lead that may not lead here is kept on show, disabled, and never sent', async () => {
@@ -189,6 +208,9 @@ test('a stored lead that may not lead here is kept on show, disabled, and never 
   d.openSettings(LOCKED); await tick();
   assert.deepEqual(d.options(), [['workspace', 'Workspace lead (Atlas)'], ['none', 'No lead'], [`agent:${ATLAS}`, 'Atlas'], [`agent:${BUILDER}`, 'Builder', 'disabled']],
     'the members read redrew the select');
+  assert.deepEqual(d.selectableOptions(), [['workspace', 'Workspace lead (Atlas)'], ['none', 'No lead'], [`agent:${ATLAS}`, 'Atlas']]);
+  assert.deepEqual(d.optgroups(), [], 'the disabled stored lead is not duplicated in Not in channel');
+  assert.equal(d.leadMembers.hidden, false, 'Add members is shown because Builder is not a member');
   assert.equal(d.select.value, `agent:${BUILDER}`, 'the selection does not jump');
   // A choice that became disabled under the person (here: shown after they picked it) is not a change to send.
   d.run(`channelDialogOriginal = { ...channelDialogOriginal, lead: 'none' };`);
@@ -458,10 +480,14 @@ test('only the latest members read writes: an older answer after a newer one, or
   assert.deepEqual(cached(), [ATLAS]);
   assert.equal(d.pillText(), SET_LEAD_LABEL, 'the newer read: Builder is not a member');
   assert.deepEqual(d.options().at(-1), [`agent:${BUILDER}`, 'Builder', 'disabled']);
+  assert.deepEqual(d.selectableOptions().map(([value]) => value), ['workspace', 'none', `agent:${ATLAS}`]);
+  assert.equal(d.run('channelLeadChange()'), null);
   readA!([BUILDER]); await tick();
   assert.deepEqual(cached(), [ATLAS], 'the older read answered last: B\'s members stay');
   assert.equal(d.pillText(), SET_LEAD_LABEL, 'the header does not name a lead the newer read excluded');
   assert.deepEqual(d.options().at(-1), [`agent:${BUILDER}`, 'Builder', 'disabled']);
+  assert.deepEqual(d.selectableOptions().map(([value]) => value), ['workspace', 'none', `agent:${ATLAS}`]);
+  assert.equal(d.run('channelLeadChange()'), null);
 
   // A reset (workspace or account) between reads: the same channel is read again, then the retired read answers.
   d.openSettings(LOCKED);

@@ -89,20 +89,20 @@ function SidebarSkeleton() {
       className="flex flex-col gap-5 px-4 pt-3"
     >
       <div className="flex flex-col gap-2">
-        <div className="h-3 w-16 rounded-sm bg-elevated" />
-        <div className="h-7 w-full rounded-control bg-elevated" />
-        <div className="h-7 w-5/6 rounded-control bg-elevated" />
-        <div className="h-7 w-4/6 rounded-control bg-elevated" />
+        <div className="h-3 w-16 animate-pulse rounded-sm bg-elevated" />
+        <div className="h-7 w-full animate-pulse rounded-control bg-elevated" />
+        <div className="h-7 w-5/6 animate-pulse rounded-control bg-elevated" />
+        <div className="h-7 w-4/6 animate-pulse rounded-control bg-elevated" />
       </div>
       <div className="flex flex-col gap-2">
-        <div className="h-3 w-14 rounded-sm bg-elevated" />
-        <div className="h-10 w-full rounded-control bg-elevated" />
-        <div className="h-10 w-11/12 rounded-control bg-elevated" />
+        <div className="h-3 w-14 animate-pulse rounded-sm bg-elevated" />
+        <div className="h-10 w-full animate-pulse rounded-control bg-elevated" />
+        <div className="h-10 w-11/12 animate-pulse rounded-control bg-elevated" />
       </div>
       <div className="flex flex-col gap-2">
-        <div className="h-3 w-14 rounded-sm bg-elevated" />
-        <div className="h-7 w-3/4 rounded-control bg-elevated" />
-        <div className="h-7 w-2/3 rounded-control bg-elevated" />
+        <div className="h-3 w-14 animate-pulse rounded-sm bg-elevated" />
+        <div className="h-7 w-3/4 animate-pulse rounded-control bg-elevated" />
+        <div className="h-7 w-2/3 animate-pulse rounded-control bg-elevated" />
       </div>
     </div>
   );
@@ -122,6 +122,8 @@ interface SidebarShellProps {
   agents: readonly Agent[];
   people: readonly Person[];
   useSampleComputers: boolean;
+  canAddAgent?: boolean;
+  onSearch?: () => void;
   onSelectConversation?: (conversationId: string) => void;
 }
 
@@ -139,6 +141,8 @@ function SidebarShell({
   agents,
   people,
   useSampleComputers,
+  canAddAgent = false,
+  onSearch,
   onSelectConversation,
 }: SidebarShellProps) {
   const knownComputerIds = useSampleComputers
@@ -212,33 +216,38 @@ function SidebarShell({
       <div className="flex h-header shrink-0 items-center justify-between gap-2 px-4">
         <div className="flex min-w-0 items-center gap-2">
           {workspaceLoading ? (
-            <div className="h-5 w-28 rounded-sm bg-elevated" />
+            <div className="h-5 w-28 animate-pulse rounded-sm bg-elevated" />
           ) : (
             <span className="truncate text-lg font-bold tracking-tight">
               {workspaceName}
             </span>
           )}
         </div>
-        <button
-          type="button"
-          aria-label="Add an agent"
-          onClick={() => appActions.openAddAgentDialog()}
-          className="flex size-touch shrink-0 items-center justify-center rounded-sm bg-subtle text-lg text-ink-secondary transition-quiet hover:bg-active hover:text-ink desktop:size-btn-xs"
-        >
-          +
-        </button>
+        {canAddAgent ? (
+          <button
+            type="button"
+            aria-label="Add an agent"
+            onClick={() => appActions.openAddAgentDialog()}
+            className="flex size-touch shrink-0 items-center justify-center rounded-sm bg-subtle text-lg text-ink-secondary transition-quiet hover:bg-active hover:text-ink desktop:size-btn-xs"
+          >
+            +
+          </button>
+        ) : null}
       </div>
 
-      <div className="shrink-0 px-3 pb-2.5">
-        <button
-          type="button"
-          aria-label="Search workspace"
-          className="flex h-touch w-full items-center justify-between rounded-control bg-elevated px-3 text-ink-muted transition-quiet hover:bg-active hover:text-ink-secondary desktop:h-search"
-        >
-          <span>Search</span>
-          <span className="font-mono text-badge text-ink-muted">⌘K</span>
-        </button>
-      </div>
+      {onSearch ? (
+        <div className="shrink-0 px-3 pb-2.5">
+          <button
+            type="button"
+            aria-label="Search workspace"
+            onClick={onSearch}
+            className="flex h-touch w-full items-center justify-between rounded-control bg-elevated px-3 text-ink-muted transition-quiet hover:bg-active hover:text-ink-secondary desktop:h-search"
+          >
+            <span>Search</span>
+            <span className="font-mono text-badge text-ink-muted">⌘K</span>
+          </button>
+        </div>
+      ) : null}
 
       <nav
         aria-label="Workspace navigation"
@@ -296,46 +305,52 @@ function SidebarShell({
               CHANNELS
             </div>
             <div className="flex flex-col gap-0.5 px-2">
-              {channels.map((channel) => {
-                const targetId = channel.id ?? channel.name;
-                return (
-                  <NavLink
-                    key={targetId}
-                    to={`/channels/${encodeURIComponent(targetId)}`}
-                    onClick={
-                      channel.id && onSelectConversation
-                        ? () => onSelectConversation(channel.id!)
-                        : undefined
-                    }
-                    data-private={channel.isPrivate ? 'true' : undefined}
-                    className={({ isActive }) =>
-                      `flex min-h-touch items-center justify-between gap-2 rounded-control px-2.5 no-underline transition-quiet desktop:h-row-md desktop:min-h-0 ${
-                        isActive
-                          ? 'bg-active font-semibold text-ink'
-                          : channel.unread
-                            ? 'font-semibold text-ink hover:bg-elevated'
-                            : 'text-ink-secondary hover:bg-elevated hover:text-ink'
-                      }`
-                    }
-                  >
-                    <span className="flex min-w-0 items-center truncate">
-                      {channel.isPrivate ? (
-                        <PrivateLockIcon />
-                      ) : (
-                        <span className="inline-block w-hash-col shrink-0 text-ink-muted">
-                          #
-                        </span>
+              {channels.length === 0 ? (
+                <div className="px-2.5 py-1.5 text-sm text-ink-muted">
+                  No channels
+                </div>
+              ) : (
+                channels.map((channel) => {
+                  const targetId = channel.id ?? channel.name;
+                  return (
+                    <NavLink
+                      key={targetId}
+                      to={`/channels/${encodeURIComponent(targetId)}`}
+                      onClick={
+                        channel.id && onSelectConversation
+                          ? () => onSelectConversation(channel.id!)
+                          : undefined
+                      }
+                      data-private={channel.isPrivate ? 'true' : undefined}
+                      className={({ isActive }) =>
+                        `flex min-h-touch items-center justify-between gap-2 rounded-control px-2.5 no-underline transition-quiet desktop:h-row-md desktop:min-h-0 ${
+                          isActive
+                            ? 'bg-active font-semibold text-ink'
+                            : channel.unread
+                              ? 'font-semibold text-ink hover:bg-elevated'
+                              : 'text-ink-secondary hover:bg-elevated hover:text-ink'
+                        }`
+                      }
+                    >
+                      <span className="flex min-w-0 items-center truncate">
+                        {channel.isPrivate ? (
+                          <PrivateLockIcon />
+                        ) : (
+                          <span className="inline-block w-hash-col shrink-0 text-ink-muted">
+                            #
+                          </span>
+                        )}
+                        <span className="truncate">{channel.name}</span>
+                      </span>
+                      {renderUnreadIndicator(
+                        channel.unread,
+                        channel.mentionCount,
+                        channel.unreadCount,
                       )}
-                      <span className="truncate">{channel.name}</span>
-                    </span>
-                    {renderUnreadIndicator(
-                      channel.unread,
-                      channel.mentionCount,
-                      channel.unreadCount,
-                    )}
-                  </NavLink>
-                );
-              })}
+                    </NavLink>
+                  );
+                })
+              )}
             </div>
 
             {directMessages.length > 0 ? (
@@ -377,14 +392,22 @@ function SidebarShell({
 
             <div className="flex items-center justify-between px-4.5 pt-4.5 pb-1.5 text-xs font-semibold tracking-label text-ink-muted">
               <span>AGENTS</span>
-              <button
-                type="button"
-                onClick={() => appActions.openAddAgentDialog()}
-                className="min-h-touch px-1 font-semibold tracking-normal text-accent transition-quiet hover:opacity-85 desktop:min-h-0 desktop:px-0"
-              >
-                + Add
-              </button>
+              {canAddAgent ? (
+                <button
+                  type="button"
+                  onClick={() => appActions.openAddAgentDialog()}
+                  className="min-h-touch px-1 font-semibold tracking-normal text-accent transition-quiet hover:opacity-85 desktop:min-h-0 desktop:px-0"
+                >
+                  + Add
+                </button>
+              ) : null}
             </div>
+
+            {computerGroups.length === 0 && workspaceAgents.length === 0 ? (
+              <div className="px-4.5 py-1.5 text-sm text-ink-muted">
+                No agents
+              </div>
+            ) : null}
 
             {computerGroups.map(({ computer, agents: computerAgents }, index) => (
               <div key={computer.id} role="group" aria-label={computer.name}>
@@ -433,28 +456,34 @@ function SidebarShell({
               PEOPLE
             </div>
             <div className="flex flex-col gap-0.5 px-2" data-testid="sidebar-people">
-              {people.map((person) => (
-                <div
-                  key={person.id}
-                  className={`flex min-h-touch items-center gap-2.5 px-2.5 desktop:h-row-md desktop:min-h-0 ${
-                    person.presence === 'online'
-                      ? 'text-ink-strong'
-                      : 'text-ink-secondary'
-                  }`}
-                >
-                  {person.presence !== undefined ? (
-                    <span
-                      aria-label={person.presence === 'online' ? 'Online' : 'Away'}
-                      className={
-                        person.presence === 'online'
-                          ? 'size-dot-md rounded-full bg-working'
-                          : 'size-dot-md rounded-full border-selected border-offline'
-                      }
-                    />
-                  ) : null}
-                  <span className="truncate">{person.name}</span>
+              {people.length === 0 ? (
+                <div className="px-2.5 py-1.5 text-sm text-ink-muted">
+                  No people
                 </div>
-              ))}
+              ) : (
+                people.map((person) => (
+                  <div
+                    key={person.id}
+                    className={`flex min-h-touch items-center gap-2.5 px-2.5 desktop:h-row-md desktop:min-h-0 ${
+                      person.presence === 'online'
+                        ? 'text-ink-strong'
+                        : 'text-ink-secondary'
+                    }`}
+                  >
+                    {person.presence !== undefined ? (
+                      <span
+                        aria-label={person.presence === 'online' ? 'Online' : 'Away'}
+                        className={
+                          person.presence === 'online'
+                            ? 'size-dot-md rounded-full bg-working'
+                            : 'size-dot-md rounded-full border-selected border-offline'
+                        }
+                      />
+                    ) : null}
+                    <span className="truncate">{person.name}</span>
+                  </div>
+                ))
+              )}
             </div>
           </>
         )}
@@ -502,6 +531,7 @@ function SampleSidebar({ fullWidth }: { fullWidth: boolean }) {
       agents={agents}
       people={PEOPLE}
       useSampleComputers
+      canAddAgent
     />
   );
 }
