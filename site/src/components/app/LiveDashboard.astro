@@ -126,15 +126,35 @@ import "../../styles/kylon-image-viewer.css";
             inputmode="email"
             required
           />
-          <label for="dashboard-password" data-signin-only>Password</label>
-          <input
-            id="dashboard-password"
-            name="password"
-            type="password"
-            autocomplete="current-password"
-            required
-            data-signin-only
-          />
+          <div class="dashboard__password-header" data-signin-only>
+            <label for="dashboard-password" data-signin-only>Password</label>
+            <button class="dashboard__password-forgot" type="button" data-forgot-password data-signin-only>
+              Forgot password?
+            </button>
+          </div>
+          <div class="dashboard__password-field" data-signin-only>
+            <input
+              id="dashboard-password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+              data-signin-only
+              spellcheck="false"
+              autocapitalize="none"
+              autocorrect="off"
+              writingsuggestions="false"
+            />
+            <button
+              class="dashboard__password-toggle"
+              type="button"
+              data-password-toggle="dashboard-password"
+              aria-pressed="false"
+              aria-label="Show password"
+              aria-controls="dashboard-password"
+              data-signin-only
+            >Show</button>
+          </div>
           <div class="dashboard__email-row">
             <button class={passwordSignInClass} type="submit" data-password-signin data-signin-only>
               Sign in
@@ -1177,7 +1197,17 @@ import "../../styles/kylon-image-viewer.css";
     </header>
     <form class="dashboard__password-form" data-password-form novalidate>
       <label for="dashboard-new-password">New password</label>
-      <input id="dashboard-new-password" name="new-password" type="password" autocomplete="new-password" minlength="12" required data-password-new />
+      <div class="dashboard__password-field">
+        <input id="dashboard-new-password" name="new-password" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" autocorrect="off" writingsuggestions="false" minlength="12" required data-password-new />
+        <button
+          class="dashboard__password-toggle"
+          type="button"
+          data-password-toggle="dashboard-new-password"
+          aria-pressed="false"
+          aria-label="Show password"
+          aria-controls="dashboard-new-password"
+        >Show</button>
+      </div>
       <div data-password-code-row hidden>
         <label for="dashboard-password-code">Code from your email</label>
         <input id="dashboard-password-code" name="one-time-code" type="text" inputmode="numeric" autocomplete="one-time-code" data-password-code />
@@ -1279,7 +1309,17 @@ import "../../styles/kylon-image-viewer.css";
         <label for="add-account-email">Email</label>
         <input id="add-account-email" name="email" type="email" autocomplete="username" inputmode="email" required />
         <label for="add-account-password">Password</label>
-        <input id="add-account-password" name="password" type="password" autocomplete="current-password" />
+        <div class="dashboard__password-field">
+          <input id="add-account-password" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" autocorrect="off" writingsuggestions="false" />
+          <button
+            class="dashboard__password-toggle"
+            type="button"
+            data-password-toggle="add-account-password"
+            aria-pressed="false"
+            aria-label="Show password"
+            aria-controls="add-account-password"
+          >Show</button>
+        </div>
         <p class="dashboard__connected-apps-status" data-add-account-status role="status" aria-live="polite"></p>
         <div class="dashboard__signout-others-actions">
           <button class="dashboard__button dashboard__button--primary" type="submit" data-add-account-password-submit>Sign in</button>
@@ -1401,6 +1441,7 @@ import "../../styles/kylon-image-viewer.css";
   import { projectHomeLayout } from "../../lib/kylon-shell/projection";
   import { greetingName } from "../../lib/greeting-name";
   import { PasswordDialogGuard, type PasswordDialogTicket } from "../../lib/password-dialog";
+  import { wirePasswordToggle } from "../../lib/password-visibility";
   import { completePasswordChange, type CurrentCheck } from "../../lib/password-change-completion";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, type RailChannelRowVM, type RailChannelsVM, type RailDirectMessageRowVM, type RailDirectMessagesVM, type RailOrderList } from "../../lib/home-rail";
@@ -2055,6 +2096,9 @@ import "../../styles/kylon-image-viewer.css";
     let session: Session | null = null;
     const passwordGuard = new PasswordDialogGuard();
     let closePasswordDialog = (): void => { passwordGuard.reset(); };
+    let resetSignInPasswordVisibility = (): void => {};
+    let resetAddAccountPasswordVisibility = (): void => {};
+    let resetChangePasswordVisibility = (): void => {};
     let connectedApps: ConnectedApp[] = [];
     let connectedAppsGeneration = 0;
     let accountAgentsGeneration = 0;
@@ -2845,6 +2889,7 @@ import "../../styles/kylon-image-viewer.css";
       for (const section of all<HTMLElement>(".dashboard__root > [data-panel]")) {
         section.hidden = section.dataset.panel !== name;
       }
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       app.dataset.state = name;
       syncListsChrome();
       syncVisibleShell();
@@ -3255,6 +3300,13 @@ import "../../styles/kylon-image-viewer.css";
     /* Sign in, or Create an account for someone sent here by Sign up or Start a workspace. The create
        screen has no password: a password belongs to an existing account. The field is disabled as well
        as hidden, so it is neither validated nor filled, and Enter sends the link. */
+    const signInPasswordToggleBtn = one<HTMLButtonElement>('[data-password-toggle="dashboard-password"]');
+    const signInPasswordToggle = wirePasswordToggle(
+      one<HTMLInputElement>("#dashboard-password"),
+      signInPasswordToggleBtn,
+    );
+    resetSignInPasswordVisibility = signInPasswordToggle.reset;
+
     let authEntry: AuthEntry = "sign-in";
     const showAuthEntry = (entry: AuthEntry): void => {
       authEntry = entry;
@@ -3264,6 +3316,10 @@ import "../../styles/kylon-image-viewer.css";
       for (const part of all<HTMLElement>("[data-signin-only]")) part.hidden = entry === "create";
       const password = one<HTMLInputElement>("#dashboard-password");
       if (password) password.disabled = entry === "create";
+      if (typeof signInPasswordToggle !== "undefined") signInPasswordToggle.reset();
+      if (typeof signInPasswordToggleBtn !== "undefined" && signInPasswordToggleBtn) {
+        signInPasswordToggleBtn.disabled = entry === "create";
+      }
       const emailLink = one<HTMLButtonElement>("[data-email-link]");
       if (emailLink) {
         emailLink.textContent = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()
@@ -3286,6 +3342,7 @@ import "../../styles/kylon-image-viewer.css";
     });
 
     const showAuthView = (name: "choices" | "email-sent"): void => {
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       for (const view of all<HTMLElement>("[data-auth-view]")) {
         view.hidden = view.dataset.authView !== name;
       }
@@ -16213,6 +16270,7 @@ import "../../styles/kylon-image-viewer.css";
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       panelKeyMint = null;
       panelKnownAgents = [];
       disposeCleanup();
@@ -21488,6 +21546,10 @@ import "../../styles/kylon-image-viewer.css";
       await sendSignedOutEmailCodeOrLink(requestedEmail, button);
     });
 
+    one<HTMLButtonElement>("[data-forgot-password]")?.addEventListener("click", () => {
+      one<HTMLButtonElement>("[data-email-link]")?.click();
+    });
+
     one<HTMLButtonElement>("[data-signed-out-otp-resend]")?.addEventListener("click", async (event) => {
       const button = event.currentTarget as HTMLButtonElement;
       const requestedEmail = activeSignedOutOtpEmail || one<HTMLInputElement>("#dashboard-email")?.value.trim() || "";
@@ -21564,6 +21626,7 @@ import "../../styles/kylon-image-viewer.css";
       try {
         await signInWithPassword(email.value.trim(), password.value);
         password.value = "";
+        if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       } catch (error) {
         authError(readableError(error));
         password.focus();
@@ -21820,6 +21883,8 @@ import "../../styles/kylon-image-viewer.css";
     };
     const dismissAllAccountDialogsAndSecrets = (): void => {
       retireAddAccountAttemptsSync();
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
+      if (typeof resetAddAccountPasswordVisibility === "function") resetAddAccountPasswordVisibility();
       closePasswordDialog();
       closeWorkspaceSkillsDialog();
       if (activeImageViewerDialog) {
@@ -22141,6 +22206,7 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     const showAddAccountStep = (step: "entry" | "code"): void => {
+      if (typeof resetAddAccountPasswordVisibility === "function") resetAddAccountPasswordVisibility();
       const entry = one<HTMLElement>("[data-add-account-entry]");
       const codeStep = one<HTMLFormElement>("[data-add-account-code-step]");
       if (entry) entry.hidden = step !== "entry";
@@ -22198,6 +22264,11 @@ import "../../styles/kylon-image-viewer.css";
       const codeStepForm = one<HTMLFormElement>("[data-add-account-code-step]");
       const emailInput = one<HTMLInputElement>("#add-account-email");
       const pwInput = one<HTMLInputElement>("#add-account-password");
+      const addAccountPasswordToggle = wirePasswordToggle(
+        pwInput,
+        one<HTMLButtonElement>('[data-password-toggle="add-account-password"]'),
+      );
+      resetAddAccountPasswordVisibility = addAccountPasswordToggle.reset;
       const otpInput = one<HTMLInputElement>("#add-account-otp");
       const status = one<HTMLElement>("[data-add-account-status]");
       const codeEmailEl = one<HTMLElement>("[data-add-account-code-email]");
@@ -22267,6 +22338,7 @@ import "../../styles/kylon-image-viewer.css";
         lastAccountDialogTrigger = null;
         retireAddAccountAttemptsSync();
         resetAddAccountOtp();
+        addAccountPasswordToggle.reset();
         form?.reset();
         if (status) status.textContent = "";
         if (!promoted && session) focusVisibleAccountTrigger(lastAccountDialogOpener, "dialog-close", trigger);
@@ -22770,6 +22842,9 @@ import "../../styles/kylon-image-viewer.css";
       const dialog = one<HTMLDialogElement>("[data-password-dialog]");
       const form = one<HTMLFormElement>("[data-password-form]");
       const fresh = one<HTMLInputElement>("[data-password-new]");
+      const freshToggleBtn = one<HTMLButtonElement>('[data-password-toggle="dashboard-new-password"]');
+      const newPasswordToggle = wirePasswordToggle(fresh, freshToggleBtn);
+      resetChangePasswordVisibility = newPasswordToggle.reset;
       const codeRow = one<HTMLElement>("[data-password-code-row]");
       const code = one<HTMLInputElement>("[data-password-code]");
       const save = one<HTMLButtonElement>("[data-password-save]");
@@ -22777,6 +22852,8 @@ import "../../styles/kylon-image-viewer.css";
       const status = one<HTMLElement>("[data-password-status]");
       const clear = (): void => {
         if (fresh) { fresh.value = ""; fresh.disabled = false; }
+        newPasswordToggle.reset();
+        if (freshToggleBtn) freshToggleBtn.disabled = false;
         if (code) code.value = "";
         if (codeRow) codeRow.hidden = true;
         if (status) status.textContent = "";
@@ -22855,7 +22932,7 @@ import "../../styles/kylon-image-viewer.css";
           if (passwordChangeNotice === notice) passwordChangeNotice = null;
           if (outcome.kind === "superseded") return;
           if (!passwordGuard.live(ticket, session?.user.id)) return;
-          fresh.disabled = true; codeRow.hidden = true; save.hidden = true; cancel.textContent = "Done";
+          fresh.disabled = true; newPasswordToggle.reset(); if (freshToggleBtn) freshToggleBtn.disabled = true; codeRow.hidden = true; save.hidden = true; cancel.textContent = "Done";
           status.textContent = outcome.kind === "still-signed-in"
             ? "Password changed. Not every device could be signed out. Sign out, then sign in again."
             : "Password changed. Reload the page, then sign in again.";
@@ -23205,7 +23282,12 @@ import "../../styles/kylon-image-viewer.css";
     /* The draft write is debounced, and a debounced write must not be lost to the page ending.
      * These are the ways it ends — reload, close, navigation, and switching away on a phone —
      * and each one takes the pending write now instead of after the delay. */
-    window.addEventListener("pagehide", () => flushComposerDraft());
+    window.addEventListener("pagehide", () => {
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
+      if (typeof resetAddAccountPasswordVisibility === "function") resetAddAccountPasswordVisibility();
+      if (typeof resetChangePasswordVisibility === "function") resetChangePasswordVisibility();
+      flushComposerDraft();
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") flushComposerDraft();
     });
@@ -25732,6 +25814,78 @@ import "../../styles/kylon-image-viewer.css";
     color: var(--text);
     font-size: var(--t-sm);
     font-weight: var(--weight-semibold);
+  }
+
+  .dashboard__password-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-3);
+  }
+
+  .dashboard__password-header[hidden],
+  .dashboard__password-field[hidden] {
+    display: none;
+  }
+
+  .dashboard__password-forgot {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 2.75rem;
+    margin-block: -0.5rem;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    font: inherit;
+    font-size: var(--t-sm);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+
+  .dashboard__password-forgot:hover:not(:disabled) {
+    color: var(--text);
+  }
+
+  .dashboard__password-field {
+    position: relative;
+    display: grid;
+  }
+
+  .dashboard__password-field input {
+    padding-inline-end: 4.5rem;
+  }
+
+  .dashboard__password-toggle {
+    position: absolute;
+    inset-inline-end: 0;
+    inset-block-start: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: 2.75rem;
+    min-block-size: 2.75rem;
+    padding: 0 var(--s-3);
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius);
+    font: inherit;
+    font-size: var(--t-sm);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+  }
+
+  .dashboard__password-toggle:hover:not(:disabled) {
+    color: var(--text);
+  }
+
+  .dashboard__password-toggle:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
   .dashboard__email-row {

@@ -54,7 +54,7 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-o
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__receipt-title {
   font: 600 20px/28px var(--k-shell-font); letter-spacing: 0;
 }
-invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__lead, .invite-onramp__intro, .invite-onramp__facts p, .hm-invite-connect__lead, .hm-invite-connect__caption, .hm-invite-connect__step-line) {
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__lead, .invite-onramp__facts p, .hm-invite-connect__lead, .hm-invite-connect__caption, .hm-invite-connect__step-line) {
   font-size: 14px; line-height: 22px;
 }
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__eyebrow, .invite-onramp__facet, .invite-onramp__choices legend, .invite-onramp__auth label) {
@@ -64,10 +64,9 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invi
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__eyebrow {
   color: var(--k-shell-secondary);
 }
-invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__steps li, .invite-onramp__choice, .invite-onramp__assistant strong, .hm-invite-connect__step-head) {
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__assistant strong, .hm-invite-connect__step-head) {
   font-size: 14px; font-weight: 600; line-height: 22px;
 }
-invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__steps span,
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .hm-ahp__step::before {
   font: 600 14px/22px var(--k-shell-font);
 }
@@ -80,7 +79,7 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-o
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__fineprint, .hm-invite-connect__step, .hm-invite-connect__status) {
   font-size: 12px; line-height: 18px;
 }
-invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__steps, .invite-onramp__choice, .invite-onramp__receipt, .invite-onramp__error, .invite-onramp__hint, .hm-invite-connect__panel, .hm-ahp__copyable, .hm-invite-connect__capsule) {
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__receipt, .invite-onramp__error, .invite-onramp__hint, .hm-invite-connect__panel, .hm-ahp__copyable, .hm-invite-connect__capsule) {
   border-radius: 10px;
 }
 /* Keep the native minimum sizes, padding, widths and primary/quiet/disabled
@@ -95,6 +94,19 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-o
   border-color: var(--k-shell-control); border-radius: 6px;
   background: var(--k-shell-surface);
   font: 400 16px/24px var(--k-shell-font);
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__password-field input {
+  padding-inline-end: 4.5rem;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__password-toggle,
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__password-forgot {
+  color: var(--k-shell-secondary);
+  font: 500 13px/20px var(--k-shell-font);
+  border-radius: 6px;
+}
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__password-toggle:hover:not(:disabled),
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__password-forgot:hover:not(:disabled) {
+  color: var(--k-shell-ink);
 }
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__auth input:focus-visible {
   border-color: var(--k-shell-focus);
@@ -134,7 +146,7 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-o
   background: var(--k-shell-selected);
   box-shadow: inset 0 0 0 1.5px var(--k-shell-selection-edge);
 }
-invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible,
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], input[type="password"], input[type="text"], summary):focus-visible,
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent):has(input:focus-visible) {
   outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
 }
@@ -145,7 +157,7 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invi
   box-shadow: inset 0 0 0 1.5px var(--k-shell-control);
 }
 /* Direct controls use the shared outline, replacing the inherited halo. */
-invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible {
+invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], input[type="password"], input[type="text"], summary):focus-visible {
   box-shadow: none;
 }
 /* Quiet actions keep their resting 1.5px edge under the shared outline. */
@@ -158,7 +170,7 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-o
   }
 }
 @media (forced-colors: active) {
-  invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], summary):focus-visible,
+  invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(a[href], button, input[type="email"], input[type="password"], input[type="text"], summary):focus-visible,
   invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invite-onramp__choice, .invite-onramp__consent):has(input:focus-visible) {
     outline: 2px solid Highlight; outline-offset: 2px;
   }

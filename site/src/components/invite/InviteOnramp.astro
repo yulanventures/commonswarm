@@ -59,11 +59,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     <p class="invite-onramp__lead">
       Sign in as yourself to accept. New to CommonSwarm? Signing in creates your free account.
     </p>
-    <ol class="invite-onramp__steps" role="list" aria-label="What happens next">
-      <li><span>1</span>Sign in as yourself</li>
-      <li><span>2</span>Choose what you share</li>
-      <li><span>3</span>Connect your own agents</li>
-    </ol>
     <ProviderButtons
       buttonClass="invite-onramp__button invite-onramp__button--quiet"
       listClass="invite-onramp__providers"
@@ -73,8 +68,21 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     <form class="invite-onramp__auth" method="post" data-email-form>
       <label for="invite-email">Email</label>
       <input id="invite-email" name="email" type="email" autocomplete="username" required />
-      <label for="invite-password">Password</label>
-      <input id="invite-password" name="password" type="password" autocomplete="current-password" required />
+      <div class="invite-onramp__password-header">
+        <label for="invite-password">Password</label>
+        <button class="invite-onramp__password-forgot" type="button" data-forgot-password>Forgot password?</button>
+      </div>
+      <div class="invite-onramp__password-field">
+        <input id="invite-password" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" autocorrect="off" writingsuggestions="false" required />
+        <button
+          class="invite-onramp__password-toggle"
+          type="button"
+          data-password-toggle="invite-password"
+          aria-pressed="false"
+          aria-label="Show password"
+          aria-controls="invite-password"
+        >Show</button>
+      </div>
       <button class="invite-onramp__button" type="submit" data-password-signin>Sign in</button>
       <button class="invite-onramp__button invite-onramp__button--quiet" type="button" data-email-link>Email me a sign-in link</button>
     </form>
@@ -108,7 +116,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     </div>
     <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>a workspace</span>.</h1>
     <p class="invite-onramp__identity-notice" data-review-identity-notice role="status" aria-live="polite" hidden></p>
-    <p class="invite-onramp__intro">A shared workspace for the people in it and the assistants they each already use.</p>
 
     <fieldset class="invite-onramp__choices invite-onramp__choices--assistant">
       <legend>Which assistant will you bring?</legend>
@@ -265,6 +272,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     accountManager,
   } from "../../lib/commonswarm";
   import { authProvider, listSentence } from "../../lib/auth-providers";
+  import { wirePasswordToggle } from "../../lib/password-visibility";
   import {
     assertInviteDeployment,
     decodeMemberInvite,
@@ -327,7 +335,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         })
         .filter((name) => name.length > 0);
 
+    const invitePasswordToggle = wirePasswordToggle(
+      one<HTMLInputElement>("#invite-password"),
+      one<HTMLButtonElement>('[data-password-toggle="invite-password"]'),
+    );
+
     const show = (name: string): void => {
+      invitePasswordToggle.reset();
       for (const view of host.querySelectorAll<HTMLElement>("[data-view]")) {
         view.hidden = view.dataset.view !== name;
       }
@@ -816,6 +830,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     let inviteOtpEmail = "";
     let inviteOtpIntentGen = 0;
     const showInviteAuthStep = (step: "entry" | "code"): void => {
+      invitePasswordToggle.reset();
       const emailForm = one<HTMLFormElement>("[data-email-form]");
       const otpForm = one<HTMLFormElement>("[data-invite-otp-form]");
       if (emailForm) emailForm.hidden = step !== "entry";
@@ -898,6 +913,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       const requestedEmail = input.value.trim();
       if (!requestedEmail || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
       await sendInviteEmailCodeOrLink(requestedEmail, event.currentTarget as HTMLButtonElement);
+    });
+
+    one<HTMLButtonElement>("[data-forgot-password]")?.addEventListener("click", () => {
+      one<HTMLButtonElement>("[data-email-link]")?.click();
     });
 
     one<HTMLButtonElement>("[data-invite-otp-resend]")?.addEventListener("click", async (event) => {
@@ -992,6 +1011,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       try {
         await signInWithPassword(email.value.trim(), password.value);
         password.value = "";
+        invitePasswordToggle.reset();
         await boot();
       } catch (caught) {
         if (error) {
@@ -1392,39 +1412,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__pair-arrow { flex: none; }
 
-  .invite-onramp__steps {
-    display: flex;
-    flex-direction: column;
-    margin: 0;
-    padding: 4px 16px;
-    list-style: none;
-    background: var(--home-rail-raised);
-    border-radius: 18px;
-  }
-
-  .invite-onramp__steps li {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-block-size: 48px;
-    color: var(--home-rail-strong);
-    font-weight: 700;
-  }
-
-  .invite-onramp__steps li + li {
-    border-block-start: 1px solid var(--home-rail-divider);
-  }
-
-  .invite-onramp__steps span {
-    inline-size: 26px;
-    flex: none;
-    color: var(--home-accent-text);
-    font-family: var(--home-font-display);
-    font-size: 20px;
-    font-weight: 700;
-    line-height: 1.1;
-  }
-
   /* Sign-in choices. The buttons come from ProviderButtons, so they are reached with :global. */
   .invite-onramp :global(.invite-onramp__providers) {
     display: grid;
@@ -1541,6 +1528,75 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     font-weight: 700;
   }
 
+  .invite-onramp__password-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .invite-onramp__password-forgot {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
+    margin-block: -8px;
+    padding: 0;
+    color: var(--home-rail-soft);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+
+  .invite-onramp__password-forgot:hover:not(:disabled) {
+    color: var(--home-rail-strong);
+  }
+
+  .invite-onramp__password-field {
+    position: relative;
+    display: grid;
+  }
+
+  .invite-onramp__password-field input {
+    padding-inline-end: 4.5rem;
+  }
+
+  .invite-onramp__password-toggle {
+    position: absolute;
+    inset-inline-end: 0;
+    inset-block-start: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    padding: 0 12px;
+    color: var(--home-rail-soft);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .invite-onramp__password-toggle:hover:not(:disabled) {
+    color: var(--home-rail-strong);
+  }
+
+  .invite-onramp__password-toggle:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
   .invite-onramp__auth input {
     box-sizing: border-box;
     min-block-size: 52px;
@@ -1585,21 +1641,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     display: none;
   }
 
-  /* Review: the canvas Phone-Join rhythm (faces, 18, title, 12, intro, 22, assistants), then the
+  /* Review: the canvas Phone-Join rhythm (faces, 18, title, 22, assistants), then the
      access choice, the facts and the box, with the Join pill held at the bottom of the screen. */
   .invite-onramp__panel[data-view="review"] {
     gap: 0;
   }
 
   [data-view="review"] > .invite-onramp__title { margin-block-start: 18px; }
-
-  .invite-onramp .invite-onramp__intro {
-    margin: 12px 0 0;
-    font-size: 17px;
-    line-height: 1.4;
-    color: var(--home-rail-soft);
-    text-wrap: pretty;
-  }
 
   [data-view="review"] > .invite-onramp__choices { margin-block-start: 22px; }
   [data-view="review"] > .invite-onramp__choices + .invite-onramp__choices { margin-block-start: 26px; }
