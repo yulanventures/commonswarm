@@ -4,8 +4,10 @@ import { getOpenWaitingCount, useAppStore } from '../store/appStore';
 
 function PhoneBottomBarView({
   openWaitingCount,
+  agentsHref,
 }: {
   openWaitingCount: number | null;
+  agentsHref: string;
 }) {
   const location = useLocation();
 
@@ -51,7 +53,7 @@ function PhoneBottomBarView({
         <span>Waiting</span>
       </Link>
       <Link
-        to="/agents/atlas"
+        to={agentsHref}
         aria-current={isAgents ? 'page' : undefined}
         className={`flex min-h-touch flex-col items-center justify-center no-underline transition-quiet ${
           isAgents
@@ -75,13 +77,25 @@ function PhoneBottomBarView({
 }
 
 function RealPhoneBottomBar() {
-  const { waitingCount } = useRealSidebarData();
-  return <PhoneBottomBarView openWaitingCount={waitingCount} />;
+  const { waitingCount, agents } = useRealSidebarData();
+  const agentsHref =
+    agents.length > 0 ? `/agents/${encodeURIComponent(agents[0]!.id)}` : '/home';
+  return (
+    <PhoneBottomBarView
+      openWaitingCount={waitingCount}
+      agentsHref={agentsHref}
+    />
+  );
 }
 
 function SamplePhoneBottomBar() {
   const openWaitingCount = useAppStore(getOpenWaitingCount);
-  return <PhoneBottomBarView openWaitingCount={openWaitingCount} />;
+  return (
+    <PhoneBottomBarView
+      openWaitingCount={openWaitingCount}
+      agentsHref="/agents/atlas"
+    />
+  );
 }
 
 export function PhoneBottomBar() {

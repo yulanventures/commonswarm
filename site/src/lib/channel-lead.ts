@@ -116,6 +116,40 @@ export function channelLeadOptions(input: ChannelLeadOptionsInput): ChannelLeadO
   ];
 }
 
+export interface PrivateChannelNonMemberLeadAgentsInput {
+  agents: readonly LeadAgent[];
+  /** A private channel's member agents; null while they are not known. */
+  memberAgentIds?: ReadonlySet<string> | null;
+  visibility?: "open" | "private" | null;
+  /** Agent principal IDs already emitted in the select options. */
+  excludeIds?: ReadonlySet<string> | null;
+}
+
+/**
+ * Eligible local non-turn-only workspace agents that are not members of a private channel.
+ * Shown as disabled options under "Not in channel" so the viewer sees why they cannot be chosen yet.
+ */
+export function privateChannelNonMemberLeadAgents(
+  input: PrivateChannelNonMemberLeadAgentsInput,
+): LeadAgent[] {
+  if (input.visibility !== "private" || !input.memberAgentIds) return [];
+  const members = input.memberAgentIds;
+  const excluded = input.excludeIds ?? null;
+  return input.agents
+    .filter(
+      (agent) =>
+        mayLeadChannel(agent) &&
+        !members.has(agent.principalId) &&
+        (!excluded || !excluded.has(agent.principalId)),
+    )
+    .sort((left, right) =>
+      left.name < right.name ? -1
+      : left.name > right.name ? 1
+      : left.principalId < right.principalId ? -1
+      : left.principalId > right.principalId ? 1 : 0,
+    );
+}
+
 /**
  * What a named channel's header names (#general always names the workspace lead):
  * - "quiet": No lead, chosen on purpose. Nothing is shown.

@@ -6,6 +6,7 @@ import { Avatar } from './Avatar';
 
 interface SessionHeaderProps {
   agent: Agent;
+  onStop?: () => void;
 }
 
 const PILL_STYLES: Record<
@@ -43,7 +44,7 @@ const PHONE_STATE_TEXT: Record<AgentState, string> = {
   idle: 'Idle',
 };
 
-export function SessionHeader({ agent }: SessionHeaderProps) {
+export function SessionHeader({ agent, onStop }: SessionHeaderProps) {
   const isPhone = useIsPhone();
   const computer = agent.computerId
     ? COMPUTERS.find((c) => c.id === agent.computerId)
@@ -135,13 +136,15 @@ export function SessionHeader({ agent }: SessionHeaderProps) {
 
       <div className="flex-1" />
 
-      <button
-        type="button"
-        onClick={() => undefined}
-        className="inline-flex h-btn-sm shrink-0 items-center rounded-control border border-border bg-transparent px-3.5 text-sm font-medium text-ink-strong transition-quiet hover:border-border-strong hover:bg-raised hover:text-ink"
-      >
-        Stop
-      </button>
+      {onStop ? (
+        <button
+          type="button"
+          onClick={onStop}
+          className="inline-flex h-btn-sm shrink-0 items-center rounded-control border border-border bg-transparent px-3.5 text-sm font-medium text-ink-strong transition-quiet hover:border-border-strong hover:bg-raised hover:text-ink"
+        >
+          Stop
+        </button>
+      ) : null}
     </header>
   );
 }

@@ -1,44 +1,58 @@
+import { useRef, type KeyboardEvent } from 'react';
 import { Link } from 'react-router';
 import { AppFrame } from '../components/AppFrame';
 import { ClearedList } from '../components/ClearedList';
+import { EmptyWorkspaceState } from '../components/EmptyWorkspaceState';
 import { WaitingItemCard } from '../components/WaitingItemCard';
-import { WORKSPACE_UNAVAILABLE_TEXT, useSessionSnapshot } from '../data/queries';
+import {
+  WORKSPACE_UNAVAILABLE_TEXT,
+  useRealSidebarData,
+  useSessionSnapshot,
+} from '../data/queries';
 import {
   appActions,
   getOpenWaitingCount,
   useAppStore,
 } from '../store/appStore';
 
-export function WaitingScreen() {
-  const snapshot = useSessionSnapshot();
-  const unavailableWorkspaceId = useAppStore(
-    (state) => state.unavailableWorkspaceId,
-  );
+function WaitingScreenBody() {
   const agents = useAppStore((state) => state.agents);
   const waitingItems = useAppStore((state) => state.waitingItems);
   const clearedItems = useAppStore((state) => state.clearedItems);
   const filter = useAppStore((state) => state.waitingFilter);
   const openCount = useAppStore(getOpenWaitingCount);
-
-  if (
-    snapshot.state.status === 'authenticated' &&
-    unavailableWorkspaceId !== null
-  ) {
-    return (
-      <AppFrame>
-        <div
-          data-testid="workspace-unavailable-pane"
-          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
-        >
-          {WORKSPACE_UNAVAILABLE_TEXT}
-        </div>
-      </AppFrame>
-    );
-  }
+  const openTabRef = useRef<HTMLButtonElement>(null);
+  const archivedTabRef = useRef<HTMLButtonElement>(null);
 
   const visibleItems = waitingItems.filter(
     (item) => item.status === 'open' || item.status === 'dismissed',
   );
+
+  const selectTab = (next: 'open' | 'archived'): void => {
+    appActions.setWaitingFilter(next);
+    if (next === 'open') {
+      openTabRef.current?.focus();
+    } else {
+      archivedTabRef.current?.focus();
+    }
+  };
+
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      selectTab(filter === 'open' ? 'archived' : 'open');
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      selectTab('open');
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      selectTab('archived');
+    }
+  };
 
   return (
     <AppFrame>
@@ -61,11 +75,20 @@ export function WaitingScreen() {
           Sample data
         </span>
 
-        <div role="tablist" aria-label="Filter items" className="flex items-center gap-3">
+        <div
+          role="tablist"
+          aria-label="Filter items"
+          onKeyDown={handleTabKeyDown}
+          className="flex items-center gap-3"
+        >
           <button
+            ref={openTabRef}
+            id="waiting-tab-open"
             type="button"
             role="tab"
             aria-selected={filter === 'open'}
+            aria-controls="waiting-panel-open"
+            tabIndex={filter === 'open' ? 0 : -1}
             onClick={() => appActions.setWaitingFilter('open')}
             className={`flex h-touch items-center rounded-control px-3 text-sm transition-quiet desktop:h-row-sm ${
               filter === 'open'
@@ -76,9 +99,13 @@ export function WaitingScreen() {
             Open · {openCount}
           </button>
           <button
+            ref={archivedTabRef}
+            id="waiting-tab-archived"
             type="button"
             role="tab"
             aria-selected={filter === 'archived'}
+            aria-controls="waiting-panel-archived"
+            tabIndex={filter === 'archived' ? 0 : -1}
             onClick={() => appActions.setWaitingFilter('archived')}
             className={`flex h-touch items-center rounded-control px-3 text-sm transition-quiet desktop:h-row-sm ${
               filter === 'archived'
@@ -91,26 +118,90 @@ export function WaitingScreen() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-4.5 py-5 desktop:max-w-waiting-max desktop:px-pad-page desktop:py-pad-section">
+      <div
+        role="tabpanel"
+        id={filter === 'open' ? 'waiting-panel-open' : 'waiting-panel-archived'}
+        aria-labelledby={
+          filter === 'open' ? 'waiting-tab-open' : 'waiting-tab-archived'
+        }
+        className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-4.5 py-5 desktop:max-w-waiting-max desktop:px-pad-page desktop:py-pad-section"
+      >
         {filter === 'open' ? (
           <>
-            {visibleItems.map((item) => (
-              <WaitingItemCard
-                key={item.id}
-                item={item}
-                agent={
-                  item.status === 'dismissed'
-                    ? undefined
-                    : agents.find((agent) => agent.id === item.agentId)
-                }
-              />
-            ))}
+            {visibleItems.length === 0 ? (
+              <div
+                data-testid="waiting-empty"
+                className="py-8 text-center text-sm text-ink-muted"
+              >
+                All caught up
+              </div>
+            ) : (
+              visibleItems.map((item) => (
+                <WaitingItemCard
+                  key={item.id}
+                  item={item}
+                  agent={
+                    item.status === 'dismissed'
+                      ? undefined
+                      : agents.find((agent) => agent.id === item.agentId)
+                  }
+                />
+              ))
+            )}
             <ClearedList items={clearedItems} />
           </>
+        ) : clearedItems.length === 0 ? (
+          <div
+            data-testid="archived-empty"
+            className="py-8 text-center text-sm text-ink-muted"
+          >
+            Nothing archived
+          </div>
         ) : (
           <ClearedList items={clearedItems} />
         )}
       </div>
     </AppFrame>
   );
+}
+
+function RealWaitingScreen() {
+  const sidebar = useRealSidebarData();
+
+  if (sidebar.workspaceUnavailable) {
+    return (
+      <AppFrame>
+        <div
+          data-testid="workspace-unavailable-pane"
+          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
+        >
+          {WORKSPACE_UNAVAILABLE_TEXT}
+        </div>
+      </AppFrame>
+    );
+  }
+
+  if (
+    !sidebar.workspacesLoading &&
+    !sidebar.workspacesError &&
+    sidebar.workspaces.length === 0
+  ) {
+    return (
+      <AppFrame>
+        <EmptyWorkspaceState />
+      </AppFrame>
+    );
+  }
+
+  return <WaitingScreenBody />;
+}
+
+export function WaitingScreen() {
+  const snapshot = useSessionSnapshot();
+
+  if (snapshot.state.status === 'authenticated') {
+    return <RealWaitingScreen />;
+  }
+
+  return <WaitingScreenBody />;
 }

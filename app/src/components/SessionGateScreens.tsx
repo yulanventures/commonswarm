@@ -63,8 +63,8 @@ export function SessionCheckingScreen() {
       className="flex h-full w-full items-center justify-center bg-ground px-6 text-ink"
     >
       <div className="flex w-44 flex-col gap-2.5" aria-label="Loading">
-        <div className="h-3 w-3/4 rounded-sm bg-elevated" />
-        <div className="h-3 w-1/2 rounded-sm bg-elevated" />
+        <div className="h-3 w-3/4 animate-pulse rounded-sm bg-elevated" />
+        <div className="h-3 w-1/2 animate-pulse rounded-sm bg-elevated" />
       </div>
     </main>
   );
@@ -80,13 +80,21 @@ export function SessionRecoveryScreen({ onRetry }: { onRetry: () => void }) {
         <h1 className="text-lg font-bold tracking-tight text-ink">
           Couldn&apos;t check your sign-in.
         </h1>
-        <button
-          type="button"
-          onClick={onRetry}
-          className="inline-flex h-btn-lg cursor-pointer items-center rounded-md bg-accent px-5 text-md font-bold text-on-accent transition-quiet hover:opacity-90"
-        >
-          Try again
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={onRetry}
+            className="inline-flex h-btn-lg cursor-pointer items-center rounded-md bg-accent px-5 text-md font-bold text-on-accent transition-quiet hover:opacity-90"
+          >
+            Try again
+          </button>
+          <a
+            href="/app"
+            className="inline-flex h-btn-lg items-center rounded-md border border-border-strong bg-transparent px-4 text-md font-medium text-ink-strong no-underline transition-quiet hover:bg-active hover:text-ink"
+          >
+            Open CommonSwarm
+          </a>
+        </div>
       </div>
     </main>
   );

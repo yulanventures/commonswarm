@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router';
 import { AppFrame } from '../components/AppFrame';
 import { ChannelDetailsPanel } from '../components/ChannelDetailsPanel';
 import { Composer } from '../components/Composer';
+import { EmptyWorkspaceState } from '../components/EmptyWorkspaceState';
 import { MessageRow } from '../components/MessageRow';
 import { ReviewCard } from '../components/ReviewCard';
 import { WorkingCard } from '../components/WorkingCard';
@@ -12,6 +13,7 @@ import {
   CONVERSATION_UNAVAILABLE_TEXT,
   WORKSPACE_UNAVAILABLE_TEXT,
   useRealConversationData,
+  useRealSidebarData,
   useSessionSnapshot,
 } from '../data/queries';
 import { appActions, useAppStore } from '../store/appStore';
@@ -43,14 +45,14 @@ function MessageListSkeleton() {
     >
       {[0, 1, 2, 3].map((row) => (
         <div key={row} className="flex gap-3.5">
-          <div className="size-avatar-lg shrink-0 rounded-full bg-elevated" />
+          <div className="size-avatar-lg shrink-0 animate-pulse rounded-full bg-elevated" />
           <div className="flex flex-1 flex-col gap-2 pt-0.5">
             <div className="flex items-center gap-2">
-              <div className="h-3.5 w-24 rounded-sm bg-elevated" />
-              <div className="h-3 w-10 rounded-sm bg-elevated" />
+              <div className="h-3.5 w-24 animate-pulse rounded-sm bg-elevated" />
+              <div className="h-3 w-10 animate-pulse rounded-sm bg-elevated" />
             </div>
             <div
-              className={`h-4 rounded-sm bg-elevated ${
+              className={`h-4 animate-pulse rounded-sm bg-elevated ${
                 row % 2 === 0 ? 'w-3/4' : 'w-1/2'
               }`}
             />
@@ -73,6 +75,7 @@ function formatMemberCounts(peopleCount: number, agentCount: number): string {
 }
 
 function RealChannelScreen({ routeParam }: { routeParam: string | undefined }) {
+  const sidebar = useRealSidebarData();
   const data = useRealConversationData(routeParam);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const activeScopeKey =
@@ -180,6 +183,19 @@ function RealChannelScreen({ routeParam }: { routeParam: string | undefined }) {
     );
   }
 
+  if (
+    !sidebar.workspacesLoading &&
+    !sidebar.workspacesError &&
+    !sidebar.workspaceUnavailable &&
+    sidebar.workspaces.length === 0
+  ) {
+    return (
+      <AppFrame>
+        <EmptyWorkspaceState />
+      </AppFrame>
+    );
+  }
+
   if (data.status === 'unavailable') {
     return (
       <AppFrame>
@@ -204,7 +220,7 @@ function RealChannelScreen({ routeParam }: { routeParam: string | undefined }) {
           >
             ‹
           </Link>
-          <div className="h-5 w-32 rounded-sm bg-elevated" />
+          <div className="h-5 w-32 animate-pulse rounded-sm bg-elevated" />
         </header>
         <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4.5 pt-5 pb-4 desktop:px-pad-page desktop:pt-6.5">
           <MessageListSkeleton />
@@ -339,6 +355,13 @@ function RealChannelScreen({ routeParam }: { routeParam: string | undefined }) {
               Retry
             </button>
           </div>
+        ) : streamRows.length === 0 ? (
+          <div
+            data-testid="conversation-empty"
+            className="flex flex-1 items-center justify-center text-sm text-ink-muted"
+          >
+            No messages yet
+          </div>
         ) : (
           <>
             {data.loadingOlder ? (
@@ -392,8 +415,8 @@ function RealChannelScreen({ routeParam }: { routeParam: string | undefined }) {
       <div className="shrink-0 desktop:px-pad-page desktop:pb-6">
         <Composer
           targetKey={`conversation:${data.conversationId}`}
-          placeholder={`Message ${composerTargetName}`}
-          phonePlaceholder={`Message ${composerTargetName}`}
+          placeholder="Read-only preview"
+          phonePlaceholder="Read-only preview"
           inputLabel={`Message ${composerTargetName}`}
           disabled
           onSend={NOOP}

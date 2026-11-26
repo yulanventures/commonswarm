@@ -1,8 +1,13 @@
 import { Dialog } from 'radix-ui';
-import { useEffect, useRef, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import { COMPUTERS, HARNESSES, PERMISSION_MODES } from '../data/fixtures';
 import { appActions, useAppStore } from '../store/appStore';
+
+interface FieldErrors {
+  name?: string;
+  folder?: string;
+}
 
 export function AddAgentDialog() {
   const navigate = useNavigate();
@@ -10,6 +15,9 @@ export function AddAgentDialog() {
   const open = useAppStore((state) => state.addAgentDialogOpen);
   const draft = useAppStore((state) => state.addAgentDraft);
   const agents = useAppStore((state) => state.agents);
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const nameErrorId = useId();
+  const folderErrorId = useId();
   const routeKey = `${location.pathname}${location.search}${location.hash}`;
   const prevRouteKeyRef = useRef(routeKey);
 
@@ -22,8 +30,26 @@ export function AddAgentDialog() {
     }
   }, [routeKey, open]);
 
+  useEffect(() => {
+    if (!open) {
+      setErrors({});
+    }
+  }, [open]);
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
+    const nextErrors: FieldErrors = {};
+    if (!draft.name.trim()) {
+      nextErrors.name = 'Enter a name';
+    }
+    if (!draft.folder.trim()) {
+      nextErrors.folder = 'Enter a folder';
+    }
+    if (nextErrors.name || nextErrors.folder) {
+      setErrors(nextErrors);
+      return;
+    }
+    setErrors({});
     const newId = appActions.submitAddAgent();
     if (newId) {
       navigate(`/agents/${newId}`);
@@ -35,20 +61,29 @@ export function AddAgentDialog() {
       open={open}
       onOpenChange={(nextOpen) => {
         if (!nextOpen) {
+          setErrors({});
           appActions.closeAddAgentDialog();
         }
       }}
     >
       <Dialog.Portal>
-        <div
-          aria-hidden="true"
-          className="animate-overlay-in pointer-events-auto fixed inset-0 z-40 bg-backdrop/85"
-        />
+        <Dialog.Overlay className="animate-overlay-in fixed inset-0 z-40 bg-backdrop/85" />
         <Dialog.Content className="animate-dialog-in fixed top-1/2 left-1/2 z-50 max-h-full w-full max-w-dialog -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-modal border border-border bg-elevated px-pad-dialog-x py-pad-dialog-y text-ink shadow-modal focus:outline-none">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-            <Dialog.Title className="text-dialog-title font-bold tracking-tighter text-ink">
-              Add an agent
-            </Dialog.Title>
+          <form noValidate onSubmit={handleSubmit} className="flex flex-col gap-6">
+            <div className="flex items-center justify-between gap-3">
+              <Dialog.Title className="text-dialog-title font-bold tracking-tighter text-ink">
+                Add an agent
+              </Dialog.Title>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  aria-label="Close"
+                  className="flex size-touch shrink-0 items-center justify-center rounded-control text-dialog-title leading-none text-ink-secondary transition-quiet hover:bg-active hover:text-ink desktop:size-btn-sm"
+                >
+                  ×
+                </button>
+              </Dialog.Close>
+            </div>
             <Dialog.Description className="sr-only">
               Choose a computer, harness, name, folder, and permissions for the
               new agent.
@@ -163,14 +198,31 @@ export function AddAgentDialog() {
                 </span>
                 <input
                   type="text"
+                  required
                   value={draft.name}
-                  onChange={(event) =>
+                  aria-invalid={errors.name ? 'true' : undefined}
+                  aria-describedby={errors.name ? nameErrorId : undefined}
+                  onChange={(event) => {
                     appActions.updateAddAgentDraft({
                       name: event.target.value,
-                    })
-                  }
-                  className="h-input rounded-md border border-border bg-ground px-3 text-base text-ink transition-quiet focus:border-accent focus:outline-none"
+                    });
+                    if (errors.name) {
+                      setErrors((prev) => ({ ...prev, name: undefined }));
+                    }
+                  }}
+                  className={`h-input rounded-md border bg-ground px-3 text-base text-ink transition-quiet focus:border-accent focus:outline-none ${
+                    errors.name ? 'border-needs-you' : 'border-border'
+                  }`}
                 />
+                {errors.name ? (
+                  <span
+                    id={nameErrorId}
+                    role="alert"
+                    className="text-xs text-needs-you-ink"
+                  >
+                    {errors.name}
+                  </span>
+                ) : null}
               </label>
 
               <label className="flex flex-col gap-2">
@@ -179,14 +231,31 @@ export function AddAgentDialog() {
                 </span>
                 <input
                   type="text"
+                  required
                   value={draft.folder}
-                  onChange={(event) =>
+                  aria-invalid={errors.folder ? 'true' : undefined}
+                  aria-describedby={errors.folder ? folderErrorId : undefined}
+                  onChange={(event) => {
                     appActions.updateAddAgentDraft({
                       folder: event.target.value,
-                    })
-                  }
-                  className="h-input rounded-md border border-border bg-ground px-3 font-mono text-md text-ink transition-quiet focus:border-accent focus:outline-none"
+                    });
+                    if (errors.folder) {
+                      setErrors((prev) => ({ ...prev, folder: undefined }));
+                    }
+                  }}
+                  className={`h-input rounded-md border bg-ground px-3 font-mono text-md text-ink transition-quiet focus:border-accent focus:outline-none ${
+                    errors.folder ? 'border-needs-you' : 'border-border'
+                  }`}
                 />
+                {errors.folder ? (
+                  <span
+                    id={folderErrorId}
+                    role="alert"
+                    className="text-xs text-needs-you-ink"
+                  >
+                    {errors.folder}
+                  </span>
+                ) : null}
               </label>
             </div>
 
