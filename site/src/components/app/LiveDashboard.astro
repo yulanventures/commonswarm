@@ -140,6 +140,10 @@ import "../../styles/kylon-image-viewer.css";
               autocomplete="current-password"
               required
               data-signin-only
+              spellcheck="false"
+              autocapitalize="none"
+              autocorrect="off"
+              writingsuggestions="false"
             />
             <button
               class="dashboard__password-toggle"
@@ -1194,7 +1198,7 @@ import "../../styles/kylon-image-viewer.css";
     <form class="dashboard__password-form" data-password-form novalidate>
       <label for="dashboard-new-password">New password</label>
       <div class="dashboard__password-field">
-        <input id="dashboard-new-password" name="new-password" type="password" autocomplete="new-password" minlength="12" required data-password-new />
+        <input id="dashboard-new-password" name="new-password" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" autocorrect="off" writingsuggestions="false" minlength="12" required data-password-new />
         <button
           class="dashboard__password-toggle"
           type="button"
@@ -1306,7 +1310,7 @@ import "../../styles/kylon-image-viewer.css";
         <input id="add-account-email" name="email" type="email" autocomplete="username" inputmode="email" required />
         <label for="add-account-password">Password</label>
         <div class="dashboard__password-field">
-          <input id="add-account-password" name="password" type="password" autocomplete="current-password" />
+          <input id="add-account-password" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" autocorrect="off" writingsuggestions="false" />
           <button
             class="dashboard__password-toggle"
             type="button"
@@ -2094,6 +2098,7 @@ import "../../styles/kylon-image-viewer.css";
     let closePasswordDialog = (): void => { passwordGuard.reset(); };
     let resetSignInPasswordVisibility = (): void => {};
     let resetAddAccountPasswordVisibility = (): void => {};
+    let resetChangePasswordVisibility = (): void => {};
     let connectedApps: ConnectedApp[] = [];
     let connectedAppsGeneration = 0;
     let accountAgentsGeneration = 0;
@@ -22839,6 +22844,7 @@ import "../../styles/kylon-image-viewer.css";
       const fresh = one<HTMLInputElement>("[data-password-new]");
       const freshToggleBtn = one<HTMLButtonElement>('[data-password-toggle="dashboard-new-password"]');
       const newPasswordToggle = wirePasswordToggle(fresh, freshToggleBtn);
+      resetChangePasswordVisibility = newPasswordToggle.reset;
       const codeRow = one<HTMLElement>("[data-password-code-row]");
       const code = one<HTMLInputElement>("[data-password-code]");
       const save = one<HTMLButtonElement>("[data-password-save]");
@@ -23276,7 +23282,12 @@ import "../../styles/kylon-image-viewer.css";
     /* The draft write is debounced, and a debounced write must not be lost to the page ending.
      * These are the ways it ends — reload, close, navigation, and switching away on a phone —
      * and each one takes the pending write now instead of after the delay. */
-    window.addEventListener("pagehide", () => flushComposerDraft());
+    window.addEventListener("pagehide", () => {
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
+      if (typeof resetAddAccountPasswordVisibility === "function") resetAddAccountPasswordVisibility();
+      if (typeof resetChangePasswordVisibility === "function") resetChangePasswordVisibility();
+      flushComposerDraft();
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") flushComposerDraft();
     });
