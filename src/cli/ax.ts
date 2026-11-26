@@ -408,6 +408,13 @@ export function classifyCliError(
     lower.includes("too many positional arguments") ||
     lower.includes("must be given together")
   ) {
+    if (rawCode === "profile_command_invalid" && lower.includes("cswarm login")) {
+      return {
+        error: rawCode,
+        reason: "invalid_arguments",
+        next: ["cswarm login", `${commandLabel(ctx)} --help`],
+      };
+    }
     const helpCmd = ctx.verb ? `cswarm ${ctx.verb} --help` : "cswarm --help";
     return {
       error: rawCode ?? "invalid_arguments",

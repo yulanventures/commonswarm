@@ -61,7 +61,7 @@ test("channel lead refuses an agent credential, a profile, and a missing or doub
     const target = ["--url", fake.url, "--anon-key", "test-anon", "--workspace-id", WORKSPACE];
     for (const [args, sentence] of [
       [["channel", "lead", "design", "--workspace", "--agent-token-file", tokenPath], /--agent-token-file/],
-      [["channel", "lead", "design", "--none", "--profile", join(scratch, "profile.json")], /--profile is supported by/],
+      [["channel", "lead", "design", "--none", "--profile", join(scratch, "profile.json")], /only be set by a signed-in person/],
       [["channel", "lead", "design"], /needs the channel and one of an agent, --workspace or --none/],
       [["channel", "lead", "design", "--workspace", "--none"], /needs the channel and one of an agent, --workspace or --none/],
       [["channel", "lead", "design", "DesignLead", "--none"], /needs the channel and one of an agent, --workspace or --none/],
@@ -71,6 +71,62 @@ test("channel lead refuses an agent credential, a profile, and a missing or doub
       assert.notEqual(result.code, 0, args.join(" "));
       assert.match(result.stderr, sentence, `${args.join(" ")}: ${result.stderr}`);
     }
+    assert.equal(fake.requests(), 0, "nothing reached the server");
+  } finally { await fake.close(); }
+});
+
+test("channel lead --profile explains human-only requirement in plain text and --json without breaking other profile refusals", async () => {
+  const fake = await cloud();
+  try {
+    const profilePath = join(scratch, "profile.json");
+    const target = ["--url", fake.url, "--anon-key", "test-anon", "--workspace-id", WORKSPACE];
+
+    const plain = await cli(["channel", "lead", "design", "DesignLead", "--profile", profilePath, ...target]);
+    assert.notEqual(plain.code, 0);
+    assert.equal(plain.stdout, "");
+    assert.match(plain.stderr, /cswarm channel lead can only be set by a signed-in person \(not an agent --profile\)\./);
+    assert.match(plain.stderr, /Run cswarm login and retry without --profile\./);
+    assert.doesNotMatch(plain.stderr, /--profile is supported by/);
+
+    const json = await cli([
+      "channel", "lead", "design", "DesignLead", "--profile", profilePath, "--host-session-id", "sess-1", "--json", ...target,
+    ]);
+    assert.equal(json.code, 1);
+    assert.equal(json.stdout, "");
+    const envelope = JSON.parse(json.stderr) as {
+      ok: boolean;
+      error: string;
+      reason: string;
+      message: string;
+      next: string[];
+    };
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.error, "profile_command_invalid");
+    assert.equal(envelope.reason, "invalid_arguments");
+    assert.match(envelope.message, /cswarm channel lead can only be set by a signed-in person \(not an agent --profile\)\./);
+    assert.match(envelope.message, /Run cswarm login and retry without --profile\./);
+    assert.doesNotMatch(envelope.message, /--profile is supported by/);
+    assert.deepEqual(envelope.next, ["cswarm login", "cswarm channel lead --help"]);
+
+    const noLogin = await cli(["channel", "lead", "design", "DesignLead", ...target]);
+    assert.notEqual(noLogin.code, 0);
+    assert.match(noLogin.stderr, /cswarm login/i);
+
+    const otherRefusal = await cli(["status", "--profile", profilePath, "--json", ...target]);
+    assert.equal(otherRefusal.code, 1);
+    const otherEnvelope = JSON.parse(otherRefusal.stderr) as {
+      ok: boolean;
+      error: string;
+      reason: string;
+      message: string;
+      next: string[];
+    };
+    assert.equal(otherEnvelope.ok, false);
+    assert.equal(otherEnvelope.error, "profile_command_invalid");
+    assert.equal(otherEnvelope.reason, "invalid_arguments");
+    assert.match(otherEnvelope.message, /^--profile is supported by:/);
+    assert.deepEqual(otherEnvelope.next, ["cswarm status --help"]);
+
     assert.equal(fake.requests(), 0, "nothing reached the server");
   } finally { await fake.close(); }
 });

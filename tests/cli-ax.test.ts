@@ -182,6 +182,25 @@ test("classifyCliError maps every V1 failure class to a stable reason and safe r
   assert.equal(invalidArgs.reason, "invalid_arguments");
   assert.equal(invalidArgs.next[0], "cswarm whoami --help");
 
+  const channelLeadProfile = buildCliErrorEnvelope(
+    new AgentSetupError(
+      "profile_command_invalid",
+      "cswarm channel lead can only be set by a signed-in person (not an agent --profile). Run cswarm login and retry without --profile.",
+    ),
+    { verb: "channel", subcommand: "lead", profilePath: "/tmp/agent/profile.json" },
+  );
+  assert.equal(channelLeadProfile.error, "profile_command_invalid");
+  assert.equal(channelLeadProfile.reason, "invalid_arguments");
+  assert.deepEqual(channelLeadProfile.next, ["cswarm login", "cswarm channel lead --help"]);
+
+  const genericProfileRefusal = buildCliErrorEnvelope(
+    new AgentSetupError("profile_command_invalid", "--profile is supported by: whoami."),
+    { verb: "status", profilePath: "/tmp/agent/profile.json" },
+  );
+  assert.equal(genericProfileRefusal.error, "profile_command_invalid");
+  assert.equal(genericProfileRefusal.reason, "invalid_arguments");
+  assert.deepEqual(genericProfileRefusal.next, ["cswarm status --help"]);
+
   const onboarding = buildOnboardingErrorEnvelope(
     new InvalidCursorError(),
     "invalid_cursor",
