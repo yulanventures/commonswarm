@@ -2884,7 +2884,7 @@ import "../../styles/kylon-image-viewer.css";
       for (const section of all<HTMLElement>(".dashboard__root > [data-panel]")) {
         section.hidden = section.dataset.panel !== name;
       }
-      resetSignInPasswordVisibility();
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       app.dataset.state = name;
       syncListsChrome();
       syncVisibleShell();
@@ -3311,8 +3311,10 @@ import "../../styles/kylon-image-viewer.css";
       for (const part of all<HTMLElement>("[data-signin-only]")) part.hidden = entry === "create";
       const password = one<HTMLInputElement>("#dashboard-password");
       if (password) password.disabled = entry === "create";
-      signInPasswordToggle.reset();
-      if (signInPasswordToggleBtn) signInPasswordToggleBtn.disabled = entry === "create";
+      if (typeof signInPasswordToggle !== "undefined") signInPasswordToggle.reset();
+      if (typeof signInPasswordToggleBtn !== "undefined" && signInPasswordToggleBtn) {
+        signInPasswordToggleBtn.disabled = entry === "create";
+      }
       const emailLink = one<HTMLButtonElement>("[data-email-link]");
       if (emailLink) {
         emailLink.textContent = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()
@@ -3335,7 +3337,7 @@ import "../../styles/kylon-image-viewer.css";
     });
 
     const showAuthView = (name: "choices" | "email-sent"): void => {
-      signInPasswordToggle.reset();
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       for (const view of all<HTMLElement>("[data-auth-view]")) {
         view.hidden = view.dataset.authView !== name;
       }
@@ -16263,7 +16265,7 @@ import "../../styles/kylon-image-viewer.css";
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
-      resetSignInPasswordVisibility();
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       panelKeyMint = null;
       panelKnownAgents = [];
       disposeCleanup();
@@ -21619,7 +21621,7 @@ import "../../styles/kylon-image-viewer.css";
       try {
         await signInWithPassword(email.value.trim(), password.value);
         password.value = "";
-        resetSignInPasswordVisibility();
+        if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
       } catch (error) {
         authError(readableError(error));
         password.focus();
@@ -21876,8 +21878,8 @@ import "../../styles/kylon-image-viewer.css";
     };
     const dismissAllAccountDialogsAndSecrets = (): void => {
       retireAddAccountAttemptsSync();
-      resetSignInPasswordVisibility();
-      resetAddAccountPasswordVisibility();
+      if (typeof resetSignInPasswordVisibility === "function") resetSignInPasswordVisibility();
+      if (typeof resetAddAccountPasswordVisibility === "function") resetAddAccountPasswordVisibility();
       closePasswordDialog();
       closeWorkspaceSkillsDialog();
       if (activeImageViewerDialog) {
@@ -22199,7 +22201,7 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     const showAddAccountStep = (step: "entry" | "code"): void => {
-      resetAddAccountPasswordVisibility();
+      if (typeof resetAddAccountPasswordVisibility === "function") resetAddAccountPasswordVisibility();
       const entry = one<HTMLElement>("[data-add-account-entry]");
       const codeStep = one<HTMLFormElement>("[data-add-account-code-step]");
       if (entry) entry.hidden = step !== "entry";
