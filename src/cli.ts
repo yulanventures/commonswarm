@@ -950,11 +950,15 @@ export class Arguments {
   async expandAgentProfile(
     profileMode: "refuse" | "native" | "expand",
     hostSessionId: "keep" | "drop",
+    profileRefusedMessage?: string,
   ): Promise<void> {
     const path = this.optional("profile");
     if (path === undefined) return;
     if (profileMode === "refuse") {
-      throw new AgentSetupError("profile_command_invalid", `--profile is supported by: ${AGENT_PROFILE_COMMANDS.join(", ")}.`);
+      throw new AgentSetupError(
+        "profile_command_invalid",
+        profileRefusedMessage ?? `--profile is supported by: ${AGENT_PROFILE_COMMANDS.join(", ")}.`,
+      );
     }
     if (profileMode === "native") return;
     const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key"].filter(flag => this.has(flag));
@@ -11422,6 +11426,8 @@ async function runChannelUnarchive(args: Arguments): Promise<void> {
 
 /* A person's setting, like the workspace lead: no agent credential or profile flags. */
 export const RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "json", "workspace", "none"] as const;
+export const CHANNEL_LEAD_PROFILE_REFUSED_MESSAGE =
+  "cswarm channel lead can only be set by a signed-in person (not an agent --profile). Run cswarm login and retry without --profile.";
 
 /** `cswarm channel lead <channel> (<agent> | --workspace | --none)`: exactly one choice. */
 export function channelLeadChoice(args: Arguments): { mode: ChannelLeadMode; agent?: string } {
@@ -11909,6 +11915,7 @@ export type AgentCommandEntry = AgentCommandTool & {
   mcp: boolean;
   profile: AgentCommandProfileMode;
   hostSessionId: AgentCommandHostSessionPolicy;
+  profileRefusedMessage?: string;
   profileListOrder?: number;
   visible: boolean;
   bootstrap: boolean;
@@ -11948,6 +11955,7 @@ type AgentCommandCommonOptions = AgentCommandTool & {
   mcp?: boolean;
   profile: AgentCommandProfileMode;
   hostSessionId: AgentCommandHostSessionPolicy;
+  profileRefusedMessage?: string;
   profileListOrder?: number;
   visible: boolean;
   bootstrap?: boolean;
@@ -12913,7 +12921,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     update: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUpdate), description: "Change a channel's name or purpose.", mutates: true, flags: [...agentFlags, "name", "purpose", "clear-purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel update <name|channel-id> [--name <new-name>] [--purpose <text> | --clear-purpose] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
-    lead: commandEntry({ ...noTool("a person's channel setting; never a model tool"), handler: traced("runChannel", runChannelLead), description: "Choose who untagged posts from people in a channel wake.", mutates: true, flags: RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm channel lead <name|channel-id> (<agent> | --workspace | --none) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
+    lead: commandEntry({ ...noTool("a person's channel setting; never a model tool"), handler: traced("runChannel", runChannelLead), description: "Choose who untagged posts from people in a channel wake.", mutates: true, flags: RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, profileRefusedMessage: CHANNEL_LEAD_PROFILE_REFUSED_MESSAGE, visible: true, help: ["cswarm channel lead <name|channel-id> (<agent> | --workspace | --none) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     unarchive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUnarchive), description: "Bring an archived channel back.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel unarchive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     join: commandEntry({ ...noTool("local MCP exposes conversation_join"), handler: traced("runChannel", runChannelJoin), description: "Join a public channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel join <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     leave: commandEntry({ ...noTool("local MCP exposes conversation_leave"), handler: traced("runChannel", runChannelLeave), description: "Leave a public or private channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel leave <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
@@ -13357,7 +13365,7 @@ async function main(): Promise<void> {
   const entry = selectCommandEntry(root, args);
   const variant = selectCommandVariant(entry, args);
   selectedCommandContext = { entry, variant, args };
-  await args.expandAgentProfile(entry.profile, entry.hostSessionId);
+  await args.expandAgentProfile(entry.profile, entry.hostSessionId, entry.profileRefusedMessage);
   await variant.handler(args);
   if (!shouldSkipLocalWakeHealthNotice(verb, args)) {
     let seat: CheckLocalSeatWakeHealthOptions | null = currentResolvedAgentSeat();
